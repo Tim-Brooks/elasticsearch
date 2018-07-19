@@ -19,25 +19,26 @@
 
 package org.elasticsearch.nio;
 
-import java.io.IOException;
 import java.nio.channels.SocketChannel;
+import java.util.function.Function;
 
 public class ChannelBuilder {
+
+    private Function<SocketChannel, TransportLayer> transportLayerFunction;
+    private ReadWriteHandler readWriteHandler;
 
     public ChannelBuilder create(SocketChannel socketChannel) {
         NioSocketChannel nioSocketChannel = new NioSocketChannel(socketChannel);
         return this;
     }
 
-    private interface TransportLayer {
+    public ChannelBuilder setTransportLayer(Function<SocketChannel, TransportLayer> transportLayerFunction) {
+        this.transportLayerFunction = transportLayerFunction;
+        return this;
+    }
 
-        int read(SocketChannel socketChannel) throws IOException;
-
-        void flushChannel(SocketChannel socketChannel) throws IOException;
-
-        void initiateClose();
-
-        boolean isClosed();
-
+    public ChannelBuilder setHandler(ReadWriteHandler handler) {
+        this.readWriteHandler = readWriteHandler;
+        return this;
     }
 }
