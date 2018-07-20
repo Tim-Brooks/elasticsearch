@@ -54,6 +54,11 @@ public abstract class TransportLayer {
 
     public abstract boolean needsFlush();
 
+    public boolean readyForNewWrite() {
+        // TODO: should be abstract
+        return true;
+    }
+
     public abstract void flushChannel(SocketChannel socketChannel) throws IOException;
 
     public abstract void initiateClose();
