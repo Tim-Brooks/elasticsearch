@@ -60,6 +60,10 @@ public class FlushOperation {
             + internalIndex + ", delta=" + delta + "]";
     }
 
+    public int getBytesCount() {
+        return length;
+    }
+
     public ByteBuffer[] getBuffersToWrite() {
         final int index = Arrays.binarySearch(offsets, internalIndex);
         int offsetIndex = index < 0 ? (-(index + 1)) - 1 : index;

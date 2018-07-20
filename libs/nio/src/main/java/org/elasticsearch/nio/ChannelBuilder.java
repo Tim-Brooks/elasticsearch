@@ -21,15 +21,22 @@ package org.elasticsearch.nio;
 
 import java.nio.channels.SocketChannel;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 public class ChannelBuilder {
 
+    private final NioSelector selector;
+
+    private Predicate<NioSocketChannel> allowChannelPredicate = (c) -> true;
     private Function<SocketChannel, TransportLayer> transportLayerFunction;
     private ReadWriteHandler readWriteHandler;
 
-    public ChannelBuilder create(SocketChannel socketChannel) {
-        NioSocketChannel nioSocketChannel = new NioSocketChannel(socketChannel);
-        return this;
+    public ChannelBuilder(SocketChannel socketChannel, NioSelector selector) {
+        this.selector = selector;
+    }
+
+    public static ChannelBuilder create(SocketChannel socketChannel, NioSelector selector) {
+        return new ChannelBuilder(socketChannel, selector);
     }
 
     public ChannelBuilder setTransportLayer(Function<SocketChannel, TransportLayer> transportLayerFunction) {
@@ -40,5 +47,14 @@ public class ChannelBuilder {
     public ChannelBuilder setHandler(ReadWriteHandler handler) {
         this.readWriteHandler = readWriteHandler;
         return this;
+    }
+
+    public ChannelBuilder setAllowChannelPredicate(Predicate<NioSocketChannel> allowChannelPredicate) {
+        this.allowChannelPredicate = allowChannelPredicate;
+        return this;
+    }
+
+    public NewSocketChannelContext build() {
+        return new NewSocketChannelContext(null, selector, null, null, null, allowChannelPredicate);
     }
 }
