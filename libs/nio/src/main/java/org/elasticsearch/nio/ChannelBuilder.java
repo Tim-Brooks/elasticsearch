@@ -55,6 +55,6 @@ public class ChannelBuilder {
     }
 
     public NewSocketChannelContext build() {
-        return new NewSocketChannelContext(null, selector, null, null, null, allowChannelPredicate);
+        return new NewSocketChannelContext(null, selector, null, null, null, null, allowChannelPredicate);
     }
 }
