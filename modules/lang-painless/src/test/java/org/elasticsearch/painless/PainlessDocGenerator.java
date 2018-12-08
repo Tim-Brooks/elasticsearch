@@ -20,8 +20,8 @@
 package org.elasticsearch.painless;
 
 import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.LogManager;
 import org.elasticsearch.common.io.PathUtils;
-import org.elasticsearch.common.logging.ESLoggerFactory;
 import org.elasticsearch.core.internal.io.IOUtils;
 import org.elasticsearch.painless.lookup.PainlessClass;
 import org.elasticsearch.painless.lookup.PainlessConstructor;
@@ -45,9 +45,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import static java.util.Comparator.comparing;
-import static java.util.stream.Collectors.toList;
 
 /**
  * Generates an API reference from the method and type whitelists in {@link PainlessLookup}.
@@ -55,7 +55,7 @@ import static java.util.stream.Collectors.toList;
 public class PainlessDocGenerator {
 
     private static final PainlessLookup PAINLESS_LOOKUP = PainlessLookupBuilder.buildFromWhitelists(Whitelist.BASE_WHITELISTS);
-    private static final Logger logger = ESLoggerFactory.getLogger(PainlessDocGenerator.class);
+    private static final Logger logger = LogManager.getLogger(PainlessDocGenerator.class);
     private static final Comparator<PainlessField> FIELD_NAME = comparing(f -> f.javaField.getName());
     private static final Comparator<PainlessMethod> METHOD_NAME = comparing(m -> m.javaMethod.getName());
     private static final Comparator<PainlessMethod> METHOD_NUMBER_OF_PARAMS = comparing(m -> m.typeParameters.size());
@@ -74,9 +74,10 @@ public class PainlessDocGenerator {
             Files.newOutputStream(indexPath, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE),
             false, StandardCharsets.UTF_8.name())) {
             emitGeneratedWarning(indexStream);
-            List<Class<?>> classes = PAINLESS_LOOKUP.getStructs().stream().sorted(comparing(Class::getCanonicalName)).collect(toList());
+            List<Class<?>> classes = PAINLESS_LOOKUP.getClasses().stream().sorted(
+                    Comparator.comparing(Class::getCanonicalName)).collect(Collectors.toList());
             for (Class<?> clazz : classes) {
-                PainlessClass struct = PAINLESS_LOOKUP.getPainlessStructFromJavaClass(clazz);
+                PainlessClass struct = PAINLESS_LOOKUP.lookupPainlessClass(clazz);
                 String canonicalClassName = PainlessLookupUtility.typeToCanonicalTypeName(clazz);
 
                 if (clazz.isPrimitive()) {
@@ -433,7 +434,7 @@ public class PainlessDocGenerator {
         if (classPackage.startsWith("org.apache.lucene")) {
             return "lucene-core";
         }
-        throw new IllegalArgumentException("Unrecognized packge: " + classPackage);
+        throw new IllegalArgumentException("Unrecognized package: " + classPackage);
     }
 
     private static void emitGeneratedWarning(PrintStream stream) {
