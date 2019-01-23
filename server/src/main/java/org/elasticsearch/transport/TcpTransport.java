@@ -289,15 +289,15 @@ public abstract class TcpTransport extends AbstractLifecycleComponent implements
         closeLock.readLock().lock(); // ensure we don't open connections while we are closing
         try {
             ensureOpen();
-            List<TcpChannel> pendingChannels = initiateConnection(node, finalProfile, listener);
+            List<TcpChannel> pendingChannels = initiateChannels(node, finalProfile, listener, false);
             return () -> CloseableChannel.closeChannels(pendingChannels, false);
         } finally {
             closeLock.readLock().unlock();
         }
     }
 
-    private List<TcpChannel> initiateConnection(DiscoveryNode node, ConnectionProfile connectionProfile,
-                                                ActionListener<Transport.Connection> listener) {
+    protected List<TcpChannel> initiateChannels(DiscoveryNode node, ConnectionProfile connectionProfile,
+                                                ActionListener<Transport.Connection> listener, boolean isRetry) {
         int numConnections = connectionProfile.getNumConnections();
         assert numConnections > 0 : "A connection profile must be configured with at least one connection";
 
@@ -1234,6 +1234,64 @@ public abstract class TcpTransport extends AbstractLifecycleComponent implements
     @Override
     public final RequestHandlerRegistry<? extends TransportRequest> getRequestHandler(String action) {
         return requestHandlers.get(action);
+    }
+
+    private final class RetryListener implements ActionListener<Version> {
+
+        private final AtomicBoolean hasRetried = new AtomicBoolean(false);
+        private final AtomicReference<List<TcpChannel>> pendingChannels;
+        private final DiscoveryNode node;
+        private final ConnectionProfile connectionProfile;
+        private final ActionListener<Connection> listener;
+
+        private RetryListener(DiscoveryNode node, ConnectionProfile connectionProfile, List<TcpChannel> pendingChannels,
+                              ActionListener<Transport.Connection> listener) {
+            this.pendingChannels = new AtomicReference<>(pendingChannels);
+            this.node = node;
+            this.connectionProfile = connectionProfile;
+            this.listener = listener;
+        }
+
+        @Override
+        public void onResponse(Version version) {
+            List<TcpChannel> connections = pendingChannels.getAndSet(null);
+            if (connections != null) {
+                NodeChannels nodeChannels = new NodeChannels(node, connections, connectionProfile, version);
+                long relativeMillisTime = threadPool.relativeTimeInMillis();
+                nodeChannels.channels.forEach(ch -> {
+                    // Mark the channel init time
+                    ch.getChannelStats().markAccessed(relativeMillisTime);
+                    ch.addCloseListener(ActionListener.wrap(nodeChannels::close));
+                });
+                keepAlive.registerNodeConnection(nodeChannels.channels, connectionProfile);
+                listener.onResponse(nodeChannels);
+            }
+        }
+
+        @Override
+        public void onFailure(Exception e) {
+            if (hasRetried.compareAndSet(false, true)) {
+
+            } else {
+
+            }
+        }
+
+        private void cancel() {
+            replaceChannels(null);
+        }
+
+        private void replaceChannels(List<TcpChannel> newChannels) {
+            for (;;) {
+                List<TcpChannel> channelsToClose = pendingChannels.get();
+                if (channelsToClose == null) {
+                    break;
+                } else if (this.pendingChannels.compareAndSet(channelsToClose, newChannels)) {
+                    CloseableChannel.closeChannels(channelsToClose, false);
+                    break;
+                }
+            }
+        }
     }
 
     private final class ChannelsConnectedListener implements ActionListener<Void> {
