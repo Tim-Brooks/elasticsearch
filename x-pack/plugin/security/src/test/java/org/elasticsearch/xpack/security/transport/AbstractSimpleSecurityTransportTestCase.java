@@ -354,9 +354,21 @@ public abstract class AbstractSimpleSecurityTransportTestCase extends AbstractSi
         assertThat(sslEngine.getNeedClientAuth(), is(true));
         assertThat(sslEngine.getWantClientAuth(), is(false));
 
-        // test no client authentication
-        String value = randomFrom(SSLClientAuth.NONE.name(), SSLClientAuth.NONE.name().toLowerCase(Locale.ROOT));
+        // test required client authentication
+        String value = randomFrom(SSLClientAuth.REQUIRED.name(), SSLClientAuth.REQUIRED.name().toLowerCase(Locale.ROOT));
         Settings settings = Settings.builder().put("xpack.security.transport.ssl.client_authentication", value).build();
+        try (MockTransportService service = buildService("TS_REQUIRED_CLIENT_AUTH", Version.CURRENT, settings)) {
+            TcpTransport originalTransport = (TcpTransport) service.getOriginalTransport();
+            try (Transport.Connection connection2 = serviceA.openConnection(service.getLocalNode(), TestProfiles.LIGHT_PROFILE)) {
+                sslEngine = getEngineFromAcceptedChannel(originalTransport, connection2);
+                assertThat(sslEngine.getNeedClientAuth(), is(true));
+                assertThat(sslEngine.getWantClientAuth(), is(false));
+            }
+        }
+
+        // test no client authentication
+        value = randomFrom(SSLClientAuth.NONE.name(), SSLClientAuth.NONE.name().toLowerCase(Locale.ROOT));
+        settings = Settings.builder().put("xpack.security.transport.ssl.client_authentication", value).build();
         try (MockTransportService service = buildService("TS_NO_CLIENT_AUTH", Version.CURRENT, settings)) {
             TcpTransport originalTransport = (TcpTransport) service.getOriginalTransport();
             try (Transport.Connection connection2 = serviceA.openConnection(service.getLocalNode(), TestProfiles.LIGHT_PROFILE)) {
