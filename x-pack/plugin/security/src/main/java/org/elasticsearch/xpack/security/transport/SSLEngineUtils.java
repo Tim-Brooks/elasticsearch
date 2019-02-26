@@ -38,7 +38,10 @@ public class SSLEngineUtils {
 
     public static void extractClientCertificates(Logger logger, ThreadContext threadContext, TcpChannel tcpChannel) {
         SSLEngine sslEngine = getSSLEngine(tcpChannel);
-        extract(logger, threadContext, sslEngine, tcpChannel);
+        // It is possible that this is a plaintext channel if dual stack tls is enabled.
+        if (sslEngine != null) {
+            extract(logger, threadContext, sslEngine, tcpChannel);
+        }
     }
 
     public static SSLEngine getSSLEngine(HttpChannel httpChannel) {
@@ -62,7 +65,7 @@ public class SSLEngineUtils {
             SslHandler handler = nettyChannel.pipeline().get(SslHandler.class);
             if (handler == null) {
                 if (nettyChannel.isOpen()) {
-                    assert false : "Must have SslHandler";
+                    return null;
                 } else {
                     throw new ChannelException("Channel is closed.");
                 }
@@ -70,8 +73,11 @@ public class SSLEngineUtils {
             return handler.engine();
         } else if (tcpChannel instanceof NioTcpChannel) {
             SocketChannelContext context = ((NioTcpChannel) tcpChannel).getContext();
-            assert context instanceof SSLChannelContext : "Must be SSLChannelContext.class, found:  " + context.getClass();
-            return ((SSLChannelContext) context).getSSLEngine();
+            if (context instanceof SSLChannelContext) {
+                return ((SSLChannelContext) context).getSSLEngine();
+            } else {
+                return null;
+            }
         } else {
             throw new AssertionError("Unknown channel class type: " + tcpChannel.getClass());
         }
