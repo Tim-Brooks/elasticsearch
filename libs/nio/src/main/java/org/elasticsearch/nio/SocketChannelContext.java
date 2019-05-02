@@ -190,6 +190,7 @@ public abstract class SocketChannelContext extends ChannelContext<SocketChannel>
             isClosing.set(true);
 
             // Poll for new flush operations to close
+            // TODO: Probably remove and have handlers charged with closing their operations
             pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
             FlushOperation flushOperation;
             while ((flushOperation = pendingFlushes.pollFirst()) != null) {

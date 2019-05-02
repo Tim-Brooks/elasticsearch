@@ -31,7 +31,7 @@ public interface ReadWriteHandler {
     /**
      * This method is called when the channel is registered with its selector.
      */
-    void channelRegistered();
+    void channelRegistered() throws IOException;
 
     /**
      * This method is called when a message is queued with a channel. It can be called from any thread.
@@ -60,7 +60,11 @@ public interface ReadWriteHandler {
      *
      * @return flush operations
      */
-    List<FlushOperation> pollFlushOperations();
+    List<FlushOperation> pollFlushOperations() throws IOException;
+
+    default boolean readyForFlush() {
+        return false;
+    }
 
     /**
      * This method handles bytes that have been read from the network. It should return the number of bytes
@@ -71,6 +75,14 @@ public interface ReadWriteHandler {
      * @throws IOException if an exception occurs
      */
     int consumeReads(InboundChannelBuffer channelBuffer) throws IOException;
+
+    default void initiateProtocolClose() {
+
+    }
+
+    default boolean isProtocolClosed() {
+        return true;
+    }
 
     void close() throws IOException;
 }
