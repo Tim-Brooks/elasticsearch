@@ -135,7 +135,8 @@ public class SSLDriver implements AutoCloseable {
     }
 
     public boolean needsNonApplicationWrite() {
-        return currentMode.needsNonApplicationWrite();
+//        return currentMode.needsNonApplicationWrite();
+        return false;
     }
 
     public int write(FlushOperation applicationBytes) throws SSLException {
@@ -163,7 +164,7 @@ public class SSLDriver implements AutoCloseable {
     public void close() throws SSLException {
         outboundBuffer.close();
         ArrayList<SSLException> closingExceptions = new ArrayList<>(2);
-        closingInternal();
+        closingInternal(false);
         CloseMode closeMode = (CloseMode) this.currentMode;
         if (closeMode.needToSendClose) {
             closingExceptions.add(new SSLException("Closed engine without completely sending the close alert message."));
@@ -236,6 +237,7 @@ public class SSLDriver implements AutoCloseable {
             applicationBytes.incrementIndex(result.bytesConsumed());
             switch (result.getStatus()) {
                 case OK:
+                case CLOSED:
                     return result;
                 case BUFFER_UNDERFLOW:
                     throw new IllegalStateException("Should not receive BUFFER_UNDERFLOW on WRAP");
@@ -244,9 +246,6 @@ public class SSLDriver implements AutoCloseable {
                     // There is not enough space in the network buffer for an entire SSL packet. We will
                     // allocate a buffer with the correct packet size the next time through the loop.
                     break;
-                case CLOSED:
-                    assert result.bytesProduced() > 0 : "WRAP during close processing should produce close message.";
-                    return result;
                 default:
                     throw new IllegalStateException("Unexpected WRAP result: " + result.getStatus());
             }
@@ -254,9 +253,19 @@ public class SSLDriver implements AutoCloseable {
     }
 
     private void closingInternal() {
+        closingInternal(true);
+    }
+
+    private void closingInternal(boolean doWrite) {
         // This check prevents us from attempting to send close_notify twice
         if (currentMode.isClose() == false) {
             currentMode = new CloseMode(currentMode.isHandshake());
+            if (doWrite) {
+                try {
+                    currentMode.write(EMPTY_FLUSH_OPERATION);
+                } catch (SSLException e) {
+                }
+            }
         }
     }
 
@@ -290,8 +299,6 @@ public class SSLDriver implements AutoCloseable {
 
         int write(FlushOperation applicationBytes) throws SSLException;
 
-        boolean needsNonApplicationWrite();
-
         boolean isHandshake();
 
         boolean isApplication();
@@ -312,7 +319,7 @@ public class SSLDriver implements AutoCloseable {
                 try {
                     handshake();
                 } catch (SSLException e) {
-                    closingInternal();
+                    closingInternal(false);
                     throw e;
                 }
             }
@@ -371,13 +378,6 @@ public class SSLDriver implements AutoCloseable {
                 throw e;
             }
             return 0;
-        }
-
-        @Override
-        public boolean needsNonApplicationWrite() {
-            return handshakeStatus == SSLEngineResult.HandshakeStatus.NEED_WRAP
-                || handshakeStatus == SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING
-                || handshakeStatus == SSLEngineResult.HandshakeStatus.FINISHED;
         }
 
         @Override
@@ -466,11 +466,6 @@ public class SSLDriver implements AutoCloseable {
         }
 
         @Override
-        public boolean needsNonApplicationWrite() {
-            return false;
-        }
-
-        @Override
         public boolean isHandshake() {
             return false;
         }
@@ -538,7 +533,13 @@ public class SSLDriver implements AutoCloseable {
         public int write(FlushOperation applicationBytes) throws SSLException {
             int bytesProduced = 0;
             if (engine.isOutboundDone() == false) {
-                bytesProduced += wrap(outboundBuffer).bytesProduced();
+                boolean continueWrap = true;
+                while (continueWrap) {
+                    SSLEngineResult result = wrap(outboundBuffer);
+                    bytesProduced += result.bytesProduced();
+                    continueWrap = result.bytesProduced() > 0 && engine.isOutboundDone() == false;
+                }
+                // TODO: Move to a world where outbound is always produced
                 if (engine.isOutboundDone()) {
                     needToSendClose = false;
                     // Close inbound if it is still open and we have decided not to wait for response.
@@ -550,11 +551,6 @@ public class SSLDriver implements AutoCloseable {
                 needToSendClose = false;
             }
             return bytesProduced;
-        }
-
-        @Override
-        public boolean needsNonApplicationWrite() {
-            return needToSendClose;
         }
 
         @Override

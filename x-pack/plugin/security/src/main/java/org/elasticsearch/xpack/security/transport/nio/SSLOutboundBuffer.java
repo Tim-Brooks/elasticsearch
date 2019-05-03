@@ -30,6 +30,8 @@ public class SSLOutboundBuffer implements AutoCloseable {
         if (encryptedBytesProduced != 0) {
             currentPage.byteBuffer().limit(encryptedBytesProduced);
             pages.addLast(currentPage);
+        } else if (currentPage != null) {
+            currentPage.close();
         }
         currentPage = null;
     }
@@ -71,6 +73,7 @@ public class SSLOutboundBuffer implements AutoCloseable {
 
     @Override
     public void close() {
+        IOUtils.closeWhileHandlingException(currentPage);
         IOUtils.closeWhileHandlingException(pages);
     }
 }
