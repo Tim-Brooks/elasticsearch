@@ -76,7 +76,7 @@ public interface ReadWriteHandler {
      */
     int consumeReads(InboundChannelBuffer channelBuffer) throws IOException;
 
-    default void initiateProtocolClose() {
+    default void initiateProtocolClose() throws IOException {
 
     }
 

@@ -116,14 +116,10 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
     }
 
     @Override
-    public void initiateProtocolClose() {
+    public void initiateProtocolClose() throws IOException {
         delegate.initiateProtocolClose();
         if (delegate.isProtocolClosed()) {
-            try {
-                sslDriver.initiateClose();
-            } catch (IOException e) {
-                // TODO: Handle
-            }
+            sslDriver.initiateClose();
         } else {
             needsToInitiateClose = true;
         }
