@@ -198,13 +198,13 @@ public class SocketChannelContextTests extends ESTestCase {
         assertSame(writeOperation, writeOp);
     }
 
-    public void testWriteIsQueuedInChannel() {
+    public void testWriteIsQueuedInChannel() throws IOException {
         assertFalse(context.readyForFlush());
 
         ByteBuffer[] buffer = {ByteBuffer.allocate(10)};
         FlushReadyWrite writeOperation = new FlushReadyWrite(context, buffer, listener);
         when(readWriteHandler.writeToBytes(writeOperation)).thenReturn(Collections.singletonList(writeOperation));
-        context.queueWriteOperation(writeOperation);
+        context.writeToChannel(writeOperation);
 
         verify(readWriteHandler).writeToBytes(writeOperation);
         assertTrue(context.readyForFlush());
@@ -231,7 +231,7 @@ public class SocketChannelContextTests extends ESTestCase {
             BiConsumer<Void, Exception> listener2 = mock(BiConsumer.class);
             when(readWriteHandler.writeToBytes(writeOperation)).thenReturn(Arrays.asList(new FlushOperation(buffer, listener),
                 new FlushOperation(buffer, listener2)));
-            context.queueWriteOperation(writeOperation);
+            context.writeToChannel(writeOperation);
 
             assertTrue(context.readyForFlush());
 

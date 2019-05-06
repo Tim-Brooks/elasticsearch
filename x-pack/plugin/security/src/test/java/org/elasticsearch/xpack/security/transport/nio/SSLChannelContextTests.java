@@ -21,7 +21,6 @@ import org.junit.Before;
 import org.mockito.ArgumentCaptor;
 import org.mockito.stubbing.Answer;
 
-import javax.net.ssl.SSLException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.Selector;
@@ -186,16 +185,16 @@ public class SSLChannelContextTests extends ESTestCase {
         }
     }
 
-    public void testQueuedWritesAreIgnoredWhenNotReadyForAppWrites() {
+    public void testQueuedWritesAreIgnoredWhenNotReadyForAppWrites() throws IOException {
         when(sslDriver.readyForApplicationData()).thenReturn(false);
 
-        context.queueWriteOperation(mock(FlushReadyWrite.class));
+        context.writeToChannel(mock(FlushReadyWrite.class));
 
         assertFalse(context.readyForFlush());
     }
 
     public void testPendingEncryptedFlushMeansWriteInterested() throws Exception {
-        context.queueWriteOperation(mock(FlushReadyWrite.class));
+        context.writeToChannel(mock(FlushReadyWrite.class));
         when(sslDriver.readyForApplicationData()).thenReturn(true);
         doAnswer(getWriteAnswer(1, false)).when(sslDriver).write(any(FlushOperation.class));
 
@@ -205,8 +204,8 @@ public class SSLChannelContextTests extends ESTestCase {
     }
 
     public void testFirstFlushMustFinishForWriteToContinue() throws Exception {
-        context.queueWriteOperation(mock(FlushReadyWrite.class));
-        context.queueWriteOperation(mock(FlushReadyWrite.class));
+        context.writeToChannel(mock(FlushReadyWrite.class));
+        context.writeToChannel(mock(FlushReadyWrite.class));
         when(sslDriver.readyForApplicationData()).thenReturn(true);
         doAnswer(getWriteAnswer(1, false)).when(sslDriver).write(any(FlushOperation.class));
 
@@ -223,7 +222,7 @@ public class SSLChannelContextTests extends ESTestCase {
     public void testQueuedWriteIsFlushedInFlushCall() throws Exception {
         ByteBuffer[] buffers = {ByteBuffer.allocate(10)};
         FlushReadyWrite flushOperation = new FlushReadyWrite(context, buffers, listener);
-        context.queueWriteOperation(flushOperation);
+        context.writeToChannel(flushOperation);
 
         when(sslDriver.readyForApplicationData()).thenReturn(true);
         doAnswer(getWriteAnswer(10, true)).when(sslDriver).write(eq(flushOperation));
@@ -239,7 +238,7 @@ public class SSLChannelContextTests extends ESTestCase {
     public void testPartialFlush() throws IOException {
         ByteBuffer[] buffers = {ByteBuffer.allocate(5)};
         FlushReadyWrite flushOperation = new FlushReadyWrite(context, buffers, listener);
-        context.queueWriteOperation(flushOperation);
+        context.writeToChannel(flushOperation);
 
         when(sslDriver.readyForApplicationData()).thenReturn(true);
         doAnswer(getWriteAnswer(5, true)).when(sslDriver).write(eq(flushOperation));
@@ -258,8 +257,8 @@ public class SSLChannelContextTests extends ESTestCase {
         ByteBuffer[] buffers2 = {ByteBuffer.allocate(5)};
         FlushReadyWrite flushOperation1 = new FlushReadyWrite(context, buffers1, listener);
         FlushReadyWrite flushOperation2 = new FlushReadyWrite(context, buffers2, listener2);
-        context.queueWriteOperation(flushOperation1);
-        context.queueWriteOperation(flushOperation2);
+        context.writeToChannel(flushOperation1);
+        context.writeToChannel(flushOperation2);
 
         when(sslDriver.readyForApplicationData()).thenReturn(true);
         doAnswer(getWriteAnswer(5, true)).when(sslDriver).write(any(FlushOperation.class));
@@ -275,7 +274,7 @@ public class SSLChannelContextTests extends ESTestCase {
     public void testWhenIOExceptionThrownListenerIsCalled() throws IOException {
         ByteBuffer[] buffers = {ByteBuffer.allocate(5)};
         FlushReadyWrite flushOperation = new FlushReadyWrite(context, buffers, listener);
-        context.queueWriteOperation(flushOperation);
+        context.writeToChannel(flushOperation);
 
         IOException exception = new IOException();
         when(sslDriver.readyForApplicationData()).thenReturn(true);
@@ -288,7 +287,7 @@ public class SSLChannelContextTests extends ESTestCase {
     }
 
     public void testWriteIOExceptionMeansChannelReadyToClose() throws Exception {
-        context.queueWriteOperation(mock(FlushReadyWrite.class));
+        context.writeToChannel(mock(FlushReadyWrite.class));
         when(sslDriver.readyForApplicationData()).thenReturn(true);
         doAnswer(getWriteAnswer(1, false)).when(sslDriver).write(any(FlushOperation.class));
 
@@ -307,7 +306,7 @@ public class SSLChannelContextTests extends ESTestCase {
         assertTrue(context.selectorShouldClose());
     }
 
-    public void testCloseTimeout() {
+    public void testCloseTimeout() throws IOException {
         context.closeChannel();
 
         ArgumentCaptor<WriteOperation> captor = ArgumentCaptor.forClass(WriteOperation.class);
@@ -316,7 +315,7 @@ public class SSLChannelContextTests extends ESTestCase {
         ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
         Runnable cancellable = mock(Runnable.class);
         when(nioTimer.scheduleAtRelativeTime(taskCaptor.capture(), anyLong())).thenReturn(cancellable);
-        context.queueWriteOperation(captor.getValue());
+        context.writeToChannel(captor.getValue());
         verify(nioTimer).scheduleAtRelativeTime(taskCaptor.capture(), anyLong());
         assertFalse(context.selectorShouldClose());
         taskCaptor.getValue().run();
@@ -337,7 +336,7 @@ public class SSLChannelContextTests extends ESTestCase {
             ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
             Runnable cancellable = mock(Runnable.class);
             when(nioTimer.scheduleAtRelativeTime(taskCaptor.capture(), anyLong())).thenReturn(cancellable);
-            context.queueWriteOperation(captor.getValue());
+            context.writeToChannel(captor.getValue());
 
             when(channel.isOpen()).thenReturn(true);
             context.closeFromSelector();
@@ -345,24 +344,24 @@ public class SSLChannelContextTests extends ESTestCase {
         }
     }
 
-    public void testInitiateCloseFromDifferentThreadSchedulesCloseNotify() throws SSLException {
+    public void testInitiateCloseFromDifferentThreadSchedulesCloseNotify() throws IOException {
         when(selector.isOnCurrentThread()).thenReturn(false, true);
         context.closeChannel();
 
         ArgumentCaptor<FlushReadyWrite> captor = ArgumentCaptor.forClass(FlushReadyWrite.class);
         verify(selector).queueWrite(captor.capture());
 
-        context.queueWriteOperation(captor.getValue());
+        context.writeToChannel(captor.getValue());
         verify(sslDriver).initiateClose();
     }
 
-    public void testInitiateCloseFromSameThreadSchedulesCloseNotify() throws SSLException {
+    public void testInitiateCloseFromSameThreadSchedulesCloseNotify() throws IOException {
         context.closeChannel();
 
         ArgumentCaptor<WriteOperation> captor = ArgumentCaptor.forClass(WriteOperation.class);
         verify(selector).writeToChannel(captor.capture());
 
-        context.queueWriteOperation(captor.getValue());
+        context.writeToChannel(captor.getValue());
         verify(sslDriver).initiateClose();
     }
 

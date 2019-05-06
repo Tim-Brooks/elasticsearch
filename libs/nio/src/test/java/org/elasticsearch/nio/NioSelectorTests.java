@@ -305,7 +305,7 @@ public class NioSelectorTests extends ESTestCase {
         when(channelContext.isOpen()).thenReturn(false);
         selector.preSelect();
 
-        verify(channelContext, times(0)).queueWriteOperation(writeOperation);
+        verify(channelContext, times(0)).writeToChannel(writeOperation);
         verify(listener).accept(isNull(Void.class), any(ClosedChannelException.class));
     }
 

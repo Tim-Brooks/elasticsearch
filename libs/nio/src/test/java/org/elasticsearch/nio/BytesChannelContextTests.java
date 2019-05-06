@@ -165,7 +165,7 @@ public class BytesChannelContextTests extends ESTestCase {
         ByteBuffer[] buffers = {ByteBuffer.allocate(10)};
 
         FlushReadyWrite flushOperation = mock(FlushReadyWrite.class);
-        context.queueWriteOperation(flushOperation);
+        context.writeToChannel(flushOperation);
 
         assertTrue(context.readyForFlush());
 
@@ -184,7 +184,7 @@ public class BytesChannelContextTests extends ESTestCase {
     public void testPartialFlush() throws IOException {
         assertFalse(context.readyForFlush());
         FlushReadyWrite flushOperation = mock(FlushReadyWrite.class);
-        context.queueWriteOperation(flushOperation);
+        context.writeToChannel(flushOperation);
         assertTrue(context.readyForFlush());
 
         when(flushOperation.isFullyFlushed()).thenReturn(false);
@@ -207,8 +207,8 @@ public class BytesChannelContextTests extends ESTestCase {
         when(flushOperation1.getListener()).thenReturn(listener);
         when(flushOperation2.getListener()).thenReturn(listener2);
 
-        context.queueWriteOperation(flushOperation1);
-        context.queueWriteOperation(flushOperation2);
+        context.writeToChannel(flushOperation1);
+        context.writeToChannel(flushOperation2);
 
         assertTrue(context.readyForFlush());
 
@@ -233,7 +233,7 @@ public class BytesChannelContextTests extends ESTestCase {
 
         ByteBuffer[] buffers = {ByteBuffer.allocate(10)};
         FlushReadyWrite flushOperation = mock(FlushReadyWrite.class);
-        context.queueWriteOperation(flushOperation);
+        context.writeToChannel(flushOperation);
 
         assertTrue(context.readyForFlush());
 
@@ -250,7 +250,7 @@ public class BytesChannelContextTests extends ESTestCase {
     public void testWriteIOExceptionMeansChannelReadyToClose() throws IOException {
         ByteBuffer[] buffers = {ByteBuffer.allocate(10)};
         FlushReadyWrite flushOperation = mock(FlushReadyWrite.class);
-        context.queueWriteOperation(flushOperation);
+        context.writeToChannel(flushOperation);
 
         IOException exception = new IOException();
         when(flushOperation.getBuffersToWrite(anyInt())).thenReturn(buffers);

@@ -56,13 +56,9 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
     }
 
     @Override
-    public List<FlushOperation> writeToBytes(WriteOperation writeOperation) {
+    public List<FlushOperation> writeToBytes(WriteOperation writeOperation) throws IOException {
         unencryptedBytes.addAll(delegate.writeToBytes(writeOperation));
-        try {
-            maybeInitiateClose();
-        } catch (SSLException e) {
-
-        }
+        maybeInitiateClose();
         return Collections.emptyList();
     }
 

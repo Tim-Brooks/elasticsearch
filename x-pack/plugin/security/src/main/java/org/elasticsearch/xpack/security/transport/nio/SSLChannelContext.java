@@ -67,7 +67,7 @@ public final class SSLChannelContext extends SocketChannelContext {
     }
 
     @Override
-    public void queueWriteOperation(WriteOperation writeOperation) {
+    public void writeToChannel(WriteOperation writeOperation) throws IOException {
         getSelector().assertOnSelectorThread();
         if (writeOperation instanceof CloseNotifyOperation) {
             try {
@@ -82,7 +82,7 @@ public final class SSLChannelContext extends SocketChannelContext {
                 handleException(e);
             }
         } else {
-            super.queueWriteOperation(writeOperation);
+            super.writeToChannel(writeOperation);
         }
     }
 

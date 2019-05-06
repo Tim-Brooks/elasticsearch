@@ -146,7 +146,7 @@ public class EventHandlerTests extends ESTestCase {
     public void testRegisterWithPendingWritesAddsOP_CONNECTAndOP_READAndOP_WRITEInterest() throws IOException {
         FlushReadyWrite flushReadyWrite = mock(FlushReadyWrite.class);
         when(readWriteHandler.writeToBytes(flushReadyWrite)).thenReturn(Collections.singletonList(flushReadyWrite));
-        context.queueWriteOperation(flushReadyWrite);
+        context.writeToChannel(flushReadyWrite);
         handler.handleRegistration(context);
         assertEquals(SelectionKey.OP_READ | SelectionKey.OP_CONNECT | SelectionKey.OP_WRITE, context.getSelectionKey().interestOps());
     }

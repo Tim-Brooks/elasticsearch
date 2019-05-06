@@ -52,7 +52,7 @@ public interface ReadWriteHandler {
      * @param writeOperation to be converted to bytes
      * @return the operations to flush the bytes to the channel
      */
-    List<FlushOperation> writeToBytes(WriteOperation writeOperation);
+    List<FlushOperation> writeToBytes(WriteOperation writeOperation) throws IOException;
 
     /**
      * Returns any flush operations that are ready to flush. This exists as a way to check if any flush
