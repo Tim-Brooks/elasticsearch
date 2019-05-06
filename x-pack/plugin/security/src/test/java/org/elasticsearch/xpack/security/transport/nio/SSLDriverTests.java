@@ -81,6 +81,7 @@ public class SSLDriverTests extends ESTestCase {
         SSLEngine serverEngine = sslContext.createSSLEngine();
         SSLEngine clientEngine = sslContext.createSSLEngine();
 
+        // Lock the protocol to 1.2 as 1.3 does not support renegotiation
         String[] serverProtocols = {"TLSv1.2"};
         serverEngine.setEnabledProtocols(serverProtocols);
         String[] clientProtocols = {"TLSv1.2"};
@@ -97,8 +98,7 @@ public class SSLDriverTests extends ESTestCase {
         applicationBuffer.release(4);
 
         clientDriver.renegotiate();
-        assertTrue(clientDriver.isHandshaking());
-        assertFalse(clientDriver.readyForApplicationWrites());
+        assertFalse(clientDriver.readyForApplicationData());
 
         // This tests that the client driver can still receive data based on the prior handshake
         ByteBuffer[] buffers2 = {ByteBuffer.wrap("pong".getBytes(StandardCharsets.UTF_8))};
@@ -154,6 +154,7 @@ public class SSLDriverTests extends ESTestCase {
         SSLContext sslContext = getSSLContext();
         SSLEngine clientEngine = sslContext.createSSLEngine();
         SSLEngine serverEngine = sslContext.createSSLEngine();
+
         String[] serverProtocols = {"TLSv1.2"};
         serverEngine.setEnabledProtocols(serverProtocols);
         String[] clientProtocols = {"TLSv1.1"};
@@ -208,10 +209,19 @@ public class SSLDriverTests extends ESTestCase {
 
         assertTrue(clientDriver.getOutboundBuffer().hasEncryptedBytesToFlush());
         sendHandshakeMessages(clientDriver, serverDriver);
-        sendHandshakeMessages(serverDriver, clientDriver);
 
-        assertTrue(clientDriver.isHandshaking());
-        assertTrue(serverDriver.isHandshaking());
+        // Sometimes send server messages before closing
+        if (randomBoolean()) {
+            sendHandshakeMessages(serverDriver, clientDriver);
+
+            if ("TLSv1.3".equals(clientDriver.getSSLEngine().getEnabledProtocols()[0])) {
+                assertTrue(clientDriver.readyForApplicationData());
+            } else {
+                assertFalse(clientDriver.readyForApplicationData());
+            }
+        }
+
+        assertFalse(serverDriver.readyForApplicationData());
 
         serverDriver.initiateClose();
         assertTrue(serverDriver.getOutboundBuffer().hasEncryptedBytesToFlush());
@@ -239,8 +249,8 @@ public class SSLDriverTests extends ESTestCase {
         sendHandshakeMessages(clientDriver, serverDriver);
         sendHandshakeMessages(serverDriver, clientDriver);
 
-        assertTrue(clientDriver.isHandshaking());
-        assertTrue(serverDriver.isHandshaking());
+        assertFalse(clientDriver.readyForApplicationData());
+        assertFalse(serverDriver.readyForApplicationData());
 
         serverDriver.initiateClose();
         assertTrue(serverDriver.getOutboundBuffer().hasEncryptedBytesToFlush());
@@ -272,11 +282,6 @@ public class SSLDriverTests extends ESTestCase {
             messages.stream().anyMatch(m -> sslException.getMessage().equals(m)));
         assertTrue(receiveDriver.isClosed());
         receiveDriver.close();
-//        if (receiveDriver.needsNonApplicationWrite() == false) {
-//        } else {
-//            assertFalse(receiveDriver.isClosed());
-//            expectThrows(SSLException.class, receiveDriver::close);
-//        }
     }
 
     private SSLContext getSSLContext() throws Exception {
@@ -287,14 +292,14 @@ public class SSLDriverTests extends ESTestCase {
             (certPath))));
         KeyManager km = CertParsingUtils.keyManager(CertParsingUtils.readCertificates(Collections.singletonList(getDataPath
             (certPath))), PemUtils.readPrivateKey(getDataPath(keyPath), "testclient"::toCharArray), "testclient".toCharArray());
-        sslContext = SSLContext.getInstance("TLSv1.2");
+        sslContext = SSLContext.getInstance(randomFrom("TLSv1.2", "TLSv1.3"));
         sslContext.init(new KeyManager[] { km }, new TrustManager[] { tm }, new SecureRandom());
         return sslContext;
     }
 
     private void normalClose(SSLDriver sendDriver, SSLDriver receiveDriver) throws IOException {
         sendDriver.initiateClose();
-        assertFalse(sendDriver.readyForApplicationWrites());
+        assertFalse(sendDriver.readyForApplicationData());
         assertTrue(sendDriver.getOutboundBuffer().hasEncryptedBytesToFlush());
         sendNonApplicationWrites(sendDriver);
         assertFalse(sendDriver.isClosed());
@@ -315,9 +320,7 @@ public class SSLDriverTests extends ESTestCase {
 
     private void sendNonApplicationWrites(SSLDriver sendDriver) {
         SSLOutboundBuffer outboundBuffer = sendDriver.getOutboundBuffer();
-        while (outboundBuffer.hasEncryptedBytesToFlush()) {
-            sendData(outboundBuffer.buildNetworkFlushOperation());
-        }
+        sendData(outboundBuffer.buildNetworkFlushOperation());
     }
 
     private void handshake(SSLDriver clientDriver, SSLDriver serverDriver) throws IOException {
@@ -333,34 +336,43 @@ public class SSLDriverTests extends ESTestCase {
         assertTrue(clientDriver.getOutboundBuffer().hasEncryptedBytesToFlush());
         sendHandshakeMessages(clientDriver, serverDriver);
 
-        assertTrue(clientDriver.isHandshaking());
-        assertTrue(serverDriver.isHandshaking());
+        assertFalse(clientDriver.readyForApplicationData());
+        assertFalse(serverDriver.readyForApplicationData());
 
         sendHandshakeMessages(serverDriver, clientDriver);
 
-        assertTrue(clientDriver.isHandshaking());
-        assertTrue(serverDriver.isHandshaking());
+        if ("TLSv1.3".equals(clientDriver.getSSLEngine().getEnabledProtocols()[0])) {
+            assertTrue(clientDriver.readyForApplicationData());
+            assertFalse(serverDriver.readyForApplicationData());
 
-        sendHandshakeMessages(clientDriver, serverDriver);
+            sendHandshakeMessages(clientDriver, serverDriver);
 
-        assertTrue(clientDriver.isHandshaking());
+            assertTrue(clientDriver.readyForApplicationData());
+            assertTrue(serverDriver.readyForApplicationData());
+        } else {
+            assertFalse(clientDriver.readyForApplicationData());
+            assertFalse(serverDriver.readyForApplicationData());
 
-        sendHandshakeMessages(serverDriver, clientDriver);
+            sendHandshakeMessages(clientDriver, serverDriver);
 
-        assertFalse(clientDriver.isHandshaking());
-        assertFalse(serverDriver.isHandshaking());
+            assertFalse(clientDriver.readyForApplicationData());
+            assertTrue(serverDriver.readyForApplicationData());
+
+            sendHandshakeMessages(serverDriver, clientDriver);
+
+            assertTrue(clientDriver.readyForApplicationData());
+            assertTrue(serverDriver.readyForApplicationData());
+        }
+
+
     }
 
     private void sendHandshakeMessages(SSLDriver sendDriver, SSLDriver receiveDriver) throws IOException {
         assertTrue(sendDriver.getOutboundBuffer().hasEncryptedBytesToFlush());
 
-        SSLOutboundBuffer outboundBuffer = sendDriver.getOutboundBuffer();
-
-        while (outboundBuffer.hasEncryptedBytesToFlush()) {
-            sendData(outboundBuffer.buildNetworkFlushOperation());
-            receiveDriver.read(networkReadBuffer, applicationBuffer);
-        }
-        if (receiveDriver.isHandshaking()) {
+        sendData(sendDriver.getOutboundBuffer().buildNetworkFlushOperation());
+        receiveDriver.read(networkReadBuffer, applicationBuffer);
+        if (receiveDriver.readyForApplicationData() == false) {
             assertTrue(receiveDriver.getOutboundBuffer().hasEncryptedBytesToFlush());
         }
     }

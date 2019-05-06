@@ -13,6 +13,7 @@ import org.elasticsearch.nio.ReadWriteHandler;
 import org.elasticsearch.nio.SocketChannelContext;
 import org.elasticsearch.nio.WriteOperation;
 
+import javax.net.ssl.SSLException;
 import java.io.IOException;
 import java.nio.channels.ClosedChannelException;
 import java.util.ArrayList;
@@ -57,7 +58,11 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
     @Override
     public List<FlushOperation> writeToBytes(WriteOperation writeOperation) {
         unencryptedBytes.addAll(delegate.writeToBytes(writeOperation));
-        maybeInitiateClose();
+        try {
+            maybeInitiateClose();
+        } catch (SSLException e) {
+
+        }
         return Collections.emptyList();
     }
 
@@ -118,13 +123,17 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
     public void initiateProtocolClose() {
         delegate.initiateProtocolClose();
         if (delegate.isProtocolClosed()) {
-            sslDriver.initiateClose();
+            try {
+                sslDriver.initiateClose();
+            } catch (IOException e) {
+                // TODO: Handle
+            }
         } else {
             needsToInitiateClose = true;
         }
     }
 
-    private void maybeInitiateClose() {
+    private void maybeInitiateClose() throws SSLException {
         if (needsToInitiateClose) {
             needsToInitiateClose = false;
             sslDriver.initiateClose();
