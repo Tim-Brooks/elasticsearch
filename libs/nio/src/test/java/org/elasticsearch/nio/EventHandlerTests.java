@@ -51,6 +51,8 @@ public class EventHandlerTests extends ESTestCase {
     private ChannelFactory<NioServerSocketChannel, NioSocketChannel> channelFactory;
     private RoundRobinSupplier<NioSelector> selectorSupplier;
 
+    // TODO: Add new write tests
+
     @Before
     @SuppressWarnings("unchecked")
     public void setUpHandler() throws IOException {
@@ -187,7 +189,7 @@ public class EventHandlerTests extends ESTestCase {
 
     public void testWriteExceptionCallsExceptionHandler() {
         IOException exception = new IOException();
-        handler.writeException(context, exception);
+        handler.flushException(context, exception);
         verify(channelExceptionHandler).accept(exception);
     }
 

@@ -135,20 +135,20 @@ public class TestEventHandler extends EventHandler {
     }
 
     @Override
-    protected void handleWrite(SocketChannelContext context) throws IOException {
+    protected void handleFlush(SocketChannelContext context) throws IOException {
         long startTime = relativeNanosSupplier.getAsLong();
         try {
-            super.handleWrite(context);
+            super.handleFlush(context);
         } finally {
             maybeLogElapsedTime(startTime);
         }
     }
 
     @Override
-    protected void writeException(SocketChannelContext context, Exception exception) {
+    protected void flushException(SocketChannelContext context, Exception exception) {
         long startTime = relativeNanosSupplier.getAsLong();
         try {
-            super.writeException(context, exception);
+            super.flushException(context, exception);
         } finally {
             maybeLogElapsedTime(startTime);
         }

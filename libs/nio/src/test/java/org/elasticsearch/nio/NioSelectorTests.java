@@ -26,7 +26,6 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.CancelledKeyException;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.ClosedSelectorException;
 import java.nio.channels.SelectionKey;
@@ -310,76 +309,47 @@ public class NioSelectorTests extends ESTestCase {
         verify(listener).accept(isNull(Void.class), any(ClosedChannelException.class));
     }
 
-    public void testQueueWriteSelectionKeyThrowsException() throws Exception {
-        SelectionKey selectionKey = mock(SelectionKey.class);
-
+    public void testQueueWriteException() throws Exception {
         WriteOperation writeOperation = new FlushReadyWrite(channelContext, buffers, listener);
-        CancelledKeyException cancelledKeyException = new CancelledKeyException();
         selector.queueWrite(writeOperation);
 
-        when(channelContext.getSelectionKey()).thenReturn(selectionKey);
-        when(selectionKey.interestOps(anyInt())).thenThrow(cancelledKeyException);
+        IOException exception = new IOException();
+        doThrow(exception).when(eventHandler).handleWrite(channelContext, writeOperation);
         selector.preSelect();
 
-        verify(channelContext, times(0)).queueWriteOperation(writeOperation);
-        verify(listener).accept(null, cancelledKeyException);
+        verify(eventHandler).writeException(channelContext, exception);
+        verify(eventHandler, times(0)).postHandling(channelContext);
     }
 
     public void testQueueWriteSuccessful() throws Exception {
         WriteOperation writeOperation = new FlushReadyWrite(channelContext, buffers, listener);
         selector.queueWrite(writeOperation);
 
-        assertTrue((selectionKey.interestOps() & SelectionKey.OP_WRITE) == 0);
-
         selector.preSelect();
 
-        verify(channelContext).queueWriteOperation(writeOperation);
-        assertTrue((selectionKey.interestOps() & SelectionKey.OP_WRITE) != 0);
+        verify(eventHandler).handleWrite(channelContext, writeOperation);
     }
 
     public void testQueueDirectlyInChannelBufferSuccessful() throws Exception {
         WriteOperation writeOperation = new FlushReadyWrite(channelContext, buffers, listener);
 
-        assertEquals(0, (selectionKey.interestOps() & SelectionKey.OP_WRITE));
-
         when(channelContext.readyForFlush()).thenReturn(true);
         selector.writeToChannel(writeOperation);
 
-        verify(channelContext).queueWriteOperation(writeOperation);
-        verify(eventHandler, times(0)).handleWrite(channelContext);
+        verify(eventHandler).handleWrite(channelContext, writeOperation);
+        verify(eventHandler, times(0)).handleFlush(channelContext);
         verify(eventHandler, times(0)).postHandling(channelContext);
-        assertTrue((selectionKey.interestOps() & SelectionKey.OP_WRITE) != 0);
     }
 
     public void testShouldFlushIfNoPendingFlushes() throws Exception {
         WriteOperation writeOperation = new FlushReadyWrite(channelContext, buffers, listener);
 
-        assertEquals(0, (selectionKey.interestOps() & SelectionKey.OP_WRITE));
-
-        when(channelContext.readyForFlush()).thenReturn(false);
+        when(channelContext.readyForFlush()).thenReturn(false, true);
         selector.writeToChannel(writeOperation);
 
-        verify(channelContext).queueWriteOperation(writeOperation);
-        verify(eventHandler).handleWrite(channelContext);
+        verify(eventHandler).handleWrite(channelContext, writeOperation);
+        verify(eventHandler).handleFlush(channelContext);
         verify(eventHandler).postHandling(channelContext);
-        assertTrue((selectionKey.interestOps() & SelectionKey.OP_WRITE) != 0);
-    }
-
-    public void testQueueDirectlyInChannelBufferSelectionKeyThrowsException() throws Exception {
-        SelectionKey selectionKey = mock(SelectionKey.class);
-
-        WriteOperation writeOperation = new FlushReadyWrite(channelContext, buffers, listener);
-        CancelledKeyException cancelledKeyException = new CancelledKeyException();
-
-        when(channelContext.getSelectionKey()).thenReturn(selectionKey);
-        when(channelContext.readyForFlush()).thenReturn(false);
-        when(selectionKey.interestOps(anyInt())).thenThrow(cancelledKeyException);
-        selector.writeToChannel(writeOperation);
-
-        verify(channelContext, times(0)).queueWriteOperation(writeOperation);
-        verify(eventHandler, times(0)).handleWrite(channelContext);
-        verify(eventHandler, times(0)).postHandling(channelContext);
-        verify(listener).accept(null, cancelledKeyException);
     }
 
     public void testConnectEvent() throws Exception {
@@ -408,13 +378,13 @@ public class NioSelectorTests extends ESTestCase {
 
         selectionKey.setReadyOps(SelectionKey.OP_WRITE | SelectionKey.OP_READ);
 
-        doThrow(ioException).when(eventHandler).handleWrite(channelContext);
+        doThrow(ioException).when(eventHandler).handleFlush(channelContext);
 
         when(channelContext.isConnectComplete()).thenReturn(false);
         selectionKey.attach(channelContext);
         selector.processKey(selectionKey);
 
-        verify(eventHandler, times(0)).handleWrite(channelContext);
+        verify(eventHandler, times(0)).handleFlush(channelContext);
         verify(eventHandler, times(0)).handleRead(channelContext);
     }
 
@@ -424,7 +394,7 @@ public class NioSelectorTests extends ESTestCase {
         selectionKey.attach(channelContext);
         selector.processKey(selectionKey);
 
-        verify(eventHandler).handleWrite(channelContext);
+        verify(eventHandler).handleFlush(channelContext);
     }
 
     public void testWriteEventWithException() throws Exception {
@@ -433,12 +403,12 @@ public class NioSelectorTests extends ESTestCase {
         selectionKey.attach(channelContext);
         selectionKey.setReadyOps(SelectionKey.OP_WRITE);
 
-        doThrow(ioException).when(eventHandler).handleWrite(channelContext);
+        doThrow(ioException).when(eventHandler).handleFlush(channelContext);
 
         selectionKey.attach(channelContext);
         selector.processKey(selectionKey);
 
-        verify(eventHandler).writeException(channelContext, ioException);
+        verify(eventHandler).flushException(channelContext, ioException);
     }
 
     public void testSuccessfulReadEvent() throws Exception {
@@ -469,7 +439,7 @@ public class NioSelectorTests extends ESTestCase {
         selectionKey.attach(channelContext);
         selector.processKey(selectionKey);
 
-        verify(eventHandler).handleWrite(channelContext);
+        verify(eventHandler).handleFlush(channelContext);
         verify(eventHandler).handleRead(channelContext);
         verify(eventHandler).postHandling(channelContext);
     }

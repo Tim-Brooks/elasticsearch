@@ -80,8 +80,8 @@ public class TestEventHandlerTests extends ESTestCase {
         tests.put("connectException", () -> eventHandler.connectException(socketChannelContext, exception));
         tests.put("handleRead", () -> eventHandler.handleRead(socketChannelContext));
         tests.put("readException", () -> eventHandler.readException(socketChannelContext, exception));
-        tests.put("handleWrite", () -> eventHandler.handleWrite(socketChannelContext));
-        tests.put("writeException", () -> eventHandler.writeException(socketChannelContext, exception));
+        tests.put("handleWrite", () -> eventHandler.handleFlush(socketChannelContext));
+        tests.put("writeException", () -> eventHandler.flushException(socketChannelContext, exception));
         tests.put("handleTask", () -> eventHandler.handleTask(mock(Runnable.class)));
         tests.put("taskException", () -> eventHandler.taskException(exception));
         tests.put("handleClose", () -> eventHandler.handleClose(socketChannelContext));

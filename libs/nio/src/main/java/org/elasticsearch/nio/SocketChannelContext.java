@@ -149,6 +149,12 @@ public abstract class SocketChannelContext extends ChannelContext<SocketChannel>
         pendingFlushes.addAll(readWriteHandler.writeToBytes(writeOperation));
     }
 
+    public void writeToChannel(WriteOperation writeOperation) throws IOException {
+        getSelector().assertOnSelectorThread();
+        readWriteHandler.writeToBytes(writeOperation);
+        pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
+    }
+
     public abstract int read() throws IOException;
 
     public abstract void flushChannel() throws IOException;

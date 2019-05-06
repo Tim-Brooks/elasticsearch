@@ -240,7 +240,7 @@ public class NioSelector implements Closeable {
             if (channelContext.isConnectComplete()) {
                 if (channelContext.selectorShouldClose() == false) {
                     if ((ops & SelectionKey.OP_WRITE) != 0) {
-                        handleWrite(channelContext);
+                        handleFlush(channelContext);
                     }
                     if (channelContext.selectorShouldClose() == false && (ops & SelectionKey.OP_READ) != 0) {
                         handleRead(channelContext);
@@ -331,18 +331,17 @@ public class NioSelector implements Closeable {
         SocketChannelContext context = writeOperation.getChannel();
         // If the channel does not currently have anything that is ready to flush, we should flush after
         // the write operation is queued.
-        boolean shouldFlushAfterQueuing = context.readyForFlush() == false;
+        boolean flushAfterWrite = context.readyForFlush() == false;
         try {
-            SelectionKeyUtils.setWriteInterested(context.getSelectionKey());
-            context.queueWriteOperation(writeOperation);
+            eventHandler.handleWrite(context, writeOperation);
         } catch (Exception e) {
-            shouldFlushAfterQueuing = false;
-            executeFailedListener(writeOperation.getListener(), e);
+            flushAfterWrite = false;
+            eventHandler.writeException(context, e);
         }
 
-        if (shouldFlushAfterQueuing) {
+        if (flushAfterWrite && context.readyForFlush()) {
             if (context.selectorShouldClose() == false) {
-                handleWrite(context);
+                handleFlush(context);
             }
             eventHandler.postHandling(context);
         }
@@ -384,11 +383,11 @@ public class NioSelector implements Closeable {
         selector.wakeup();
     }
 
-    private void handleWrite(SocketChannelContext context) {
+    private void handleFlush(SocketChannelContext context) {
         try {
-            eventHandler.handleWrite(context);
+            eventHandler.handleFlush(context);
         } catch (Exception e) {
-            eventHandler.writeException(context, e);
+            eventHandler.flushException(context, e);
         }
     }
 

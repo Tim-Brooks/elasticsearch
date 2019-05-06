@@ -130,13 +130,15 @@ public class EventHandler {
     }
 
     /**
-     * This method is called when a channel signals it is ready to receive writes. All of the write logic
-     * should occur in this call.
+     * This method is called when a message needs to be written to a channel. All of the write logic should
+     * occur in this call.
      *
      * @param context that can be written to
+     * @param writeOperation to be written
      */
-    protected void handleWrite(SocketChannelContext context) throws IOException {
-        context.flushChannel();
+    protected void handleWrite(SocketChannelContext context, WriteOperation writeOperation) throws IOException {
+        SelectionKeyUtils.setWriteInterested(context.getSelectionKey());
+        context.writeToChannel(writeOperation);
     }
 
     /**
@@ -146,6 +148,26 @@ public class EventHandler {
      * @param exception that occurred
      */
     protected void writeException(SocketChannelContext context, Exception exception) {
+        context.handleException(exception);
+    }
+
+    /**
+     * This method is called when a channel signals it is ready to flush. All of the flush logic
+     * should occur in this call.
+     *
+     * @param context that can be flushed
+     */
+    protected void handleFlush(SocketChannelContext context) throws IOException {
+        context.flushChannel();
+    }
+
+    /**
+     * This method is called when an attempt to flush a channel throws an exception.
+     *
+     * @param context that was being flushed
+     * @param exception that occurred
+     */
+    protected void flushException(SocketChannelContext context, Exception exception) {
         context.handleException(exception);
     }
 
