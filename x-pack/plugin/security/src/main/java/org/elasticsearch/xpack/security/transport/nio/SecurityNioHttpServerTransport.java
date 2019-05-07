@@ -87,15 +87,8 @@ public class SecurityNioHttpServerTransport extends NioHttpServerTransport {
 
         @Override
         public NioHttpChannel createChannel(NioSelector selector, SocketChannel channel) throws IOException {
-            NioHttpChannel httpChannel = new NioHttpChannel(channel);
-            HttpReadWriteHandler httpHandler = new HttpReadWriteHandler(httpChannel,SecurityNioHttpServerTransport.this,
-                handlingSettings, corsConfig, selector.getTaskScheduler(), threadPool::relativeTimeInNanos);
-            InboundChannelBuffer networkBuffer = new InboundChannelBuffer(pageAllocator);
-            Consumer<Exception> exceptionHandler = (e) -> securityExceptionHandler.accept(httpChannel, e);
-
-            SocketChannelContext context;
+            SSLEngine sslEngine;
             if (sslEnabled) {
-                SSLEngine sslEngine;
                 boolean hostnameVerificationEnabled = sslConfiguration.verificationMode().isHostnameVerificationEnabled();
                 if (hostnameVerificationEnabled) {
                     InetSocketAddress address = (InetSocketAddress) channel.getRemoteAddress();
@@ -104,6 +97,18 @@ public class SecurityNioHttpServerTransport extends NioHttpServerTransport {
                 } else {
                     sslEngine = sslService.createSSLEngine(sslConfiguration, null, -1);
                 }
+            } else {
+                sslEngine = null;
+            }
+
+            NioHttpChannel httpChannel = new SecurityNioHttpChannel(channel, sslEngine);
+            HttpReadWriteHandler httpHandler = new HttpReadWriteHandler(httpChannel,SecurityNioHttpServerTransport.this,
+                handlingSettings, corsConfig, selector.getTaskScheduler(), threadPool::relativeTimeInNanos);
+            InboundChannelBuffer networkBuffer = new InboundChannelBuffer(pageAllocator);
+            Consumer<Exception> exceptionHandler = (e) -> securityExceptionHandler.accept(httpChannel, e);
+
+            SocketChannelContext context;
+            if (sslEnabled) {
                 SSLDriver sslDriver = new SSLDriver(sslEngine, pageAllocator, false);
                 InboundChannelBuffer applicationBuffer = new InboundChannelBuffer(pageAllocator);
                 SSLReadWriteHandler sslHandler = new SSLReadWriteHandler(selector, sslDriver, httpHandler, applicationBuffer);

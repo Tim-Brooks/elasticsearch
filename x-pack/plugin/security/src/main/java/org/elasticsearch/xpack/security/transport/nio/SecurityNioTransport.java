@@ -19,6 +19,7 @@ import org.elasticsearch.nio.ChannelFactory;
 import org.elasticsearch.nio.InboundChannelBuffer;
 import org.elasticsearch.nio.NioSelector;
 import org.elasticsearch.nio.NioSocketChannel;
+import org.elasticsearch.nio.ReadWriteHandler;
 import org.elasticsearch.nio.ServerChannelContext;
 import org.elasticsearch.nio.SocketChannelContext;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -150,14 +151,20 @@ public class SecurityNioTransport extends NioTransport {
 
         @Override
         public NioTcpChannel createChannel(NioSelector selector, SocketChannel channel) throws IOException {
-            NioTcpChannel nioChannel = new NioTcpChannel(isClient == false, profileName, channel);
-            TcpReadWriteHandler readWriteHandler = new TcpReadWriteHandler(nioChannel, SecurityNioTransport.this);
+            SSLEngine sslEngine;
+            if (sslEnabled) {
+                 sslEngine = createSSLEngine(channel);
+            } else {
+                sslEngine = null;
+            }
+            NioTcpChannel nioChannel = new SecurityNioTcpChannel(isClient == false, profileName, channel, sslEngine);
+            ReadWriteHandler readWriteHandler = new TcpReadWriteHandler(nioChannel, SecurityNioTransport.this);
             InboundChannelBuffer networkBuffer = new InboundChannelBuffer(pageAllocator);
             Consumer<Exception> exceptionHandler = (e) -> onException(nioChannel, e);
 
             SocketChannelContext context;
             if (sslEnabled) {
-                SSLDriver sslDriver = new SSLDriver(createSSLEngine(channel), pageAllocator, isClient);
+                SSLDriver sslDriver = new SSLDriver(sslEngine, pageAllocator, isClient);
                 InboundChannelBuffer applicationBuffer = new InboundChannelBuffer(pageAllocator);
                 SSLReadWriteHandler sslHandler = new SSLReadWriteHandler(selector, sslDriver, readWriteHandler, applicationBuffer);
                 context = new SocketChannelContext(nioChannel, selector, exceptionHandler, sslHandler, networkBuffer, ipFilter);
