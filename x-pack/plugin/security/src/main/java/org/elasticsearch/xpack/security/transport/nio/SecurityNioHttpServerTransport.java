@@ -106,8 +106,8 @@ public class SecurityNioHttpServerTransport extends NioHttpServerTransport {
                 }
                 SSLDriver sslDriver = new SSLDriver(sslEngine, pageAllocator, false);
                 InboundChannelBuffer applicationBuffer = new InboundChannelBuffer(pageAllocator);
-                context = new SSLChannelContext(httpChannel, selector, exceptionHandler, sslDriver, httpHandler, networkBuffer,
-                    applicationBuffer, nioIpFilter);
+                SSLReadWriteHandler sslHandler = new SSLReadWriteHandler(selector, sslDriver, httpHandler, applicationBuffer);
+                context = new SocketChannelContext(httpChannel, selector, exceptionHandler, sslHandler, networkBuffer, nioIpFilter);
             } else {
                 context = new SocketChannelContext(httpChannel, selector, exceptionHandler, httpHandler, networkBuffer, nioIpFilter);
             }

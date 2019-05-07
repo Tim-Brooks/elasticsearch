@@ -58,7 +58,7 @@ import static org.elasticsearch.xpack.core.security.SecurityField.setting;
  * encrypt the application data they exchange.
  * <p>
  * The specific SSL/TLS parameters and configurations are setup in the {@link SSLService} class. The actual
- * implementation of the SSL/TLS layer is in the {@link SSLChannelContext} and {@link SSLDriver} classes.
+ * implementation of the SSL/TLS layer is in the {@link SSLReadWriteHandler} and {@link SSLDriver} classes.
  */
 public class SecurityNioTransport extends NioTransport {
     private static final Logger logger = LogManager.getLogger(SecurityNioTransport.class);
