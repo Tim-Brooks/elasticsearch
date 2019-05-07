@@ -149,7 +149,7 @@ public class NioSelector implements Closeable {
 
     void singleLoop() {
         try {
-            closePendingChannels();
+            closePendingChannels(false);
             preSelect();
             long nanosUntilNextTask = taskScheduler.nanosUntilNextTask(System.nanoTime());
             int ready;
@@ -196,7 +196,7 @@ public class NioSelector implements Closeable {
         channelsToClose.addAll(channelsToRegister);
         channelsToRegister.clear();
         channelsToClose.addAll(selector.keys().stream().map(sk -> (ChannelContext<?>) sk.attachment()).collect(Collectors.toList()));
-        closePendingChannels();
+        closePendingChannels(true);
     }
 
     @Override
@@ -429,11 +429,13 @@ public class NioSelector implements Closeable {
         }
     }
 
-    private void closePendingChannels() {
+    private void closePendingChannels(boolean isShuttingDown) {
         ChannelContext<?> channelContext;
         while ((channelContext = channelsToClose.poll()) != null) {
             try {
-                eventHandler.handleClose(channelContext);
+                boolean channelRegisteredNotRegistered = channelContext.getSelectionKey() == null;
+                // If the channel is not registered yet, force close it.
+                eventHandler.handleClose(channelContext, channelRegisteredNotRegistered || isShuttingDown);
             } catch (Exception e) {
                 eventHandler.closeException(channelContext, e);
             }

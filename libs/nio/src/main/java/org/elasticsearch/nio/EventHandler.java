@@ -239,8 +239,29 @@ public class EventHandler {
      * @param context that should be closed
      */
     protected void handleClose(ChannelContext<?> context) throws IOException {
-        context.closeFromSelector();
-        assert context.isOpen() == false : "Should always be done as we are on the selector thread";
+        handleClose(context, false);
+    }
+
+    /**
+     * This method handles the closing of an NioChannel
+     *
+     * @param context that should be closed
+     * @param forceClose if the context should be closed regardless of whether the context is ready
+     */
+    protected void handleClose(ChannelContext<?> context, boolean forceClose) throws IOException {
+        if (context.selectorShouldClose() || forceClose) {
+            context.closeFromSelector();
+            assert context.isOpen() == false : "Should always be done as we are on the selector thread";
+        } else {
+            context.initiateClose();
+            if (context.selectorShouldClose()) {
+                context.closeFromSelector();
+                assert context.isOpen() == false : "Should always be done as we are on the selector thread";
+            } else {
+                // TODO: Test and implement design
+                SelectionKeyUtils.setWriteInterested(context.getSelectionKey());
+            }
+        }
     }
 
     /**

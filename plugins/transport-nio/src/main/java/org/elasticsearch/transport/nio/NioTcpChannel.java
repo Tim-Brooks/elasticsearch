@@ -68,11 +68,6 @@ public class NioTcpChannel extends NioSocketChannel implements TcpChannel {
     }
 
     @Override
-    public void close() {
-        getContext().closeChannel();
-    }
-
-    @Override
     public String toString() {
         return "TcpNioSocketChannel{" +
             "localAddress=" + getLocalAddress() +

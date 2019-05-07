@@ -15,7 +15,6 @@ import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
-import org.elasticsearch.nio.BytesChannelContext;
 import org.elasticsearch.nio.ChannelFactory;
 import org.elasticsearch.nio.InboundChannelBuffer;
 import org.elasticsearch.nio.NioSelector;
@@ -160,10 +159,10 @@ public class SecurityNioTransport extends NioTransport {
             if (sslEnabled) {
                 SSLDriver sslDriver = new SSLDriver(createSSLEngine(channel), pageAllocator, isClient);
                 InboundChannelBuffer applicationBuffer = new InboundChannelBuffer(pageAllocator);
-                context = new SSLChannelContext(nioChannel, selector, exceptionHandler, sslDriver, readWriteHandler, networkBuffer,
-                    applicationBuffer, ipFilter);
+                SSLReadWriteHandler sslHandler = new SSLReadWriteHandler(selector, sslDriver, readWriteHandler, applicationBuffer);
+                context = new SocketChannelContext(nioChannel, selector, exceptionHandler, sslHandler, networkBuffer, ipFilter);
             } else {
-                context = new BytesChannelContext(nioChannel, selector, exceptionHandler, readWriteHandler, networkBuffer, ipFilter);
+                context = new SocketChannelContext(nioChannel, selector, exceptionHandler, readWriteHandler, networkBuffer, ipFilter);
             }
             nioChannel.setContext(context);
 

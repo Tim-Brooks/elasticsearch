@@ -39,6 +39,13 @@ public class TcpReadWriteHandler extends BytesWriteHandler {
     @Override
     public int consumeReads(InboundChannelBuffer channelBuffer) throws IOException {
         BytesReference bytesReference = BytesReference.fromByteBuffers(channelBuffer.sliceBuffersTo(channelBuffer.getIndex()));
-        return transport.consumeNetworkReads(channel, bytesReference);
+        int bytesConsumed = transport.consumeNetworkReads(channel, bytesReference);
+        channelBuffer.release(bytesConsumed);
+        return bytesConsumed;
+    }
+
+    @Override
+    public boolean readyForFlush() {
+        return false;
     }
 }

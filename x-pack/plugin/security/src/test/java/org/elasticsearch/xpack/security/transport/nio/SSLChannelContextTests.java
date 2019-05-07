@@ -423,7 +423,9 @@ public class SSLChannelContextTests extends ESTestCase {
 
         @Override
         public int consumeReads(InboundChannelBuffer channelBuffer) throws IOException {
-            return fn.apply(channelBuffer);
+            Integer bytesConsumed = fn.apply(channelBuffer);
+            channelBuffer.release(bytesConsumed);
+            return bytesConsumed;
         }
     }
 }

@@ -36,7 +36,6 @@ import org.elasticsearch.http.HttpChannel;
 import org.elasticsearch.http.HttpServerChannel;
 import org.elasticsearch.http.nio.cors.NioCorsConfig;
 import org.elasticsearch.http.nio.cors.NioCorsConfigBuilder;
-import org.elasticsearch.nio.BytesChannelContext;
 import org.elasticsearch.nio.ChannelFactory;
 import org.elasticsearch.nio.InboundChannelBuffer;
 import org.elasticsearch.nio.NioGroup;
@@ -207,7 +206,7 @@ public class NioHttpServerTransport extends AbstractHttpServerTransport {
             HttpReadWriteHandler httpReadWritePipeline = new HttpReadWriteHandler(httpChannel,NioHttpServerTransport.this,
                 handlingSettings, corsConfig, selector.getTaskScheduler(), threadPool::relativeTimeInMillis);
             Consumer<Exception> exceptionHandler = (e) -> onException(httpChannel, e);
-            SocketChannelContext context = new BytesChannelContext(httpChannel, selector, exceptionHandler, httpReadWritePipeline,
+            SocketChannelContext context = new SocketChannelContext(httpChannel, selector, exceptionHandler, httpReadWritePipeline,
                 new InboundChannelBuffer(pageAllocator));
             httpChannel.setContext(context);
             return httpChannel;

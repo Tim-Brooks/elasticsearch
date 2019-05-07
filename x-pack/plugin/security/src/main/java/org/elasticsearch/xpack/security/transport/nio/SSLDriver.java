@@ -61,6 +61,7 @@ public class SSLDriver implements AutoCloseable {
     // be volatile.
     private Mode currentMode = new RegularMode();
     private int packetSize;
+    private boolean sessionStarted = false;
 
     public SSLDriver(SSLEngine engine, IntFunction<Page> pageAllocator, boolean isClientMode) {
         this.engine = engine;
@@ -85,6 +86,7 @@ public class SSLDriver implements AutoCloseable {
                 throw e;
             }
         }
+        sessionStarted = true;
     }
 
     /**

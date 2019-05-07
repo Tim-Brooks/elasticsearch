@@ -31,8 +31,8 @@ import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpRequestEncoder;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseDecoder;
-import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.common.network.NetworkService;
@@ -40,13 +40,12 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.core.internal.io.IOUtils;
-import org.elasticsearch.nio.BytesChannelContext;
 import org.elasticsearch.nio.ChannelFactory;
 import org.elasticsearch.nio.EventHandler;
 import org.elasticsearch.nio.FlushOperation;
 import org.elasticsearch.nio.InboundChannelBuffer;
-import org.elasticsearch.nio.NioSelectorGroup;
 import org.elasticsearch.nio.NioSelector;
+import org.elasticsearch.nio.NioSelectorGroup;
 import org.elasticsearch.nio.NioServerSocketChannel;
 import org.elasticsearch.nio.NioSocketChannel;
 import org.elasticsearch.nio.ReadWriteHandler;
@@ -195,7 +194,7 @@ class NioHttpClient implements Closeable {
                 onException(e);
                 nioSocketChannel.close();
             };
-            SocketChannelContext context = new BytesChannelContext(nioSocketChannel, selector, exceptionHandler, handler,
+            SocketChannelContext context = new SocketChannelContext(nioSocketChannel, selector, exceptionHandler, handler,
                 InboundChannelBuffer.allocatingInstance());
             nioSocketChannel.setContext(context);
             return nioSocketChannel;
@@ -212,6 +211,7 @@ class NioHttpClient implements Closeable {
         private final NettyAdaptor adaptor;
         private final CountDownLatch latch;
         private final Collection<FullHttpResponse> content;
+        private boolean isClosed = false;
 
         private HttpClientHandler(NioSocketChannel channel, CountDownLatch latch, Collection<FullHttpResponse> content) {
             this.latch = latch;
@@ -269,12 +269,23 @@ class NioHttpClient implements Closeable {
         @Override
         public int consumeReads(InboundChannelBuffer channelBuffer) throws IOException {
             int bytesConsumed = adaptor.read(channelBuffer.sliceAndRetainPagesTo(channelBuffer.getIndex()));
+            channelBuffer.release(bytesConsumed);
             Object message;
             while ((message = adaptor.pollInboundMessage()) != null) {
                 handleRequest(message);
             }
 
             return bytesConsumed;
+        }
+
+        @Override
+        public void initiateProtocolClose() throws IOException {
+            isClosed = true;
+        }
+
+        @Override
+        public boolean isProtocolClosed() {
+            return isClosed;
         }
 
         @Override

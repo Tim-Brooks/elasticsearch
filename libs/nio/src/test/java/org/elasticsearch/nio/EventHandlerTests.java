@@ -258,7 +258,7 @@ public class EventHandlerTests extends ESTestCase {
         verify(genericExceptionHandler).accept(exception);
     }
 
-    private class DoNotRegisterSocketContext extends BytesChannelContext {
+    private class DoNotRegisterSocketContext extends SocketChannelContext {
 
 
         DoNotRegisterSocketContext(NioSocketChannel channel, NioSelector selector, Consumer<Exception> exceptionHandler,

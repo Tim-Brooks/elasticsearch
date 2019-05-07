@@ -82,6 +82,8 @@ public abstract class ChannelContext<S extends SelectableChannel & NetworkChanne
         }
     }
 
+    public abstract boolean selectorShouldClose();
+
     /**
      * Add a listener that will be called when the channel is closed.
      *
@@ -109,6 +111,8 @@ public abstract class ChannelContext<S extends SelectableChannel & NetworkChanne
      * channel or may involve reading and writing messages.
      */
     public abstract void closeChannel();
+
+    public abstract void initiateClose() throws IOException;
 
     public abstract NioSelector getSelector();
 

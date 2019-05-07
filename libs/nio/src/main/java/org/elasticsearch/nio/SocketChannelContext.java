@@ -43,7 +43,7 @@ import java.util.function.Predicate;
  * The only methods of the context that should ever be called from a non-selector thread are
  * {@link #closeChannel()} and {@link #sendMessage(Object, BiConsumer)}.
  */
-public abstract class SocketChannelContext extends ChannelContext<SocketChannel> {
+public class SocketChannelContext extends ChannelContext<SocketChannel> {
 
     protected static final Predicate<NioSocketChannel> ALWAYS_ALLOW_CHANNEL = (c) -> true;
 
@@ -58,9 +58,14 @@ public abstract class SocketChannelContext extends ChannelContext<SocketChannel>
     private boolean closeNow;
     private Exception connectException;
 
-    protected SocketChannelContext(NioSocketChannel channel, NioSelector selector, Consumer<Exception> exceptionHandler,
-                                   ReadWriteHandler readWriteHandler, InboundChannelBuffer channelBuffer,
-                                   Predicate<NioSocketChannel> allowChannelPredicate) {
+    public SocketChannelContext(NioSocketChannel channel, NioSelector selector, Consumer<Exception> exceptionHandler,
+                                ReadWriteHandler readWriteHandler, InboundChannelBuffer channelBuffer) {
+        this(channel, selector, exceptionHandler, readWriteHandler, channelBuffer, ALWAYS_ALLOW_CHANNEL);
+    }
+
+    public SocketChannelContext(NioSocketChannel channel, NioSelector selector, Consumer<Exception> exceptionHandler,
+                                ReadWriteHandler readWriteHandler, InboundChannelBuffer channelBuffer,
+                                Predicate<NioSocketChannel> allowChannelPredicate) {
         super(channel.getRawChannel(), exceptionHandler);
         this.selector = selector;
         this.channel = channel;
@@ -149,9 +154,39 @@ public abstract class SocketChannelContext extends ChannelContext<SocketChannel>
         pendingFlushes.addAll(readWriteHandler.writeToBytes(writeOperation));
     }
 
-    public abstract int read() throws IOException;
+    public int read() throws IOException {
+        int bytesRead = readFromChannel(channelBuffer);
 
-    public abstract void flushChannel() throws IOException;
+        if (bytesRead == 0) {
+            return 0;
+        }
+
+        handleReadBytes();
+
+        return bytesRead;
+    }
+
+    public void flushChannel() throws IOException {
+        getSelector().assertOnSelectorThread();
+        boolean lastOpCompleted = true;
+        FlushOperation flushOperation;
+        while (lastOpCompleted && (flushOperation = getPendingFlush()) != null) {
+            try {
+                flushToChannel(flushOperation);
+                if (flushOperation.isFullyFlushed()) {
+                    currentFlushOperationComplete();
+                } else {
+                    lastOpCompleted = false;
+                }
+            } catch (IOException e) {
+                currentFlushOperationFailed(e);
+                throw e;
+            }
+        }
+
+        // TODO: Test and resolve design
+        pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
+    }
 
     protected void currentFlushOperationFailed(IOException e) {
         FlushOperation flushOperation = pendingFlushes.pollFirst();
@@ -171,6 +206,9 @@ public abstract class SocketChannelContext extends ChannelContext<SocketChannel>
     protected void register() throws IOException {
         super.register();
         readWriteHandler.channelRegistered();
+        // TODO: Test
+        // Some protocols might produce messages to flush during a register operation.
+        pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
         if (allowChannelPredicate.test(channel) == false) {
             closeNow = true;
         }
@@ -189,9 +227,6 @@ public abstract class SocketChannelContext extends ChannelContext<SocketChannel>
             // Set to true in order to reject new writes before queuing with selector
             isClosing.set(true);
 
-            // Poll for new flush operations to close
-            // TODO: Probably remove and have handlers charged with closing their operations
-            pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
             FlushOperation flushOperation;
             while ((flushOperation = pendingFlushes.pollFirst()) != null) {
                 selector.executeFailedListener(flushOperation.getListener(), new ClosedChannelException());
@@ -212,9 +247,9 @@ public abstract class SocketChannelContext extends ChannelContext<SocketChannel>
 
     protected void handleReadBytes() throws IOException {
         int bytesConsumed = Integer.MAX_VALUE;
+        // TODO: Change to is protocol open
         while (isOpen() && bytesConsumed > 0 && channelBuffer.getIndex() > 0) {
             bytesConsumed = readWriteHandler.consumeReads(channelBuffer);
-            channelBuffer.release(bytesConsumed);
         }
 
         // Some protocols might produce messages to flush during a read operation.
@@ -223,7 +258,23 @@ public abstract class SocketChannelContext extends ChannelContext<SocketChannel>
 
     public boolean readyForFlush() {
         getSelector().assertOnSelectorThread();
-        return pendingFlushes.isEmpty() == false;
+        // TODO: Test
+        return pendingFlushes.isEmpty() == false || readWriteHandler.readyForFlush();
+    }
+
+    @Override
+    public void closeChannel() {
+        if (isClosing.compareAndSet(false, true)) {
+            getSelector().queueChannelClose(channel);
+        }
+    }
+
+    @Override
+    public void initiateClose() throws IOException {
+        readWriteHandler.initiateProtocolClose();
+        // TODO: Test
+        // Some protocols might produce messages to flush when closing.
+        pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
     }
 
     /**
@@ -231,7 +282,10 @@ public abstract class SocketChannelContext extends ChannelContext<SocketChannel>
      *
      * @return a boolean indicating if the selector should close
      */
-    public abstract boolean selectorShouldClose();
+    @Override
+    public boolean selectorShouldClose() {
+        return closeNow || readWriteHandler.isProtocolClosed();
+    }
 
     protected boolean closeNow() {
         return closeNow;

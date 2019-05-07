@@ -33,7 +33,6 @@ import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
-import org.elasticsearch.nio.BytesChannelContext;
 import org.elasticsearch.nio.BytesWriteHandler;
 import org.elasticsearch.nio.ChannelFactory;
 import org.elasticsearch.nio.InboundChannelBuffer;
@@ -43,6 +42,7 @@ import org.elasticsearch.nio.NioServerSocketChannel;
 import org.elasticsearch.nio.NioSocketChannel;
 import org.elasticsearch.nio.Page;
 import org.elasticsearch.nio.ServerChannelContext;
+import org.elasticsearch.nio.SocketChannelContext;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.ConnectionProfile;
 import org.elasticsearch.transport.TcpChannel;
@@ -201,7 +201,7 @@ public class MockNioTransport extends TcpTransport {
                 }
             };
             MockTcpReadWriteHandler readWriteHandler = new MockTcpReadWriteHandler(nioChannel, MockNioTransport.this);
-            BytesChannelContext context = new BytesChannelContext(nioChannel, selector, (e) -> exceptionCaught(nioChannel, e),
+            SocketChannelContext context = new SocketChannelContext(nioChannel, selector, (e) -> exceptionCaught(nioChannel, e),
                 readWriteHandler, new InboundChannelBuffer(pageSupplier));
             nioChannel.setContext(context);
             nioChannel.addConnectListener((v, e) -> {
@@ -243,7 +243,9 @@ public class MockNioTransport extends TcpTransport {
         @Override
         public int consumeReads(InboundChannelBuffer channelBuffer) throws IOException {
             BytesReference bytesReference = BytesReference.fromByteBuffers(channelBuffer.sliceBuffersTo(channelBuffer.getIndex()));
-            return transport.consumeNetworkReads(channel, bytesReference);
+            int bytesConsumed = transport.consumeNetworkReads(channel, bytesReference);
+            channelBuffer.release(bytesConsumed);
+            return bytesConsumed;
         }
     }
 
@@ -251,11 +253,6 @@ public class MockNioTransport extends TcpTransport {
 
         MockServerChannel(ServerSocketChannel channel) {
             super(channel);
-        }
-
-        @Override
-        public void close() {
-            getContext().closeChannel();
         }
 
         @Override
@@ -274,11 +271,6 @@ public class MockNioTransport extends TcpTransport {
             super(socketChannel);
             this.isServer = isServer;
             this.profile = profile;
-        }
-
-        @Override
-        public void close() {
-            getContext().closeChannel();
         }
 
         @Override

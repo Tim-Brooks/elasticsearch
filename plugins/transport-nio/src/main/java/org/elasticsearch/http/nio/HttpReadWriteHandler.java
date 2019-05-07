@@ -58,6 +58,7 @@ public class HttpReadWriteHandler implements ReadWriteHandler {
     private final TaskScheduler taskScheduler;
     private final LongSupplier nanoClock;
     private final long readTimeoutNanos;
+    private boolean isClosed = false;
     private boolean channelRegistered = false;
     private boolean requestSinceReadTimeoutTrigger = false;
     private int inFlightRequests = 0;
@@ -102,6 +103,7 @@ public class HttpReadWriteHandler implements ReadWriteHandler {
     public int consumeReads(InboundChannelBuffer channelBuffer) {
         assert channelRegistered : "channelRegistered should have been called";
         int bytesConsumed = adaptor.read(channelBuffer.sliceAndRetainPagesTo(channelBuffer.getIndex()));
+        channelBuffer.release(bytesConsumed);
         Object message;
         while ((message = adaptor.pollInboundMessage()) != null) {
             ++inFlightRequests;
@@ -138,6 +140,16 @@ public class HttpReadWriteHandler implements ReadWriteHandler {
             copiedOperations.add(flushOperation);
         }
         return copiedOperations;
+    }
+
+    @Override
+    public void initiateProtocolClose() throws IOException {
+        isClosed = true;
+    }
+
+    @Override
+    public boolean isProtocolClosed() {
+        return isClosed;
     }
 
     @Override

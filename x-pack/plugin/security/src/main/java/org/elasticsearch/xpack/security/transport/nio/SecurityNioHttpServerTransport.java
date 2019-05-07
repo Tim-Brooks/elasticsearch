@@ -16,7 +16,6 @@ import org.elasticsearch.http.nio.HttpReadWriteHandler;
 import org.elasticsearch.http.nio.NioHttpChannel;
 import org.elasticsearch.http.nio.NioHttpServerChannel;
 import org.elasticsearch.http.nio.NioHttpServerTransport;
-import org.elasticsearch.nio.BytesChannelContext;
 import org.elasticsearch.nio.ChannelFactory;
 import org.elasticsearch.nio.InboundChannelBuffer;
 import org.elasticsearch.nio.NioSelector;
@@ -110,7 +109,7 @@ public class SecurityNioHttpServerTransport extends NioHttpServerTransport {
                 context = new SSLChannelContext(httpChannel, selector, exceptionHandler, sslDriver, httpHandler, networkBuffer,
                     applicationBuffer, nioIpFilter);
             } else {
-                context = new BytesChannelContext(httpChannel, selector, exceptionHandler, httpHandler, networkBuffer, nioIpFilter);
+                context = new SocketChannelContext(httpChannel, selector, exceptionHandler, httpHandler, networkBuffer, nioIpFilter);
             }
             httpChannel.setContext(context);
 

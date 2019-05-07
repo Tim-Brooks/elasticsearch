@@ -24,14 +24,13 @@ import java.util.function.BiConsumer;
 
 public class SSLReadWriteHandler implements ReadWriteHandler {
 
-    private static final int BYTES_ENCRYPT_LIMIT = 1 << 17;
-
     private final NioSelector selector;
     private final SSLDriver sslDriver;
     private final ReadWriteHandler delegate;
     private final LinkedList<FlushOperation> unencryptedBytes = new LinkedList<>();
     private final InboundChannelBuffer applicationBuffer;
     private boolean needsToInitiateClose = false;
+    private boolean isCloseTimedOut = false;
 
     SSLReadWriteHandler(NioSelector selector, SSLDriver sslDriver, ReadWriteHandler delegate, InboundChannelBuffer applicationBuffer) {
         this.selector = selector;
@@ -43,10 +42,6 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
     @Override
     public void channelRegistered() throws IOException {
         sslDriver.init();
-        // TODO: The context should do this poll
-//        if (outboundBuffer.hasEncryptedBytesToFlush()) {
-//            encryptedBytes.addLast(outboundBuffer.buildNetworkFlushOperation());
-//        }
         delegate.channelRegistered();
     }
 
@@ -58,8 +53,7 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
     @Override
     public List<FlushOperation> writeToBytes(WriteOperation writeOperation) throws IOException {
         unencryptedBytes.addAll(delegate.writeToBytes(writeOperation));
-        maybeInitiateClose();
-        return Collections.emptyList();
+        return pollFlushOperations();
     }
 
     @Override
@@ -68,13 +62,21 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
         unencryptedBytes.addAll(delegate.pollFlushOperations());
         maybeInitiateClose();
 
+        SSLOutboundBuffer outboundBuffer = sslDriver.getOutboundBuffer();
+        if (outboundBuffer.hasEncryptedBytesToFlush()) {
+            encrypted.add(outboundBuffer.buildNetworkFlushOperation());
+        }
+
+        if (sslDriver.readyForApplicationData() == false) {
+            return encrypted;
+        }
+
         FlushOperation unencryptedFlush;
         while ((unencryptedFlush = unencryptedBytes.peekFirst()) != null) {
             try {
                 // Attempt to encrypt application write data. The encrypted data ends up in the
                 // outbound write buffer.
                 sslDriver.write(unencryptedFlush);
-                SSLOutboundBuffer outboundBuffer = sslDriver.getOutboundBuffer();
                 if (outboundBuffer.hasEncryptedBytesToFlush() == false) {
                     break;
                 }
@@ -96,23 +98,23 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
 
     @Override
     public boolean readyForFlush() {
-        return unencryptedBytes.isEmpty() == false || delegate.readyForFlush();
+        return sslDriver.readyForApplicationData() && (unencryptedBytes.isEmpty() == false || delegate.readyForFlush());
     }
 
     @Override
     public int consumeReads(InboundChannelBuffer channelBuffer) throws IOException {
-        // TODO: Currently releases bytes!
         sslDriver.read(channelBuffer, applicationBuffer);
 
         int bytesConsumed = Integer.MAX_VALUE;
-        while (isProtocolClosed() == false && bytesConsumed > 0 && channelBuffer.getIndex() > 0) {
+        int totalBytesConsumed = 0;
+        while (delegate.isProtocolClosed() == false && bytesConsumed > 0 && applicationBuffer.getIndex() > 0) {
             bytesConsumed = delegate.consumeReads(applicationBuffer);
-            applicationBuffer.release(bytesConsumed);
+            totalBytesConsumed += bytesConsumed;
         }
 
         maybeInitiateClose();
 
-        return 0;
+        return totalBytesConsumed;
     }
 
     @Override
@@ -126,7 +128,7 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
     }
 
     private void maybeInitiateClose() throws SSLException {
-        if (needsToInitiateClose) {
+        if (needsToInitiateClose && delegate.isProtocolClosed()) {
             needsToInitiateClose = false;
             sslDriver.initiateClose();
         }
@@ -134,7 +136,7 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
 
     @Override
     public boolean isProtocolClosed() {
-        return delegate.isProtocolClosed() && sslDriver.isClosed();
+        return isCloseTimedOut || (delegate.isProtocolClosed() && sslDriver.isClosed());
     }
 
     @Override

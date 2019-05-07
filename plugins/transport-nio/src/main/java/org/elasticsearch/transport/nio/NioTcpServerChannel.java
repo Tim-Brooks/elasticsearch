@@ -35,10 +35,6 @@ public class NioTcpServerChannel extends NioServerSocketChannel implements TcpSe
         super(socketChannel);
     }
 
-    public void close() {
-        getContext().closeChannel();
-    }
-
     @Override
     public void addCloseListener(ActionListener<Void> listener) {
         addCloseListener(ActionListener.toBiConsumer(listener));

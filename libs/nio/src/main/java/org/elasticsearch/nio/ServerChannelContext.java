@@ -57,6 +57,16 @@ public class ServerChannelContext extends ChannelContext<ServerSocketChannel> {
     }
 
     @Override
+    public void initiateClose() throws IOException {
+        isClosing.set(true);
+    }
+
+    @Override
+    public boolean selectorShouldClose() {
+        return isClosing.get();
+    }
+
+    @Override
     public NioSelector getSelector() {
         return selector;
     }

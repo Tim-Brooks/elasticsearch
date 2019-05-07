@@ -19,6 +19,7 @@
 
 package org.elasticsearch.nio;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
@@ -27,6 +28,7 @@ import java.util.function.BiConsumer;
 public abstract class BytesWriteHandler implements ReadWriteHandler {
 
     private static final List<FlushOperation> EMPTY_LIST = Collections.emptyList();
+    private boolean isClosed = false;
 
     public WriteOperation createWriteOperation(SocketChannelContext context, Object message, BiConsumer<Void, Exception> listener) {
         assert message instanceof ByteBuffer[] : "This channel only supports messages that are of type: " + ByteBuffer[].class
@@ -46,6 +48,16 @@ public abstract class BytesWriteHandler implements ReadWriteHandler {
     @Override
     public List<FlushOperation> pollFlushOperations() {
         return EMPTY_LIST;
+    }
+
+    @Override
+    public void initiateProtocolClose() throws IOException {
+        isClosed = true;
+    }
+
+    @Override
+    public boolean isProtocolClosed() {
+        return isClosed;
     }
 
     @Override
