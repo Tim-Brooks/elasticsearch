@@ -50,20 +50,20 @@ public class ServerChannelContext extends ChannelContext<ServerSocketChannel> {
     }
 
     @Override
-    public void closeChannel() {
-        if (isClosing.compareAndSet(false, true)) {
-            getSelector().queueChannelClose(channel);
-        }
-    }
-
-    @Override
-    public void initiateClose() throws IOException {
+    public void initiateClose() {
         isClosing.set(true);
     }
 
     @Override
     public boolean selectorShouldClose() {
         return isClosing.get();
+    }
+
+    @Override
+    public void closeChannel() {
+        if (isClosing.compareAndSet(false, true)) {
+            getSelector().queueChannelClose(channel);
+        }
     }
 
     @Override

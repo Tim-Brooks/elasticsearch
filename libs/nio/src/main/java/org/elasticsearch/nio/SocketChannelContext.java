@@ -47,9 +47,9 @@ public class SocketChannelContext extends ChannelContext<SocketChannel> {
 
     protected static final Predicate<NioSocketChannel> ALWAYS_ALLOW_CHANNEL = (c) -> true;
 
-    protected final NioSocketChannel channel;
-    protected final InboundChannelBuffer channelBuffer;
-    protected final AtomicBoolean isClosing = new AtomicBoolean(false);
+    private final NioSocketChannel channel;
+    private final InboundChannelBuffer channelBuffer;
+    private final AtomicBoolean isClosing = new AtomicBoolean(false);
     private final ReadWriteHandler readWriteHandler;
     private final Predicate<NioSocketChannel> allowChannelPredicate;
     private final NioSelector selector;
@@ -170,48 +170,36 @@ public class SocketChannelContext extends ChannelContext<SocketChannel> {
         getSelector().assertOnSelectorThread();
         boolean lastOpCompleted = true;
         FlushOperation flushOperation;
-        while (lastOpCompleted && (flushOperation = getPendingFlush()) != null) {
+        while (lastOpCompleted && (flushOperation = pendingFlushes.peekFirst()) != null) {
             try {
                 flushToChannel(flushOperation);
                 if (flushOperation.isFullyFlushed()) {
-                    currentFlushOperationComplete();
+                    FlushOperation flushOperation1 = pendingFlushes.removeFirst();
+                    getSelector().executeListener(flushOperation1.getListener(), null);
                 } else {
                     lastOpCompleted = false;
                 }
             } catch (IOException e) {
-                currentFlushOperationFailed(e);
+                FlushOperation flushOperation1 = pendingFlushes.removeFirst();
+                getSelector().executeFailedListener(flushOperation1.getListener(), e);
                 throw e;
             }
         }
 
-        // TODO: Test and resolve design
+        // Handlers are allowed to only partially return their ready flush operations as a mechanism of rate
+        // limiting. Once we have finished flushing in this method call, we must poll for new operations.
         pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
-    }
-
-    protected void currentFlushOperationFailed(IOException e) {
-        FlushOperation flushOperation = pendingFlushes.pollFirst();
-        getSelector().executeFailedListener(flushOperation.getListener(), e);
-    }
-
-    protected void currentFlushOperationComplete() {
-        FlushOperation flushOperation = pendingFlushes.pollFirst();
-        getSelector().executeListener(flushOperation.getListener(), null);
-    }
-
-    protected FlushOperation getPendingFlush() {
-        return pendingFlushes.peekFirst();
     }
 
     @Override
     protected void register() throws IOException {
         super.register();
-        readWriteHandler.channelRegistered();
-        // TODO: Test
         // Some protocols might produce messages to flush during a register operation.
-        pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
         if (allowChannelPredicate.test(channel) == false) {
             closeNow = true;
         }
+        readWriteHandler.channelRegistered();
+        pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
     }
 
     @Override
@@ -247,8 +235,7 @@ public class SocketChannelContext extends ChannelContext<SocketChannel> {
 
     protected void handleReadBytes() throws IOException {
         int bytesConsumed = Integer.MAX_VALUE;
-        // TODO: Change to is protocol open
-        while (isOpen() && bytesConsumed > 0 && channelBuffer.getIndex() > 0) {
+        while (readWriteHandler.isProtocolClosed() == false && bytesConsumed > 0 && channelBuffer.getIndex() > 0) {
             bytesConsumed = readWriteHandler.consumeReads(channelBuffer);
         }
 
@@ -258,8 +245,8 @@ public class SocketChannelContext extends ChannelContext<SocketChannel> {
 
     public boolean readyForFlush() {
         getSelector().assertOnSelectorThread();
-        // TODO: Test
-        return pendingFlushes.isEmpty() == false || readWriteHandler.readyForFlush();
+        // TODO: Do we really need the readyForFlush call? Especially since we always drain the writes
+        return pendingFlushes.isEmpty() == false;
     }
 
     @Override
@@ -272,7 +259,6 @@ public class SocketChannelContext extends ChannelContext<SocketChannel> {
     @Override
     public void initiateClose() throws IOException {
         readWriteHandler.initiateProtocolClose();
-        // TODO: Test
         // Some protocols might produce messages to flush when closing.
         pendingFlushes.addAll(readWriteHandler.pollFlushOperations());
     }
@@ -284,15 +270,7 @@ public class SocketChannelContext extends ChannelContext<SocketChannel> {
      */
     @Override
     public boolean selectorShouldClose() {
-        return closeNow || readWriteHandler.isProtocolClosed();
-    }
-
-    protected boolean closeNow() {
-        return closeNow;
-    }
-
-    protected void setCloseNow() {
-        closeNow = true;
+        return closeNow || (readWriteHandler.isProtocolClosed() && pendingFlushes.isEmpty());
     }
 
     // When you read or write to a nio socket in java, the heap memory passed down must be copied to/from
@@ -305,7 +283,7 @@ public class SocketChannelContext extends ChannelContext<SocketChannel> {
     // data that is copied to the buffer for a write, but not successfully flushed immediately, must be
     // copied again on the next call.
 
-    protected int readFromChannel(InboundChannelBuffer channelBuffer) throws IOException {
+    int readFromChannel(InboundChannelBuffer channelBuffer) throws IOException {
         ByteBuffer ioBuffer = getSelector().getIoBuffer();
         int bytesRead;
         try {
@@ -335,7 +313,7 @@ public class SocketChannelContext extends ChannelContext<SocketChannel> {
     // copying.
     private final int WRITE_LIMIT = 1 << 16;
 
-    protected int flushToChannel(FlushOperation flushOperation) throws IOException {
+    int flushToChannel(FlushOperation flushOperation) throws IOException {
         ByteBuffer ioBuffer = getSelector().getIoBuffer();
 
         boolean continueFlush = flushOperation.isFullyFlushed() == false;

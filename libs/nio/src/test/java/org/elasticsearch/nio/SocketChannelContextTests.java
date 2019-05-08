@@ -19,7 +19,6 @@
 
 package org.elasticsearch.nio;
 
-import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.test.ESTestCase;
 import org.junit.Before;
 import org.mockito.ArgumentCaptor;
@@ -89,7 +88,6 @@ public class SocketChannelContextTests extends ESTestCase {
         when(rawChannel.write(any(ByteBuffer.class))).thenThrow(new IOException());
         when(rawChannel.read(any(ByteBuffer[].class), anyInt(), anyInt())).thenThrow(new IOException());
         when(rawChannel.read(any(ByteBuffer.class))).thenThrow(new IOException());
-        assertFalse(context.closeNow());
         assertFalse(context.selectorShouldClose());
         expectThrows(IOException.class, () -> {
             if (randomBoolean()) {
@@ -102,33 +100,45 @@ public class SocketChannelContextTests extends ESTestCase {
                 context.flushChannel();
             }
         });
-        assertTrue(context.closeNow());
         assertTrue(context.selectorShouldClose());
     }
 
-    public void testSignalWhenPeerClosed() throws IOException {
+    public void testEOFMeansReadyToClose() throws IOException {
         when(rawChannel.read(any(ByteBuffer.class))).thenReturn(-1);
-        assertFalse(context.closeNow());
         assertFalse(context.selectorShouldClose());
         context.read();
-        assertTrue(context.closeNow());
         assertTrue(context.selectorShouldClose());
     }
 
     public void testValidateInRegisterCanSucceed() throws IOException {
         InboundChannelBuffer channelBuffer = InboundChannelBuffer.allocatingInstance();
         context = new TestSocketChannelContext(channel, selector, exceptionHandler, readWriteHandler, channelBuffer, (c) -> true);
-        assertFalse(context.closeNow());
+        assertFalse(context.selectorShouldClose());
         context.register();
-        assertFalse(context.closeNow());
+        assertFalse(context.selectorShouldClose());
     }
 
     public void testValidateInRegisterCanFail() throws IOException {
         InboundChannelBuffer channelBuffer = InboundChannelBuffer.allocatingInstance();
         context = new TestSocketChannelContext(channel, selector, exceptionHandler, readWriteHandler, channelBuffer, (c) -> false);
-        assertFalse(context.closeNow());
+        assertFalse(context.selectorShouldClose());
         context.register();
-        assertTrue(context.closeNow());
+        assertTrue(context.selectorShouldClose());
+    }
+
+    public void testRegisterCallsHandlerAndQueuesFlushes() throws IOException {
+        boolean produceFlushesInRegister = randomBoolean();
+        assertFalse(context.readyForFlush());
+
+        if (produceFlushesInRegister) {
+            when(readWriteHandler.pollFlushOperations()).thenReturn(Collections.singletonList(mock(FlushOperation.class)));
+        } else {
+            when(readWriteHandler.pollFlushOperations()).thenReturn(Collections.emptyList());
+        }
+        context.register();
+
+        verify(readWriteHandler).channelRegistered();
+        assertEquals(produceFlushesInRegister, context.readyForFlush());
     }
 
     public void testConnectSucceeds() throws IOException {
@@ -211,7 +221,6 @@ public class SocketChannelContextTests extends ESTestCase {
         assertSame(writeOperation, writeOp);
     }
 
-    @SuppressWarnings("varargs")
     public void testQueuedWriteIsFlushedInFlushCall() throws Exception {
         assertFalse(context.readyForFlush());
 
@@ -228,11 +237,30 @@ public class SocketChannelContextTests extends ESTestCase {
         when(flushOperation.getListener()).thenReturn(listener);
         context.flushChannel();
 
-        ByteBuffer buffer = buffers[0].duplicate();
-        buffer.flip();
         verify(rawChannel).write(eq(ioBuffer));
         verify(selector).executeListener(listener, null);
         assertFalse(context.readyForFlush());
+    }
+
+    public void testFlushCallWillPollForNewFlushes() throws Exception {
+        assertFalse(context.readyForFlush());
+
+        ByteBuffer[] buffers = {ByteBuffer.allocate(10)};
+
+        FlushReadyWrite flushOperation = mock(FlushReadyWrite.class);
+        when(readWriteHandler.writeToBytes(flushOperation)).thenReturn(Collections.singletonList(flushOperation));
+        context.writeToChannel(flushOperation);
+
+        assertTrue(context.readyForFlush());
+
+        when(flushOperation.getBuffersToWrite(anyInt())).thenReturn(buffers);
+        when(flushOperation.isFullyFlushed()).thenReturn(false, true);
+        when(flushOperation.getListener()).thenReturn(listener);
+        when(readWriteHandler.pollFlushOperations()).thenReturn(Collections.singletonList(mock(FlushOperation.class)));
+        context.flushChannel();
+
+        verify(rawChannel).write(eq(ioBuffer));
+        assertTrue(context.readyForFlush());
     }
 
     public void testPartialFlush() throws IOException {
@@ -314,12 +342,15 @@ public class SocketChannelContextTests extends ESTestCase {
             return bytes.length;
         });
 
-        when(readWriteHandler.consumeReads(channelBuffer)).thenReturn(messageLength, 0);
+        when(readWriteHandler.consumeReads(channelBuffer)).thenAnswer(invocationOnMock -> {
+            InboundChannelBuffer buffer = (InboundChannelBuffer) invocationOnMock.getArguments()[0];
+            buffer.release(messageLength);
+            return messageLength;
+        });
 
         assertEquals(messageLength, context.read());
 
         assertEquals(0, channelBuffer.getIndex());
-        assertEquals(PageCacheRecycler.BYTE_PAGE_SIZE - bytes.length, channelBuffer.getCapacity());
         verify(readWriteHandler, times(1)).consumeReads(channelBuffer);
     }
 
@@ -332,12 +363,15 @@ public class SocketChannelContextTests extends ESTestCase {
             return bytes.length;
         });
 
-        when(readWriteHandler.consumeReads(channelBuffer)).thenReturn(messageLength, messageLength, 0);
+        when(readWriteHandler.consumeReads(channelBuffer)).thenAnswer(invocationOnMock -> {
+            InboundChannelBuffer buffer = (InboundChannelBuffer) invocationOnMock.getArguments()[0];
+            buffer.release(messageLength);
+            return messageLength;
+        });
 
         assertEquals(bytes.length, context.read());
 
         assertEquals(0, channelBuffer.getIndex());
-        assertEquals(PageCacheRecycler.BYTE_PAGE_SIZE - bytes.length, channelBuffer.getCapacity());
         verify(readWriteHandler, times(2)).consumeReads(channelBuffer);
     }
 
@@ -358,13 +392,41 @@ public class SocketChannelContextTests extends ESTestCase {
         assertEquals(bytes.length, channelBuffer.getIndex());
         verify(readWriteHandler, times(1)).consumeReads(channelBuffer);
 
-        when(readWriteHandler.consumeReads(channelBuffer)).thenReturn(messageLength * 2, 0);
+        when(readWriteHandler.consumeReads(channelBuffer)).thenAnswer(invocationOnMock -> {
+            InboundChannelBuffer buffer = (InboundChannelBuffer) invocationOnMock.getArguments()[0];
+            buffer.release(messageLength * 2);
+            return messageLength;
+        });
 
         assertEquals(messageLength, context.read());
 
         assertEquals(0, channelBuffer.getIndex());
-        assertEquals(PageCacheRecycler.BYTE_PAGE_SIZE - (bytes.length * 2), channelBuffer.getCapacity());
         verify(readWriteHandler, times(2)).consumeReads(channelBuffer);
+    }
+
+    public void testWillStopConsumingReadsIfProtocolClosed() throws IOException {
+        byte[] bytes = createMessage(messageLength * 2);
+
+        when(rawChannel.read(any(ByteBuffer.class))).thenAnswer(invocationOnMock -> {
+            ByteBuffer buffer = (ByteBuffer) invocationOnMock.getArguments()[0];
+            buffer.put(bytes);
+            return bytes.length;
+        });
+
+        AtomicBoolean isClosed = new AtomicBoolean(false);
+
+        when(readWriteHandler.consumeReads(channelBuffer)).thenAnswer(invocationOnMock -> {
+            InboundChannelBuffer buffer = (InboundChannelBuffer) invocationOnMock.getArguments()[0];
+            buffer.release(messageLength);
+            isClosed.set(true);
+            return messageLength;
+        });
+        when(readWriteHandler.isProtocolClosed()).thenAnswer((i) -> isClosed.get());
+
+        assertEquals(bytes.length, context.read());
+
+        assertEquals(messageLength, channelBuffer.getIndex());
+        verify(readWriteHandler, times(1)).consumeReads(channelBuffer);
     }
 
     public void testHandleReadBytesWillCheckForNewFlushOperations() throws IOException {
@@ -374,8 +436,35 @@ public class SocketChannelContextTests extends ESTestCase {
         assertTrue(context.readyForFlush());
     }
 
-    @SuppressWarnings({"unchecked", "varargs"})
-    public void testFlushOpsClearedOnClose() throws Exception {
+    public void testCloseChannelSchedulesCloseWithSelector() {
+        context.closeChannel();
+        verify(selector).queueChannelClose(channel);
+    }
+
+    public void testInitiateCloseNotifiesHandlerAndQueuesFlushOperations() throws IOException {
+        assertFalse(context.readyForFlush());
+        when(readWriteHandler.pollFlushOperations()).thenReturn(Collections.singletonList(mock(FlushOperation.class)));
+        context.initiateClose();
+        verify(readWriteHandler).initiateProtocolClose();
+        assertTrue(context.readyForFlush());
+    }
+
+    public void testSelectorShouldCloseWhenReadWriteHandlerReturnsTrueAndNoPendingFlushOperations() throws IOException {
+        FlushOperation closeOperation = mock(FlushOperation.class);
+        when(closeOperation.getBuffersToWrite(anyInt())).thenReturn(new ByteBuffer[0]);
+        when(closeOperation.isFullyFlushed()).thenReturn(false, true);
+        when(readWriteHandler.pollFlushOperations()).thenReturn(Collections.singletonList(closeOperation));
+        context.initiateClose();
+
+        when(readWriteHandler.isProtocolClosed()).thenReturn(false, true, true);
+        assertFalse(context.selectorShouldClose());
+        when(readWriteHandler.pollFlushOperations()).thenReturn(Collections.emptyList());
+        context.flushChannel();
+        assertTrue(context.selectorShouldClose());
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testPendingFlushOpsClearedOnClose() throws Exception {
         try (SocketChannel realChannel = SocketChannel.open()) {
             when(channel.getRawChannel()).thenReturn(realChannel);
             InboundChannelBuffer channelBuffer = InboundChannelBuffer.allocatingInstance();
@@ -441,7 +530,7 @@ public class SocketChannelContextTests extends ESTestCase {
 
         InboundChannelBuffer channelBuffer = InboundChannelBuffer.allocatingInstance();
         expectThrows(IOException.class, () -> context.readFromChannel(channelBuffer));
-        assertTrue(context.closeNow());
+        assertTrue(context.selectorShouldClose());
         assertEquals(0, channelBuffer.getIndex());
     }
 
@@ -450,7 +539,7 @@ public class SocketChannelContextTests extends ESTestCase {
 
         InboundChannelBuffer channelBuffer = InboundChannelBuffer.allocatingInstance();
         context.readFromChannel(channelBuffer);
-        assertTrue(context.closeNow());
+        assertTrue(context.selectorShouldClose());
         assertEquals(0, channelBuffer.getIndex());
     }
 
@@ -503,7 +592,7 @@ public class SocketChannelContextTests extends ESTestCase {
         ByteBuffer[] buffers = {ByteBuffer.allocate(10), ByteBuffer.allocate(10)};
         FlushOperation flushOperation = new FlushOperation(buffers, listener);
         expectThrows(IOException.class, () -> context.flushToChannel(flushOperation));
-        assertTrue(context.closeNow());
+        assertTrue(context.selectorShouldClose());
     }
 
     public void testFlushBuffersHandlesIOExceptionSecondTimeThroughLoop() throws IOException {
@@ -519,14 +608,9 @@ public class SocketChannelContextTests extends ESTestCase {
         ByteBuffer[] buffers = {ByteBuffer.allocate(1023), ByteBuffer.allocate(1023)};
         FlushOperation flushOperation = new FlushOperation(buffers, listener);
         expectThrows(IOException.class, () -> context.flushToChannel(flushOperation));
-        assertTrue(context.closeNow());
+        assertTrue(context.selectorShouldClose());
         assertEquals(1, flushOperation.getBuffersToWrite().length);
         assertEquals(1, flushOperation.getBuffersToWrite()[0].position());
-    }
-
-    public void testInitiateCloseSchedulesCloseWithSelector() {
-        context.closeChannel();
-        verify(selector).queueChannelClose(channel);
     }
 
     private static class TestSocketChannelContext extends SocketChannelContext {

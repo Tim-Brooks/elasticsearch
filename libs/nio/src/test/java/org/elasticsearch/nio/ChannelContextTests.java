@@ -110,8 +110,18 @@ public class ChannelContextTests extends ESTestCase {
         }
 
         @Override
+        public boolean selectorShouldClose() {
+            return false;
+        }
+
+        @Override
         public void closeChannel() {
             throw new UnsupportedOperationException("not implemented");
+        }
+
+        @Override
+        public void initiateClose() throws IOException {
+
         }
 
         @Override

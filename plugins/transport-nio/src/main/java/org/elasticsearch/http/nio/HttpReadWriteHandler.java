@@ -45,6 +45,7 @@ import org.elasticsearch.nio.WriteOperation;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
@@ -134,7 +135,12 @@ public class HttpReadWriteHandler implements ReadWriteHandler {
 
     @Override
     public List<FlushOperation> pollFlushOperations() {
-        ArrayList<FlushOperation> copiedOperations = new ArrayList<>(adaptor.getOutboundCount());
+        int outboundCount = adaptor.getOutboundCount();
+        if (outboundCount == 0) {
+            return Collections.emptyList();
+        }
+
+        ArrayList<FlushOperation> copiedOperations = new ArrayList<>(outboundCount);
         FlushOperation flushOperation;
         while ((flushOperation = adaptor.pollOutboundOperation()) != null) {
             copiedOperations.add(flushOperation);
@@ -143,7 +149,7 @@ public class HttpReadWriteHandler implements ReadWriteHandler {
     }
 
     @Override
-    public void initiateProtocolClose() throws IOException {
+    public void initiateProtocolClose() {
         isClosed = true;
     }
 

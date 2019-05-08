@@ -43,9 +43,4 @@ public class TcpReadWriteHandler extends BytesWriteHandler {
         channelBuffer.release(bytesConsumed);
         return bytesConsumed;
     }
-
-    @Override
-    public boolean readyForFlush() {
-        return false;
-    }
 }

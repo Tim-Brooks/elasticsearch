@@ -17,7 +17,6 @@ import javax.net.ssl.SSLException;
 import java.io.IOException;
 import java.nio.channels.ClosedChannelException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.function.BiConsumer;
@@ -30,7 +29,6 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
     private final LinkedList<FlushOperation> unencryptedBytes = new LinkedList<>();
     private final InboundChannelBuffer applicationBuffer;
     private boolean needsToInitiateClose = false;
-    private boolean isCloseTimedOut = false;
 
     SSLReadWriteHandler(NioSelector selector, SSLDriver sslDriver, ReadWriteHandler delegate, InboundChannelBuffer applicationBuffer) {
         this.selector = selector;
@@ -96,10 +94,10 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
         return encrypted;
     }
 
-    @Override
-    public boolean readyForFlush() {
-        return sslDriver.readyForApplicationData() && (unencryptedBytes.isEmpty() == false || delegate.readyForFlush());
-    }
+//    @Override
+//    public boolean readyForFlush() {
+//        return sslDriver.readyForApplicationData() && (unencryptedBytes.isEmpty() == false || delegate.readyForFlush());
+//    }
 
     @Override
     public int consumeReads(InboundChannelBuffer channelBuffer) throws IOException {
@@ -120,11 +118,8 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
     @Override
     public void initiateProtocolClose() throws IOException {
         delegate.initiateProtocolClose();
-        if (delegate.isProtocolClosed()) {
-            sslDriver.initiateClose();
-        } else {
-            needsToInitiateClose = true;
-        }
+        needsToInitiateClose = true;
+        maybeInitiateClose();
     }
 
     private void maybeInitiateClose() throws SSLException {
@@ -136,7 +131,7 @@ public class SSLReadWriteHandler implements ReadWriteHandler {
 
     @Override
     public boolean isProtocolClosed() {
-        return isCloseTimedOut || (delegate.isProtocolClosed() && sslDriver.isClosed());
+        return sslDriver.isClosed();
     }
 
     @Override
