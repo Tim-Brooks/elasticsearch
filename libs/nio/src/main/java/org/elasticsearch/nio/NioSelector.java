@@ -433,9 +433,9 @@ public class NioSelector implements Closeable {
         ChannelContext<?> channelContext;
         while ((channelContext = channelsToClose.poll()) != null) {
             try {
-                boolean channelRegisteredNotRegistered = channelContext.getSelectionKey() == null;
+                boolean channelNotRegistered = channelContext.getSelectionKey() == null;
                 // If the channel is not registered yet, force close it.
-                eventHandler.handleClose(channelContext, channelRegisteredNotRegistered || isShuttingDown);
+                eventHandler.handleClose(channelContext, channelNotRegistered || isShuttingDown);
             } catch (Exception e) {
                 eventHandler.closeException(channelContext, e);
             }
