@@ -99,7 +99,7 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
 
     public static final String ACTION_NAME = BulkAction.NAME + "[s]";
     public static final ActionType<BulkShardResponse> TYPE = new ActionType<>(ACTION_NAME, BulkShardResponse::new);
-    private static final long MAX_INTERVAL_BETWEEN_FINISH = TimeUnit.MILLISECONDS.toNanos(10);
+    private static final long MAX_INTERVAL_BETWEEN_FINISH = TimeUnit.MILLISECONDS.toNanos(5);
 
     private static final Logger logger = LogManager.getLogger(TransportShardBulkActionNew.class);
 
@@ -319,19 +319,11 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
         shardState.threadsIndexing.getAndIncrement();
         try {
             int opsIndexed = 0;
-            Translog.Location maxLocation = null;
             ShardOp shardOp;
             while (++opsIndexed <= MAX_PERFORM_OPS && (shardOp = shardState.pollPreIndexed()) != null) {
                 boolean opCompleted = true;
                 try {
-                    if (performShardOperation(shardOp)) {
-                        Translog.Location location = shardOp.context.getLocationToSync();
-                        if (maxLocation == null) {
-                            maxLocation = location;
-                        } else if (location != null && location.compareTo(maxLocation) > 0) {
-                            maxLocation = location;
-                        }
-                    } else {
+                    if (performShardOperation(shardOp) == false) {
                         opCompleted = false;
                     }
                 } catch (Exception e) {
@@ -356,39 +348,59 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
 
     private void maybeFinishOperations(IndexShard indexShard, ShardState shardState) {
         long currentNanos = System.nanoTime();
-        if (shardState.threadsIndexing.get() == 0 || (currentNanos - shardState.nextForceFinishNanos >= 0)) {
-            if (shardState.fsyncScheduleSemaphore.tryAcquire()) {
-                shardState.nextForceFinishNanos = currentNanos + MAX_INTERVAL_BETWEEN_FINISH;
-
+//        if (shardState.threadsIndexing.get() == 0 || (currentNanos - shardState.nextForceFinishNanos >= 0)) {
+//            if (shardState.fsyncScheduleSemaphore.tryAcquire()) {
                 ArrayList<ShardOp> completedOps = new ArrayList<>();
                 ArrayList<ShardOp> completedOpsWaitForRefresh = new ArrayList<>(0);
                 ArrayList<ShardOp> completedOpsForceRefresh = new ArrayList<>(0);
                 Translog.Location maxLocation = null;
 
                 ShardOp indexedOp;
-                while ((indexedOp = shardState.pollPostIndexed()) != null) {
-                    completedOps.add(indexedOp);
+                try {
+                    shardState.nextForceFinishNanos = currentNanos + MAX_INTERVAL_BETWEEN_FINISH;
 
-                    Translog.Location location = indexedOp.context.getLocationToSync();
-                    if (maxLocation == null) {
-                        maxLocation = location;
-                    } else if (location != null && location.compareTo(maxLocation) > 0) {
-                        maxLocation = location;
+                    while ((indexedOp = shardState.pollPostIndexed()) != null) {
+                        completedOps.add(indexedOp);
+
+                        Translog.Location location = indexedOp.context.getLocationToSync();
+                        if (maxLocation == null) {
+                            maxLocation = location;
+                        } else if (location != null && location.compareTo(maxLocation) > 0) {
+                            maxLocation = location;
+                        }
+
+                        if (indexedOp.request.getRefreshPolicy() == WriteRequest.RefreshPolicy.WAIT_UNTIL) {
+                            completedOpsWaitForRefresh.add(indexedOp);
+                        } else if (indexedOp.request.getRefreshPolicy() == WriteRequest.RefreshPolicy.IMMEDIATE) {
+                            completedOpsForceRefresh.add(indexedOp);
+                        }
                     }
 
-                    if (indexedOp.request.getRefreshPolicy() == WriteRequest.RefreshPolicy.WAIT_UNTIL) {
-                        completedOpsWaitForRefresh.add(indexedOp);
-                    } else if (indexedOp.request.getRefreshPolicy() == WriteRequest.RefreshPolicy.IMMEDIATE) {
-                        completedOpsForceRefresh.add(indexedOp);
-                    }
+                } finally {
+//                    shardState.fsyncScheduleSemaphore.release();
                 }
 
+//                while ((indexedOp = shardState.pollPostIndexed()) != null) {
+//                    completedOps.add(indexedOp);
+//
+//                    Translog.Location location = indexedOp.context.getLocationToSync();
+//                    if (maxLocation == null) {
+//                        maxLocation = location;
+//                    } else if (location != null && location.compareTo(maxLocation) > 0) {
+//                        maxLocation = location;
+//                    }
+//
+//                    if (indexedOp.request.getRefreshPolicy() == WriteRequest.RefreshPolicy.WAIT_UNTIL) {
+//                        completedOpsWaitForRefresh.add(indexedOp);
+//                    } else if (indexedOp.request.getRefreshPolicy() == WriteRequest.RefreshPolicy.IMMEDIATE) {
+//                        completedOpsForceRefresh.add(indexedOp);
+//                    }
+//                }
                 meanMetric.get().inc(completedOps.size());
-                shardState.fsyncScheduleSemaphore.release();
 
                 finishOperations(indexShard, maxLocation, completedOps, completedOpsWaitForRefresh, completedOpsForceRefresh);
-            }
-        }
+//            }
+//        }
     }
 
     private void finishOperations(IndexShard indexShard, Translog.Location maxLocation, ArrayList<ShardOp> completedOps,
