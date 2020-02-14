@@ -99,7 +99,6 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
 
     public static final String ACTION_NAME = BulkAction.NAME + "[s]";
     public static final ActionType<BulkShardResponse> TYPE = new ActionType<>(ACTION_NAME, BulkShardResponse::new);
-    private static final long MAX_INTERVAL_BETWEEN_FINISH = TimeUnit.MILLISECONDS.toNanos(5);
 
     private static final Logger logger = LogManager.getLogger(TransportShardBulkActionNew.class);
 
@@ -110,7 +109,7 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
     private final int maxWriteThreads;
 
     private final AtomicReference<MeanMetric> meanMetric = new AtomicReference<>(new MeanMetric());
-    private final Recorder indexRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60),  3);
+    private final Recorder indexRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60), 3);
 
     @Inject
     public TransportShardBulkActionNew(Settings settings, TransportService transportService, ClusterService clusterService,
@@ -154,14 +153,11 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
         private final ConcurrentLinkedQueue<ShardOp> postIndexedQueue = new ConcurrentLinkedQueue<>();
         private final Semaphore writeThreadsSemaphore;
         private final Semaphore fsyncScheduleSemaphore;
-        private volatile long nextForceFinishNanos = System.nanoTime() - 1;
 
         private ShardState(int maxWriteThreads) {
             writeThreadsSemaphore = new Semaphore(maxWriteThreads);
             fsyncScheduleSemaphore = new Semaphore(1);
         }
-
-        private final AtomicInteger threadsIndexing = new AtomicInteger();
 
         private boolean attemptPreIndexedEnqueue(ShardOp shardOp, boolean allowReject) {
             if (allowReject && pendingOps.get() >= MAX_QUEUED) {
@@ -316,7 +312,6 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
         ShardId shardId = indexShard.shardId();
         ShardState shardState = shardQueues.get(shardId);
 
-        shardState.threadsIndexing.getAndIncrement();
         try {
             int opsIndexed = 0;
             ShardOp shardOp;
@@ -336,29 +331,25 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
                     }
                 }
             }
-
-            if (opsIndexed > 0) {
-                indexShard.afterWriteOperation();
-            }
         } finally {
-            shardState.threadsIndexing.decrementAndGet();
             maybeFinishOperations(indexShard, shardState);
         }
     }
 
     private void maybeFinishOperations(IndexShard indexShard, ShardState shardState) {
-        long currentNanos = System.nanoTime();
-//        if (shardState.threadsIndexing.get() == 0 || (currentNanos - shardState.nextForceFinishNanos >= 0)) {
-//            if (shardState.fsyncScheduleSemaphore.tryAcquire()) {
-                ArrayList<ShardOp> completedOps = new ArrayList<>();
-                ArrayList<ShardOp> completedOpsWaitForRefresh = new ArrayList<>(0);
-                ArrayList<ShardOp> completedOpsForceRefresh = new ArrayList<>(0);
-                Translog.Location maxLocation = null;
+        if (shardState.fsyncScheduleSemaphore.tryAcquire()) {
+            indexShard.afterWriteOperation();
 
-                ShardOp indexedOp;
-                try {
-                    shardState.nextForceFinishNanos = currentNanos + MAX_INTERVAL_BETWEEN_FINISH;
+            ArrayList<ShardOp> completedOps = new ArrayList<>();
+            ArrayList<ShardOp> completedOpsWaitForRefresh = new ArrayList<>(0);
+            ArrayList<ShardOp> completedOpsForceRefresh = new ArrayList<>(0);
+            Translog.Location maxLocation = null;
 
+            boolean released = false;
+            ShardOp indexedOp;
+            try {
+                boolean lastSpin = false;
+                while (true) {
                     while ((indexedOp = shardState.pollPostIndexed()) != null) {
                         completedOps.add(indexedOp);
 
@@ -376,31 +367,33 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
                         }
                     }
 
-                } finally {
-//                    shardState.fsyncScheduleSemaphore.release();
+                    if (completedOps.isEmpty()) {
+                        if (lastSpin) {
+                            break;
+                        } else {
+                            shardState.fsyncScheduleSemaphore.release();
+                            released = true;
+                            lastSpin = true;
+                            continue;
+                        }
+                    }
+
+                    meanMetric.get().inc(completedOps.size());
+
+                    finishOperations(indexShard, maxLocation, completedOps, completedOpsWaitForRefresh, completedOpsForceRefresh);
+                    if (lastSpin == true) {
+                        break;
+                    }
+                    completedOps.clear();
+                    completedOpsForceRefresh.clear();
+                    completedOpsWaitForRefresh.clear();
                 }
-
-//                while ((indexedOp = shardState.pollPostIndexed()) != null) {
-//                    completedOps.add(indexedOp);
-//
-//                    Translog.Location location = indexedOp.context.getLocationToSync();
-//                    if (maxLocation == null) {
-//                        maxLocation = location;
-//                    } else if (location != null && location.compareTo(maxLocation) > 0) {
-//                        maxLocation = location;
-//                    }
-//
-//                    if (indexedOp.request.getRefreshPolicy() == WriteRequest.RefreshPolicy.WAIT_UNTIL) {
-//                        completedOpsWaitForRefresh.add(indexedOp);
-//                    } else if (indexedOp.request.getRefreshPolicy() == WriteRequest.RefreshPolicy.IMMEDIATE) {
-//                        completedOpsForceRefresh.add(indexedOp);
-//                    }
-//                }
-                meanMetric.get().inc(completedOps.size());
-
-                finishOperations(indexShard, maxLocation, completedOps, completedOpsWaitForRefresh, completedOpsForceRefresh);
-//            }
-//        }
+            } finally {
+                if (released == false) {
+                    shardState.fsyncScheduleSemaphore.release();
+                }
+            }
+        }
     }
 
     private void finishOperations(IndexShard indexShard, Translog.Location maxLocation, ArrayList<ShardOp> completedOps,
