@@ -106,8 +106,6 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
     private final MappingUpdatedAction mappingUpdatedAction;
     private final ConcurrentHashMap<ShardId, ShardState> shardQueues = new ConcurrentHashMap<>();
 
-    private final int maxWriteThreads;
-
     private final AtomicReference<MeanMetric> meanMetric = new AtomicReference<>(new MeanMetric());
     private final Recorder indexRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60), 3);
 
@@ -117,7 +115,6 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
                                        MappingUpdatedAction mappingUpdatedAction, UpdateHelper updateHelper, ActionFilters actionFilters) {
         super(settings, ACTION_NAME, transportService, clusterService, indicesService, threadPool, shardStateAction, actionFilters,
             BulkShardRequest::new, BulkShardRequest::new, ThreadPool.Names.WRITE, false);
-        this.maxWriteThreads = threadPool.info(ThreadPool.Names.WRITE).getMax();
         this.updateHelper = updateHelper;
         this.mappingUpdatedAction = mappingUpdatedAction;
         RecordJFR.scheduleMeanSample("TransportShardBulkActionNew#NumberOfOps", threadPool, meanMetric);
@@ -137,7 +134,7 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
     private ShardState getOrCreateShardQueue(ShardId shardId) {
         ShardState queue = shardQueues.get(shardId);
         if (queue == null) {
-            ShardState createdQueue = new ShardState(maxWriteThreads);
+            ShardState createdQueue = new ShardState(1);
             ShardState previous = shardQueues.putIfAbsent(shardId, createdQueue);
             queue = Objects.requireNonNullElse(previous, createdQueue);
         }
@@ -292,18 +289,18 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
         }
     }
 
-    // TODO: Consider some type of time slice for indexing
-    private static final int MAX_PERFORM_OPS = 10;
+    private static final long MAX_PERFORM_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
 
     private void performShardOperations(IndexShard indexShard) {
         ShardId shardId = indexShard.shardId();
         ShardState shardState = shardQueues.get(shardId);
 
-        ArrayList<ShardOp> completedOps = new ArrayList<>(MAX_PERFORM_OPS);
+        ArrayList<ShardOp> completedOps = new ArrayList<>();
+        long startNanos = System.nanoTime();
+        long nanosIndexing = 0L;
         try {
-            int opsIndexed = 0;
             ShardOp shardOp;
-            while (++opsIndexed <= MAX_PERFORM_OPS && (shardOp = shardState.pollPreIndexed()) != null) {
+            while (nanosIndexing <= MAX_PERFORM_NANOS && (shardOp = shardState.pollPreIndexed()) != null) {
                 boolean opCompleted = true;
                 try {
                     if (performShardOperation(shardOp) == false) {
@@ -318,6 +315,7 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
                         completedOps.add(shardOp);
                     }
                 }
+                nanosIndexing = System.nanoTime() - startNanos;
             }
         } finally {
             finishOperations(indexShard, completedOps);
