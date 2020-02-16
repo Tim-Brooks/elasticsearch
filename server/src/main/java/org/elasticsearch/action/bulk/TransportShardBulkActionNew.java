@@ -106,8 +106,6 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
     private final MappingUpdatedAction mappingUpdatedAction;
     private final ConcurrentHashMap<ShardId, ShardState> shardQueues = new ConcurrentHashMap<>();
 
-    private final int maxWriteThreads;
-
     private final AtomicReference<MeanMetric> meanMetric = new AtomicReference<>(new MeanMetric());
     private final Recorder indexRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60), 3);
 
@@ -117,7 +115,6 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
                                        MappingUpdatedAction mappingUpdatedAction, UpdateHelper updateHelper, ActionFilters actionFilters) {
         super(settings, ACTION_NAME, transportService, clusterService, indicesService, threadPool, shardStateAction, actionFilters,
             BulkShardRequest::new, BulkShardRequest::new, ThreadPool.Names.WRITE, false);
-        this.maxWriteThreads = threadPool.info(ThreadPool.Names.WRITE).getMax();
         this.updateHelper = updateHelper;
         this.mappingUpdatedAction = mappingUpdatedAction;
         RecordJFR.scheduleMeanSample("TransportShardBulkActionNew#NumberOfOps", threadPool, meanMetric);
@@ -137,7 +134,7 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
     private ShardState getOrCreateShardQueue(ShardId shardId) {
         ShardState queue = shardQueues.get(shardId);
         if (queue == null) {
-            ShardState createdQueue = new ShardState(maxWriteThreads);
+            ShardState createdQueue = new ShardState(1);
             ShardState previous = shardQueues.putIfAbsent(shardId, createdQueue);
             queue = Objects.requireNonNullElse(previous, createdQueue);
         }
