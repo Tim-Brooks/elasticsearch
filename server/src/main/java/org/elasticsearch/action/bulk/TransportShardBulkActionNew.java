@@ -114,7 +114,7 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
                                        IndicesService indicesService, ThreadPool threadPool, ShardStateAction shardStateAction,
                                        MappingUpdatedAction mappingUpdatedAction, UpdateHelper updateHelper, ActionFilters actionFilters) {
         super(settings, ACTION_NAME, transportService, clusterService, indicesService, threadPool, shardStateAction, actionFilters,
-            BulkShardRequest::new, BulkShardRequest::new, ThreadPool.Names.WRITE, false);
+            BulkShardRequest::new, BulkShardRequest::new, ThreadPool.Names.SAME, false);
         this.updateHelper = updateHelper;
         this.mappingUpdatedAction = mappingUpdatedAction;
         RecordJFR.scheduleMeanSample("TransportShardBulkActionNew#NumberOfOps", threadPool, meanMetric);
