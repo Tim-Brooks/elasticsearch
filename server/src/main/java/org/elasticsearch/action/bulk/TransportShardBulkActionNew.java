@@ -289,7 +289,7 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
         }
     }
 
-    private static final long MAX_PERFORM_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
+    private static final long MAX_PERFORM_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
 
     private void performShardOperations(IndexShard indexShard) {
         ShardId shardId = indexShard.shardId();

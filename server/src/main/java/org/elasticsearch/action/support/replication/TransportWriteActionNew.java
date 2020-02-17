@@ -62,7 +62,7 @@ public abstract class TransportWriteActionNew<
                                       ShardStateAction shardStateAction, ActionFilters actionFilters, Writeable.Reader<Request> request,
                                       Writeable.Reader<ReplicaRequest> replicaRequest, String executor, boolean forceExecutionOnPrimary) {
         super(settings, actionName, transportService, clusterService, indicesService, threadPool, shardStateAction, actionFilters,
-              request, replicaRequest, executor, true, forceExecutionOnPrimary);
+              request, replicaRequest, executor, false, forceExecutionOnPrimary);
     }
 
     /** Syncs operation result to the translog or throws a shard not available failure */
