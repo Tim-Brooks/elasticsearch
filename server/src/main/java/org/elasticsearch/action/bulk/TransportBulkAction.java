@@ -110,6 +110,8 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
     private static final String DROPPED_ITEM_WITH_AUTO_GENERATED_ID = "auto-generated";
 
     private final Recorder recorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60),  3);
+    private final Recorder successRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60),  3);
+    private final Recorder failedRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60),  3);
 
     @Inject
     public TransportBulkAction(ThreadPool threadPool, TransportService transportService,
@@ -136,6 +138,8 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
         this.indexNameExpressionResolver = indexNameExpressionResolver;
         clusterService.addStateApplier(this.ingestForwarder);
         RecordJFR.scheduleHistogramSample("TransportBulkAction", threadPool, new AtomicReference<>(recorder));
+        RecordJFR.scheduleHistogramSample("TransportBulkAction#Success", threadPool, new AtomicReference<>(successRecorder));
+        RecordJFR.scheduleHistogramSample("TransportBulkAction#Failed", threadPool, new AtomicReference<>(failedRecorder));
     }
 
     /**
@@ -507,7 +511,7 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
                             responses.set(bulkItemResponse.getItemId(), bulkItemResponse);
                         }
                         if (counter.decrementAndGet() == 0) {
-                            finishHim();
+                            finishHim(true);
                         }
                     }
 
@@ -521,13 +525,18 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
                                     new BulkItemResponse.Failure(indexName, docWriteRequest.id(), e)));
                         }
                         if (counter.decrementAndGet() == 0) {
-                            finishHim();
+                            finishHim(false);
                         }
                     }
 
-                    private void finishHim() {
+                    private void finishHim(boolean success) {
                         long nanosTook = relativeTime() - startTimeNanos;
-                        long microsTook = TimeUnit.NANOSECONDS.toMicros(nanosTook);
+                        long microsTook = Math.min(TimeUnit.NANOSECONDS.toMicros(nanosTook), TimeUnit.MINUTES.toMicros(1));
+                        if (success) {
+                            successRecorder.recordValue(microsTook);
+                        } else {
+                            failedRecorder.recordValue(microsTook);
+                        }
                         recorder.recordValue(microsTook);
                         listener.onResponse(new BulkResponse(responses.toArray(new BulkItemResponse[responses.length()]),
                             TimeUnit.NANOSECONDS.toMillis(nanosTook)));

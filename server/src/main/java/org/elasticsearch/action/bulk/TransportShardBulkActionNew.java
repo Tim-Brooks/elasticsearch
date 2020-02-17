@@ -107,6 +107,9 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
     private final ConcurrentHashMap<ShardId, ShardState> shardQueues = new ConcurrentHashMap<>();
 
     private final AtomicReference<MeanMetric> meanMetric = new AtomicReference<>(new MeanMetric());
+    private final Recorder queuedRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60), 3);
+    private final Recorder indexFlushRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60), 3);
+    private final Recorder totalTimeRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60), 3);
     private final Recorder indexRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60), 3);
 
     @Inject
@@ -119,6 +122,9 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
         this.mappingUpdatedAction = mappingUpdatedAction;
         RecordJFR.scheduleMeanSample("TransportShardBulkActionNew#NumberOfOps", threadPool, meanMetric);
         RecordJFR.scheduleHistogramSample("TransportShardBulkActionNew#IndexOps", threadPool, new AtomicReference<>(indexRecorder));
+        RecordJFR.scheduleHistogramSample("TransportShardBulkActionNew#QueuedTime", threadPool, new AtomicReference<>(queuedRecorder));
+        RecordJFR.scheduleHistogramSample("TransportShardBulkActionNew#IndexFlushTime", threadPool, new AtomicReference<>(indexFlushRecorder));
+        RecordJFR.scheduleHistogramSample("TransportShardBulkActionNew#TotalTime", threadPool, new AtomicReference<>(totalTimeRecorder));
     }
 
     @Override
@@ -172,11 +178,13 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
         }
     }
 
-    public static class ShardOp {
+    public class ShardOp {
         private final BulkShardRequest request;
         private final IndexShard indexShard;
         private final BulkPrimaryExecutionContext context;
         private final ShardOpListener listener;
+        private final long createNanos;
+        private volatile long dequeuedNanos;
 
         public ShardOp(BulkShardRequest request, IndexShard indexShard,
                        ActionListener<PrimaryResult<BulkShardRequest, BulkShardResponse>> listener) {
@@ -184,6 +192,7 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
             this.indexShard = indexShard;
             this.context = new BulkPrimaryExecutionContext(request, indexShard);
             this.listener = new ShardOpListener(request, context, listener);
+            this.createNanos = System.nanoTime();
         }
 
         public Translog.Location locationToSync() {
@@ -194,7 +203,7 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
             return listener;
         }
 
-        private static class ShardOpListener implements ActionListener<Void> {
+        private class ShardOpListener implements ActionListener<Void> {
 
             private final CountDown countDown;
             private final BulkPrimaryExecutionContext context;
@@ -215,12 +224,15 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
             @Override
             public void onResponse(Void v) {
                 if (countDown.countDown()) {
+                    long finalNanos = System.nanoTime();
+                    long minute = TimeUnit.MINUTES.toMicros(1);
+                    indexFlushRecorder.recordValue(Math.min(TimeUnit.NANOSECONDS.toMicros(finalNanos - dequeuedNanos), minute));
+                    totalTimeRecorder.recordValue(Math.min(TimeUnit.NANOSECONDS.toMicros(finalNanos - createNanos), minute));
                     WritePrimaryResult<BulkShardRequest, BulkShardResponse> result = new WritePrimaryResult<>(context.getBulkShardRequest(),
                         context.buildShardResponse());
                     result.finalResponseIfSuccessful.setForcedRefresh(forcedRefresh);
                     delegate.onResponse(result);
                 }
-
             }
 
             @Override
@@ -302,6 +314,10 @@ public class TransportShardBulkActionNew extends TransportWriteActionNew<BulkSha
             ShardOp shardOp;
             while (nanosIndexing <= MAX_PERFORM_NANOS && (shardOp = shardState.pollPreIndexed()) != null) {
                 boolean opCompleted = true;
+                long dequeuedNanos = System.nanoTime();
+                shardOp.dequeuedNanos = dequeuedNanos;
+                long queuedMicros = TimeUnit.NANOSECONDS.toMicros(dequeuedNanos - shardOp.createNanos);
+                queuedRecorder.recordValue(Math.min(queuedMicros, TimeUnit.MINUTES.toMicros(1)));
                 try {
                     if (performShardOperation(shardOp) == false) {
                         opCompleted = false;
