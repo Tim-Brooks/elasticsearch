@@ -138,8 +138,8 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
         this.indexNameExpressionResolver = indexNameExpressionResolver;
         clusterService.addStateApplier(this.ingestForwarder);
         RecordJFR.scheduleHistogramSample("TransportBulkAction", threadPool, new AtomicReference<>(recorder));
-        RecordJFR.scheduleHistogramSample("TransportBulkAction#Success", threadPool, new AtomicReference<>(successRecorder));
-        RecordJFR.scheduleHistogramSample("TransportBulkAction#Failed", threadPool, new AtomicReference<>(failedRecorder));
+        RecordJFR.scheduleHistogramSample("TransportShardBulkAction#Success", threadPool, new AtomicReference<>(successRecorder));
+        RecordJFR.scheduleHistogramSample("TransportShardBulkAction#Failed", threadPool, new AtomicReference<>(failedRecorder));
     }
 
     /**
@@ -500,7 +500,7 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
                 if (task != null) {
                     bulkShardRequest.setParentTask(nodeId, task.getId());
                 }
-                client.executeLocally(TransportShardBulkActionNew.TYPE, bulkShardRequest, new ActionListener<>() {
+                client.executeLocally(TransportShardBulkAction.TYPE, bulkShardRequest, new ActionListener<>() {
                     @Override
                     public void onResponse(BulkShardResponse bulkShardResponse) {
                         for (BulkItemResponse bulkItemResponse : bulkShardResponse.getResponses()) {
@@ -510,8 +510,12 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
                             }
                             responses.set(bulkItemResponse.getItemId(), bulkItemResponse);
                         }
+                        long nanosTook = relativeTime() - startTimeNanos;
+                        long microsTook = Math.min(TimeUnit.NANOSECONDS.toMicros(nanosTook), TimeUnit.MINUTES.toMicros(1));
+                        successRecorder.recordValue(microsTook);
+
                         if (counter.decrementAndGet() == 0) {
-                            finishHim(true);
+                            finishHim(nanosTook, microsTook);
                         }
                     }
 
@@ -524,19 +528,16 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
                             responses.set(request.id(), new BulkItemResponse(request.id(), docWriteRequest.opType(),
                                     new BulkItemResponse.Failure(indexName, docWriteRequest.id(), e)));
                         }
+                        long nanosTook = relativeTime() - startTimeNanos;
+                        long microsTook = Math.min(TimeUnit.NANOSECONDS.toMicros(nanosTook), TimeUnit.MINUTES.toMicros(1));
+                        failedRecorder.recordValue(microsTook);
+
                         if (counter.decrementAndGet() == 0) {
-                            finishHim(false);
+                            finishHim(nanosTook, microsTook);
                         }
                     }
 
-                    private void finishHim(boolean success) {
-                        long nanosTook = relativeTime() - startTimeNanos;
-                        long microsTook = Math.min(TimeUnit.NANOSECONDS.toMicros(nanosTook), TimeUnit.MINUTES.toMicros(1));
-                        if (success) {
-                            successRecorder.recordValue(microsTook);
-                        } else {
-                            failedRecorder.recordValue(microsTook);
-                        }
+                    private void finishHim(long nanosTook, long microsTook) {
                         recorder.recordValue(microsTook);
                         listener.onResponse(new BulkResponse(responses.toArray(new BulkItemResponse[responses.length()]),
                             TimeUnit.NANOSECONDS.toMillis(nanosTook)));
