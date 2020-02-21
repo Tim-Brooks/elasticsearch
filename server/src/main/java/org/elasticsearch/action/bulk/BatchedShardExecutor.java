@@ -19,9 +19,11 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.HdrHistogram.Recorder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.store.AlreadyClosedException;
+import org.elasticsearch.RecordJFR;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.WriteRequest;
 import org.elasticsearch.action.update.UpdateHelper;
@@ -31,6 +33,7 @@ import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.CheckedBiFunction;
 import org.elasticsearch.common.CheckedFunction;
 import org.elasticsearch.common.Nullable;
+import org.elasticsearch.common.metrics.MeanMetric;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.CountDown;
@@ -49,6 +52,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 public class BatchedShardExecutor {
@@ -65,6 +69,9 @@ public class BatchedShardExecutor {
 
     private final ConcurrentHashMap<ShardId, ShardState> shardState = new ConcurrentHashMap<>();
 
+    private final AtomicReference<MeanMetric> meanMetric = new AtomicReference<>(new MeanMetric());
+    private final Recorder timeSliceRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60), 3);
+
 
     public BatchedShardExecutor(ClusterService clusterService, ThreadPool threadPool, UpdateHelper updateHelper,
                                 MappingUpdatedAction mappingUpdatedAction) {
@@ -77,6 +84,8 @@ public class BatchedShardExecutor {
         this.replicaOpHandler = replicaOpHandler;
         this.threadPool = threadPool;
         this.numberOfWriteThreads = threadPool.info(ThreadPool.Names.WRITE).getMax();
+        RecordJFR.scheduleMeanSample("BatchedShardExecutor#NumberOfOps", threadPool, meanMetric);
+        RecordJFR.scheduleHistogramSample("BatchedShardExecutor#TimeSlice", threadPool, new AtomicReference<>(timeSliceRecorder));
     }
 
     public void primary(BulkShardRequest request, IndexShard primary, ActionListener<WriteResult> writeListener,
@@ -166,10 +175,10 @@ public class BatchedShardExecutor {
         }
 
         ArrayList<ShardOp> completedOps = new ArrayList<>();
+        long startNanos = System.nanoTime();
         try {
             int opsIndexed = 0;
             ShardOp shardOp;
-            long startNanos = System.nanoTime();
             long nanosSpentExecuting = 0;
             while ((nanosSpentExecuting < MAX_EXECUTE_NANOS) && (shardOp = shardState.pollPreIndexed()) != null) {
                 boolean opCompleted = false;
@@ -195,6 +204,11 @@ public class BatchedShardExecutor {
                 }
             }
         } finally {
+            if (completedOps.isEmpty() == false) {
+                long oneMinute = TimeUnit.SECONDS.toMicros(1);
+                timeSliceRecorder.recordValue(Math.min(TimeUnit.NANOSECONDS.toMicros(System.nanoTime() - startNanos), oneMinute));
+                meanMetric.get().inc(completedOps.size());
+            }
             finishOperations(indexShard, completedOps);
             cleanupIfShardClosed(indexShard);
         }

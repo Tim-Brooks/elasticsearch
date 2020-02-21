@@ -19,6 +19,7 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.HdrHistogram.Recorder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
@@ -26,6 +27,7 @@ import org.apache.lucene.util.SparseFixedBitSet;
 import org.elasticsearch.Assertions;
 import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.ExceptionsHelper;
+import org.elasticsearch.RecordJFR;
 import org.elasticsearch.ResourceAlreadyExistsException;
 import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionListener;
@@ -85,6 +87,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
@@ -105,6 +108,10 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
     private final NodeClient client;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private static final String DROPPED_ITEM_WITH_AUTO_GENERATED_ID = "auto-generated";
+
+    private final Recorder recorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60),  3);
+    private final Recorder successRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60),  3);
+    private final Recorder failedRecorder = new Recorder(1, TimeUnit.SECONDS.toMicros(60),  3);
 
     @Inject
     public TransportBulkAction(ThreadPool threadPool, TransportService transportService,
@@ -130,6 +137,9 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
         this.client = client;
         this.indexNameExpressionResolver = indexNameExpressionResolver;
         clusterService.addStateApplier(this.ingestForwarder);
+        RecordJFR.scheduleHistogramSample("TransportBulkAction", threadPool, new AtomicReference<>(recorder));
+        RecordJFR.scheduleHistogramSample("TransportShardBulkAction#Success", threadPool, new AtomicReference<>(successRecorder));
+        RecordJFR.scheduleHistogramSample("TransportShardBulkAction#Failed", threadPool, new AtomicReference<>(failedRecorder));
     }
 
     /**
@@ -500,8 +510,12 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
                             }
                             responses.set(bulkItemResponse.getItemId(), bulkItemResponse);
                         }
+                        long nanosTook = relativeTime() - startTimeNanos;
+                        long microsTook = Math.min(TimeUnit.NANOSECONDS.toMicros(nanosTook), TimeUnit.MINUTES.toMicros(1));
+                        successRecorder.recordValue(microsTook);
+
                         if (counter.decrementAndGet() == 0) {
-                            finishHim();
+                            finishHim(nanosTook, microsTook);
                         }
                     }
 
@@ -514,14 +528,19 @@ public class TransportBulkAction extends HandledTransportAction<BulkRequest, Bul
                             responses.set(request.id(), new BulkItemResponse(request.id(), docWriteRequest.opType(),
                                     new BulkItemResponse.Failure(indexName, docWriteRequest.id(), e)));
                         }
+                        long nanosTook = relativeTime() - startTimeNanos;
+                        long microsTook = Math.min(TimeUnit.NANOSECONDS.toMicros(nanosTook), TimeUnit.MINUTES.toMicros(1));
+                        failedRecorder.recordValue(microsTook);
+
                         if (counter.decrementAndGet() == 0) {
-                            finishHim();
+                            finishHim(nanosTook, microsTook);
                         }
                     }
 
-                    private void finishHim() {
+                    private void finishHim(long nanosTook, long microsTook) {
+                        recorder.recordValue(microsTook);
                         listener.onResponse(new BulkResponse(responses.toArray(new BulkItemResponse[responses.length()]),
-                            buildTookInMillis(startTimeNanos)));
+                            TimeUnit.NANOSECONDS.toMillis(nanosTook)));
                     }
                 });
             }
