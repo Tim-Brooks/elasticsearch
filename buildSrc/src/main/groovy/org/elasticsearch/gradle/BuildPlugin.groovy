@@ -690,10 +690,12 @@ class BuildPlugin implements Plugin<Project> {
                     logging.exceptionFormat = 'full'
                 }
 
-                if (OS.current().equals(OS.WINDOWS) && System.getProperty('tests.timeoutSuite') == null) {
-                    // override the suite timeout to 30 mins for windows, because it has the most inefficient filesystem known to man
-                    test.systemProperty 'tests.timeoutSuite', '1800000!'
-                }
+//                if (OS.current().equals(OS.WINDOWS) && System.getProperty('tests.timeoutSuite') == null) {
+//                    // override the suite timeout to 30 mins for windows, because it has the most inefficient filesystem known to man
+//                    test.systemProperty 'tests.timeoutSuite', '1800000!'
+//                }
+
+                test.systemProperty 'tests.timeoutSuite', '60000'
 
                 /*
                  *  If this project builds a shadow JAR than any unit tests should test against that artifact instead of

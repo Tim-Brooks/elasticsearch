@@ -36,7 +36,6 @@ import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.CountDown;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.index.shard.IndexShard;
-import org.elasticsearch.index.shard.IndexShardState;
 import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.threadpool.ThreadPool;
 
@@ -208,7 +207,7 @@ public class BatchedShardExecutor {
                             immediateRefresh = true;
                             shardOp.getFlushListener().setForcedRefresh(true);
                         }
-                        indexShard.afterWriteOperation();
+                        afterWrite(indexShard);
                     }
 
                     // Update nanosSpentExecuting every 8 operations
@@ -244,11 +243,11 @@ public class BatchedShardExecutor {
                 while (true) {
                     Translog.Location maxLocation = null;
                     Translog.Location syncedLocation = null;
-                    try {
-                        syncedLocation = indexShard.getTranslogLastSyncedLocation();
-                    } catch (Exception e) {
-                        // The Translog might have closed. Ignore.
-                    }
+//                    try {
+//                        syncedLocation = indexShard.getTranslogLastSyncedLocation();
+//                    } catch (Exception e) {
+//                        // The Translog might have closed. Ignore.
+//                    }
 
                     ShardOp indexedOp;
                     int opsToHandle = 0;
@@ -382,7 +381,8 @@ public class BatchedShardExecutor {
     }
 
     private void cleanupIfShardClosed(IndexShard indexShard) {
-        if (indexShard.state() == IndexShardState.CLOSED) {
+//        if (indexShard.state() == IndexShardState.CLOSED) {
+        if (false) {
             ShardState removed = shardStateMap.remove(indexShard);
             // If we did not successfully remove the ShardState, another thread did and will handling the
             // closing.
@@ -398,6 +398,14 @@ public class BatchedShardExecutor {
                 }
                 onFailure(listenersToFail.stream(), new AlreadyClosedException(CLOSED_SHARD_MESSAGE));
             }
+        }
+    }
+
+    private void afterWrite(IndexShard indexShard) {
+        try {
+            indexShard.afterWriteOperation();
+        } catch (Exception e) {
+            logger.warn("exception while triggering post write operations", e);
         }
     }
 
@@ -599,9 +607,9 @@ public class BatchedShardExecutor {
             private final ActionListener<FlushResult> delegate;
             private volatile boolean forcedRefresh;
 
-            private FlushListener(boolean waitOnRefresh, ActionListener<FlushResult> delegate) {
+            private FlushListener(boolean needRefresh, ActionListener<FlushResult> delegate) {
                 this.delegate = delegate;
-                if (waitOnRefresh) {
+                if (needRefresh) {
                     countDown = new CountDown(2);
                 } else {
                     countDown = new CountDown(1);
