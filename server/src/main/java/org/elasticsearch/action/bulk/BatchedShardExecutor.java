@@ -166,6 +166,7 @@ public class BatchedShardExecutor {
     private void performShardOperations(IndexShard indexShard) {
         ShardState shardState = this.shardStateMap.get(indexShard);
         if (shardState == null) {
+            logger.error("FUCK SHOULD NEVER HAPPEN");
             // The IndexShard has closed and the resources have been cleaned
             return;
         }
@@ -210,15 +211,15 @@ public class BatchedShardExecutor {
                         afterWrite(indexShard);
                     }
 
-                    // Update nanosSpentExecuting every 8 operations
+                     // Update nanosSpentExecuting every 8 operations
                     if ((opsExecuted & (8 - 1)) == 0) {
                         nanosSpentExecuting = System.nanoTime() - startNanos;
                         if ((nanosSpentExecuting - lastSyncCheckNanos) > SYNC_SCHEDULE_INTERVAL_NANOS) {
                             lastSyncCheckNanos = nanosSpentExecuting;
-                            boolean performedSyncs = maybeExecuteSync(indexShard, shardState);
-                            if (performedSyncs) {
-                                continueExecuting = false;
-                            }
+//                            boolean performedSyncs = maybeExecuteSync(indexShard, shardState);
+//                            if (performedSyncs) {
+//                                continueExecuting = false;
+//                            }
                         }
                         if (nanosSpentExecuting >= MAX_EXECUTE_NANOS) {
                             continueExecuting = false;
@@ -226,23 +227,25 @@ public class BatchedShardExecutor {
                     }
                 }
             }
+        } catch (Exception e) {
+            logger.error("TERRIBLE UNCAUGHT EXCEPTION", e);
         } finally {
             if (needRefresh.isEmpty() == false) {
                 performRefreshes(indexShard, needRefresh, immediateRefresh);
             }
             maybeExecuteSync(indexShard, shardState);
-            cleanupIfShardClosed(indexShard);
+//            cleanupIfShardClosed(indexShard);
         }
     }
 
     private boolean maybeExecuteSync(IndexShard indexShard, ShardState shardState) {
-        if (shardState.shouldStartSyncing()) {
+//        if (shardState.shouldStartSyncing()) {
             try {
-                ArrayList<ShardOp> completedOpsAlreadySynced = new ArrayList<>();
-                ArrayList<ShardOp> completedOpsNeedSync = new ArrayList<>();
                 while (true) {
+                    ArrayList<ShardOp> completedOpsAlreadySynced = new ArrayList<>();
+                    ArrayList<ShardOp> completedOpsNeedSync = new ArrayList<>();
                     Translog.Location maxLocation = null;
-                    Translog.Location syncedLocation = null;
+//                    Translog.Location syncedLocation = null;
 //                    try {
 //                        syncedLocation = indexShard.getTranslogLastSyncedLocation();
 //                    } catch (Exception e) {
@@ -255,16 +258,16 @@ public class BatchedShardExecutor {
                         ++opsToHandle;
                         Translog.Location location = indexedOp.locationToSync();
                         if (location != null) {
-                            if (syncedLocation == null || needsSync(location, syncedLocation)) {
+//                            if (syncedLocation == null || needsSync(location, syncedLocation)) {
                                 completedOpsNeedSync.add(indexedOp);
                                 if (maxLocation == null) {
                                     maxLocation = location;
                                 } else if (location.compareTo(maxLocation) > 0) {
                                     maxLocation = location;
                                 }
-                            } else {
-                                completedOpsAlreadySynced.add(indexedOp);
-                            }
+//                            } else {
+//                                completedOpsAlreadySynced.add(indexedOp);
+//                            }
                         } else {
                             completedOpsAlreadySynced.add(indexedOp);
                         }
@@ -281,17 +284,16 @@ public class BatchedShardExecutor {
                     } else {
                         onResponse(completedOpsNeedSync.stream().map(ShardOp::getFlushListener), null);
                     }
-
-                    completedOpsAlreadySynced.clear();
-                    completedOpsNeedSync.clear();
                 }
+            } catch (Exception e) {
+                logger.error("TERRIBLE UNCAUGHT SYNC EXCEPTION", e);
             } finally {
-                shardState.markDoneSyncing();
+//                shardState.markDoneSyncing();
             }
             return true;
-        } else {
-            return false;
-        }
+//        } else {
+//            return false;
+//        }
     }
 
     private static boolean needsSync(Translog.Location location, Translog.Location syncedLocation) {
@@ -337,7 +339,7 @@ public class BatchedShardExecutor {
             indexShard.refresh("refresh_flag_index");
             refreshed = true;
         } catch (Exception ex) {
-            logger.warn("exception while forcing immediate refresh for shard operation", ex);
+            logger.error("exception while forcing immediate refresh for shard operation", ex);
             onFailure(needRefresh.stream().map(ShardOp::getFlushListener), null);
         } finally {
             if (refreshed) {
@@ -358,7 +360,7 @@ public class BatchedShardExecutor {
                 }
             });
         } catch (Exception ex) {
-            logger.warn("exception while syncing shard operations", ex);
+            logger.error("exception while syncing shard operations", ex);
             onFailure(operations.stream().map(ShardOp::getFlushListener), ex);
         }
     }
@@ -368,38 +370,38 @@ public class BatchedShardExecutor {
             // TODO: Do we want to add each listener individually?
             indexShard.addRefreshListener(maxLocation, forcedRefresh -> {
                 if (forcedRefresh) {
-                    logger.warn("block until refresh ran out of slots and forced a refresh");
+                    logger.error("block until refresh ran out of slots and forced a refresh");
                 }
 
                 operations.forEach(op -> op.flushListener.setForcedRefresh(forcedRefresh));
                 onResponse(operations.stream().map(ShardOp::getFlushListener), null);
             });
         } catch (Exception ex) {
-            logger.warn("exception while adding refresh listener for shard operations", ex);
+            logger.error("exception while adding refresh listener for shard operations", ex);
             onFailure(operations.stream().map(ShardOp::getFlushListener), ex);
         }
     }
 
-    private void cleanupIfShardClosed(IndexShard indexShard) {
-//        if (indexShard.state() == IndexShardState.CLOSED) {
-        if (false) {
-            ShardState removed = shardStateMap.remove(indexShard);
-            // If we did not successfully remove the ShardState, another thread did and will handling the
-            // closing.
-            if (removed != null) {
-                removed.close();
-                ShardOp shardOp;
-                ArrayList<ActionListener<Void>> listenersToFail = new ArrayList<>();
-                while ((shardOp = removed.pollPreIndexed()) != null) {
-                    listenersToFail.add(shardOp.getWriteListener());
-                }
-                while ((shardOp = removed.pollPostIndexed()) != null) {
-                    listenersToFail.add(shardOp.getFlushListener());
-                }
-                onFailure(listenersToFail.stream(), new AlreadyClosedException(CLOSED_SHARD_MESSAGE));
-            }
-        }
-    }
+//    private void cleanupIfShardClosed(IndexShard indexShard) {
+////        if (indexShard.state() == IndexShardState.CLOSED) {
+//        if (false) {
+//            ShardState removed = shardStateMap.remove(indexShard);
+//            // If we did not successfully remove the ShardState, another thread did and will handling the
+//            // closing.
+//            if (removed != null) {
+//                removed.close();
+//                ShardOp shardOp;
+//                ArrayList<ActionListener<Void>> listenersToFail = new ArrayList<>();
+//                while ((shardOp = removed.pollPreIndexed()) != null) {
+//                    listenersToFail.add(shardOp.getWriteListener());
+//                }
+//                while ((shardOp = removed.pollPostIndexed()) != null) {
+//                    listenersToFail.add(shardOp.getFlushListener());
+//                }
+//                onFailure(listenersToFail.stream(), new AlreadyClosedException(CLOSED_SHARD_MESSAGE));
+//            }
+//        }
+//    }
 
     private void afterWrite(IndexShard indexShard) {
         try {

@@ -37,6 +37,7 @@ import org.elasticsearch.cluster.action.shard.ShardStateAction;
 import org.elasticsearch.cluster.block.ClusterBlockLevel;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.UUIDs;
 import org.elasticsearch.common.concurrent.CompletableContext;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -49,6 +50,7 @@ import org.elasticsearch.transport.TransportRequestOptions;
 import org.elasticsearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Performs shard-level bulk (index, delete or update) operations
@@ -106,16 +108,27 @@ public class TransportBatchedShardBulkAction extends TransportReplicationAction<
     @Override
     protected void shardOperationOnPrimary(BulkShardRequest request, IndexShard primary,
                                            ActionListener<PrimaryResult<BulkShardRequest, BulkShardResponse>> listener) {
+        String message = "FUCK";
+//        String message = UUIDs.base64UUID();
+        logger.error("1 " + message);
         CompletableContext<BatchedShardExecutor.FlushResult> flushContext = new CompletableContext<>();
 
+        AtomicReference<BatchedShardExecutor.WriteResult> result1 = new AtomicReference<>();
         ActionListener<BatchedShardExecutor.WriteResult> writeListener = new ActionListener<>() {
             @Override
             public void onResponse(BatchedShardExecutor.WriteResult result) {
-                listener.onResponse(new WritePrimaryResult<>(result.getReplicaRequest(), result.getResponse(), flushContext));
+                logger.error("2 " + message);
+                try {
+                    result1.set(result);
+                } catch (Exception e) {
+                    logger.error("TERRIBLE WRITE LISTENER EXCEPTION", e);
+                    throw e;
+                }
             }
 
             @Override
             public void onFailure(Exception e) {
+                logger.error("3 " + message);
                 listener.onFailure(e);
             }
         };
@@ -123,14 +136,23 @@ public class TransportBatchedShardBulkAction extends TransportReplicationAction<
         ActionListener<BatchedShardExecutor.FlushResult> flushListener = new ActionListener<>() {
             @Override
             public void onResponse(BatchedShardExecutor.FlushResult flushResult) {
-                assert flushContext.isDone() == false;
-                flushContext.complete(flushResult);
+                logger.error("4 " + message);
+                BatchedShardExecutor.WriteResult result = result1.get();
+                if (result == null) {
+                    logger.error("FUCK write result null");
+                    throw new AssertionError("Null");
+                }
+                PrimaryResult<BulkShardRequest, BulkShardResponse> result2 = new PrimaryResult<>(result.getReplicaRequest(),
+                    result.getResponse(), null);
+                result2.finalResponseIfSuccessful.setForcedRefresh(flushResult.forcedRefresh());
+                listener.onResponse(result2);
             }
 
             @Override
             public void onFailure(Exception e) {
-                assert flushContext.isDone() == false;
-                flushContext.completeExceptionally(e);
+                logger.error("5 " + message);
+                listener.onFailure(e);
+//                flushContext.completeExceptionally(e);
             }
         };
 
@@ -158,8 +180,13 @@ public class TransportBatchedShardBulkAction extends TransportReplicationAction<
             flushContext.addListener(ActionListener.toBiConsumer(new ActionListener<>() {
                 @Override
                 public void onResponse(BatchedShardExecutor.FlushResult result) {
-                    finalResponseIfSuccessful.setForcedRefresh(result.forcedRefresh());
-                    listener.onResponse(null);
+                    try {
+                        finalResponseIfSuccessful.setForcedRefresh(result.forcedRefresh());
+                        listener.onResponse(null);
+                    } catch (Exception e) {
+                        logger.error("TERRIBLE UNCAUGHT POST REPLICATION EXCEPTION", e);
+                        throw e;
+                    }
                 }
 
                 @Override
