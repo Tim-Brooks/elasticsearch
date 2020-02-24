@@ -27,6 +27,7 @@ import org.elasticsearch.action.admin.indices.create.CreateIndexRequest;
 import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest;
 import org.elasticsearch.action.admin.indices.open.OpenIndexRequest;
 import org.elasticsearch.action.admin.indices.settings.put.UpdateSettingsRequest;
+import org.elasticsearch.action.bulk.BatchedShardExecutor;
 import org.elasticsearch.action.support.ActiveShardCount;
 import org.elasticsearch.action.support.replication.ClusterStateCreationUtils;
 import org.elasticsearch.client.node.NodeClient;
@@ -80,6 +81,7 @@ import static org.elasticsearch.cluster.metadata.IndexMetaData.SETTING_NUMBER_OF
 import static org.elasticsearch.cluster.metadata.IndexMetaData.SETTING_NUMBER_OF_SHARDS;
 import static org.elasticsearch.cluster.routing.ShardRoutingState.INITIALIZING;
 import static org.hamcrest.Matchers.equalTo;
+import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -488,6 +490,8 @@ public class IndicesClusterStateServiceRandomUpdatesTests extends AbstractIndice
                                                                         final Supplier<MockIndicesService> indicesServiceSupplier) {
         final ThreadPool threadPool = mock(ThreadPool.class);
         when(threadPool.generic()).thenReturn(mock(ExecutorService.class));
+        ThreadPool.Info info = new ThreadPool.Info(ThreadPool.Names.WRITE, ThreadPool.ThreadPoolType.FIXED, 1);
+        when(threadPool.info(eq(ThreadPool.Names.WRITE))).thenReturn(info);
         final MockIndicesService indicesService = indicesServiceSupplier.get();
         final Settings settings = Settings.builder().put("node.name", discoveryNode.getName()).build();
         final TransportService transportService = new TransportService(settings, mock(Transport.class), threadPool,
@@ -516,7 +520,8 @@ public class IndicesClusterStateServiceRandomUpdatesTests extends AbstractIndice
                 null,
                 primaryReplicaSyncer,
                 RetentionLeaseSyncer.EMPTY,
-                client) {
+                client,
+                new BatchedShardExecutor((op, r) -> true, (op) -> true, threadPool)) {
             @Override
             protected void updateGlobalCheckpointForShard(final ShardId shardId) {}
         };
