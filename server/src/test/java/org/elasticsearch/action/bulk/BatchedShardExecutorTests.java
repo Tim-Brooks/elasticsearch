@@ -86,7 +86,7 @@ public class BatchedShardExecutorTests extends IndexShardTestCase {
                 }
 
                 assertBusy(() -> {
-                    BatchedShardExecutor.ShardState shardState = batchedShardExecutor.getShardState(shard.shardId());
+                    BatchedShardExecutor.ShardState shardState = batchedShardExecutor.getShardState(shard);
                     assertEquals(WRITE_THREADS, shardState.scheduledTasks());
                     assertEquals(numberOfOps, shardState.pendingOperations());
                 });
@@ -94,7 +94,7 @@ public class BatchedShardExecutorTests extends IndexShardTestCase {
             flushedLatch.await();
 
             assertBusy(() -> {
-                BatchedShardExecutor.ShardState shardState = batchedShardExecutor.getShardState(shard.shardId());
+                BatchedShardExecutor.ShardState shardState = batchedShardExecutor.getShardState(shard);
                 assertEquals(0, shardState.scheduledTasks());
             });
         } finally {
@@ -202,12 +202,8 @@ public class BatchedShardExecutorTests extends IndexShardTestCase {
             closeShards(shard);
             closed = true;
 
-            BulkShardRequest request2 = bulkShardRequest(shard, 1);
-            PlainActionFuture<BatchedShardExecutor.WriteResult> writeListener = PlainActionFuture.newFuture();
-            batchedShardExecutor.primary(request2, shard, writeListener, noop());
-            expectThrows(AlreadyClosedException.class, writeListener::actionGet);
-
-            assertBusy(() -> assertNull(batchedShardExecutor.getShardState(shard.shardId())));
+            batchedShardExecutor.afterIndexShardClosed(shard.shardId(), shard, Settings.EMPTY);
+            assertBusy(() -> assertNull(batchedShardExecutor.getShardState(shard)));
         } finally {
             if (closed == false) {
                 closeShards(shard);
