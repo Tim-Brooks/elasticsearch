@@ -499,7 +499,7 @@ public class BatchedShardExecutor implements IndexEventListener {
 
     static class ShardState {
 
-        private static final int MAX_QUEUED = 1000;
+        private static final int MAX_QUEUED = 20000;
 
         private final AtomicInteger pendingOps = new AtomicInteger(0);
         private final ConcurrentLinkedQueue<ShardOp> preIndexedQueue = new ConcurrentLinkedQueue<>();

@@ -65,7 +65,7 @@ public class TransportBatchedShardBulkAction extends TransportReplicationAction<
                                            IndicesService indicesService, ThreadPool threadPool, ShardStateAction shardStateAction,
                                            BatchedShardExecutor batchedShardExecutor, ActionFilters actionFilters) {
         super(settings, ACTION_NAME, transportService, clusterService, indicesService, threadPool, shardStateAction, actionFilters,
-            BulkShardRequest::new, BulkShardRequest::new, ThreadPool.Names.SAME, true, false);
+            BulkShardRequest::new, BulkShardRequest::new, ThreadPool.Names.SAME, false, false);
         this.batchedShardExecutor = batchedShardExecutor;
     }
 
