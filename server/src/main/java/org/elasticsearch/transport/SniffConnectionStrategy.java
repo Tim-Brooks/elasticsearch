@@ -304,14 +304,6 @@ public class SniffConnectionStrategy extends RemoteConnectionStrategy {
         }
     }
 
-    List<String> getSeedNodes() {
-        return configuredSeedNodes;
-    }
-
-    int getMaxConnections() {
-        return maxNumRemoteConnections;
-    }
-
     /* This class handles the _state response from the remote cluster when sniffing nodes to connect to */
     private class SniffClusterStateResponseHandler implements TransportResponseHandler<ClusterStateResponse> {
 

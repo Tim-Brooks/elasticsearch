@@ -108,7 +108,18 @@ public class RemoteClusterClientTests extends ESTestCase {
                         semaphore.acquire();
                         RemoteClusterService remoteClusterService = service.getRemoteClusterService();
                         Client client = remoteClusterService.getRemoteClusterClient(threadPool, "test");
-                        ClusterStateResponse clusterStateResponse = client.admin().cluster().prepareState().execute().get();
+
+                        ClusterStateResponse clusterStateResponse;
+                        try {
+                            clusterStateResponse = client.admin().cluster().prepareState().execute().actionGet();
+                        } catch (NoSuchRemoteClusterException e) {
+                            // The node connection disconnect process involves a number of listeners and
+                            // reconnect attempts happening concurrently. If the previous request attempt
+                            // threw an NoSuchRemoteClusterException exception try again as we attempt
+                            // connection attempts on every request. Transient request failures are possible
+                            // in production during the disconnect / reconnect process.
+                            clusterStateResponse = client.admin().cluster().prepareState().execute().actionGet();
+                        }
                         assertNotNull(clusterStateResponse);
                         assertEquals("foo_bar_cluster", clusterStateResponse.getState().getClusterName().value());
                         assertTrue(remoteClusterService.isRemoteNodeConnected("test", remoteNode));
