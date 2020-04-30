@@ -19,7 +19,15 @@
 
 package org.elasticsearch.http.netty4;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.handler.codec.http.DefaultFullHttpRequest;
+import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpRequest;
+import io.netty.handler.codec.http.HttpVersion;
 import io.netty.util.ReferenceCounted;
 import org.elasticsearch.ESNetty4IntegTestCase;
 import org.elasticsearch.common.collect.Tuple;
@@ -33,9 +41,12 @@ import org.elasticsearch.test.ESIntegTestCase.ClusterScope;
 import org.elasticsearch.test.ESIntegTestCase.Scope;
 import io.netty.handler.codec.http.HttpResponseStatus;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.zip.GZIPOutputStream;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
@@ -102,6 +113,49 @@ public class Netty4HttpRequestSizeLimitIT extends ESNetty4IntegTestCase {
                 }
             } finally {
                 singleResponse.forEach(ReferenceCounted::release);
+            }
+        }
+    }
+
+    public void testSizingHacking() throws Exception {
+        ensureGreen();
+
+        // we use the limit size as a (very) rough indication on how many requests we should sent to hit the limit
+//        int numRequests = LIMIT.bytesAsInt() / 100;
+
+        StringBuilder bulkRequest = new StringBuilder();
+        for (int i = 0; i < 20000; i++) {
+            bulkRequest.append("{\"index\": {}}");
+            bulkRequest.append(System.lineSeparator());
+            String value = randomAlphaOfLength(20);
+            bulkRequest.append("{ \"field\" : \"" + value + "\" }");
+            bulkRequest.append(System.lineSeparator());
+        }
+
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        GZIPOutputStream gzipOutputStream = new GZIPOutputStream(outputStream);
+        byte[] uncompressed = bulkRequest.toString().getBytes(StandardCharsets.UTF_8);
+        System.err.println("Uncompressed " + uncompressed.length);
+        gzipOutputStream.write(uncompressed);
+        byte[] bytes = outputStream.toByteArray();
+        System.err.println("Compressed " + bytes.length);
+
+        ByteBuf content = Unpooled.copiedBuffer(bytes);
+
+        FullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/index/_bulk", content);
+        request.headers().add(HttpHeaderNames.HOST, "localhost");
+        request.headers().add(HttpHeaderNames.CONTENT_ENCODING, "gzip");
+        request.headers().add(HttpHeaderNames.CONTENT_LENGTH, content.readableBytes());
+        request.headers().add(HttpHeaderNames.CONTENT_TYPE, "application/json");
+
+        HttpServerTransport httpServerTransport = internalCluster().getInstance(HttpServerTransport.class);
+        TransportAddress transportAddress = randomFrom(httpServerTransport.boundAddress().boundAddresses());
+
+        try (Netty4HttpClient nettyHttpClient = new Netty4HttpClient()) {
+            FullHttpResponse singleResponse = nettyHttpClient.post(transportAddress.address(), request);
+            try {
+            } finally {
+                singleResponse.release();
             }
         }
     }
