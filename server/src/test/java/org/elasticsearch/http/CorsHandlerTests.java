@@ -28,6 +28,7 @@ import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.test.ESTestCase;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -109,23 +110,23 @@ public class CorsHandlerTests extends ESTestCase {
             .build();
         final CorsHandler corsHandler = CorsHandler.handlerFromSettings(settings);
 
-//        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.OPTIONS);
-//        HttpResponse httpResponse = corsHandler.handleRequest(request);
-//        assertNotNull(httpResponse);
-//        assertEquals(RestStatus.OK, request.responseStatus.get());
-//        assertEquals(methods.stream().map(s -> s.toUpperCase(Locale.ENGLISH)).collect(Collectors.toSet()),
-//            new HashSet<>(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_METHODS)));
-//        assertEquals(headers, new HashSet<>(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_HEADERS)));
-//        assertEquals("1728000", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_MAX_AGE).get(0));
-//        if (allowCredentials) {
-//            // Origin is set to vary when any origin and credentials are allowed
-//            assertEquals(CorsHandler.ORIGIN, httpResponse.getAllHeaders(CorsHandler.VARY).get(0));
-//            assertEquals("elastic.co", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
-//            assertEquals("true", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS).get(0));
-//        } else {
-//            assertEquals("*", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
-//            assertNull(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
-//        }
+        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.OPTIONS);
+        TestResponse httpResponse = (TestResponse) corsHandler.handleRequest(request);
+        assertNotNull(httpResponse);
+        assertEquals(RestStatus.OK, httpResponse.getRestStatus());
+        assertEquals(methods.stream().map(s -> s.toUpperCase(Locale.ENGLISH)).collect(Collectors.toSet()),
+            new HashSet<>(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_METHODS)));
+        assertEquals(headers, new HashSet<>(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_HEADERS)));
+        assertEquals("1728000", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_MAX_AGE).get(0));
+        if (allowCredentials) {
+            // Origin is set to vary when any origin and credentials are allowed
+            assertEquals(CorsHandler.ORIGIN, httpResponse.getAllHeaders(CorsHandler.VARY).get(0));
+            assertEquals("elastic.co", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
+            assertEquals("true", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS).get(0));
+        } else {
+            assertEquals("*", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
+            assertNull(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
+        }
     }
 
     public void testSpecificOriginPreflight() {
@@ -146,30 +147,32 @@ public class CorsHandlerTests extends ESTestCase {
         }
         final CorsHandler corsHandler = CorsHandler.handlerFromSettings(builder.build());
 
-//        HttpResponse httpResponse = corsHandler.handleRequest(new TestRequest("elastic.co", RestRequest.Method.OPTIONS));
-//        assertNotNull(httpResponse);
-//        assertEquals(RestStatus.OK, httpResponse.getRestStatus());
-//        assertEquals(methods.stream().map(s -> s.toUpperCase(Locale.ENGLISH)).collect(Collectors.toSet()),
-//            new HashSet<>(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_METHODS)));
-//        assertEquals(headers, new HashSet<>(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_HEADERS)));
-//        assertEquals("1728000", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_MAX_AGE).get(0));
-//        assertEquals(CorsHandler.ORIGIN, httpResponse.getAllHeaders(CorsHandler.VARY).get(0));
-//        assertEquals("elastic.co", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
-//        if (allowCredentials) {
-//            assertEquals("true", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS).get(0));
-//        } else {
-//            assertNull(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
-//        }
-//
-//        HttpResponse httpResponse2 = corsHandler.handleRequest(new TestRequest("invalid_elastic.co", RestRequest.Method.OPTIONS));
-//        assertNotNull(httpResponse2);
-//        assertEquals(RestStatus.OK, httpResponse2.getRestStatus());
-//        // invalid_elastic.co is not allowed so these headers are null
-//        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN));
-//        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_METHODS));
-//        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_HEADERS));
-//        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_MAX_AGE));
-//        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
+        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.OPTIONS);
+        TestResponse httpResponse = (TestResponse) corsHandler.handleRequest(request);
+        assertNotNull(httpResponse);
+        assertEquals(RestStatus.OK, httpResponse.getRestStatus());
+        assertEquals(methods.stream().map(s -> s.toUpperCase(Locale.ENGLISH)).collect(Collectors.toSet()),
+            new HashSet<>(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_METHODS)));
+        assertEquals(headers, new HashSet<>(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_HEADERS)));
+        assertEquals("1728000", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_MAX_AGE).get(0));
+        assertEquals(CorsHandler.ORIGIN, httpResponse.getAllHeaders(CorsHandler.VARY).get(0));
+        assertEquals("elastic.co", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
+        if (allowCredentials) {
+            assertEquals("true", httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS).get(0));
+        } else {
+            assertNull(httpResponse.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
+        }
+
+        TestRequest request2 = new TestRequest("invalid_elastic.co", RestRequest.Method.OPTIONS);
+        TestResponse httpResponse2 = (TestResponse) corsHandler.handleRequest(request2);
+        assertNotNull(httpResponse2);
+        assertEquals(RestStatus.OK, httpResponse2.getRestStatus());
+        // invalid_elastic.co is not allowed so these headers are null
+        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN));
+        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_METHODS));
+        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_HEADERS));
+        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_MAX_AGE));
+        assertNull(httpResponse2.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
     }
 
     public void testCorsPreflightDisabled() {
@@ -184,9 +187,9 @@ public class CorsHandlerTests extends ESTestCase {
             .put(SETTING_CORS_ALLOW_ORIGIN.getKey(), "elastic.co")
             .build();
 
-//        final CorsHandler corsHandler = CorsHandler.handlerFromSettings(settings);
-//        HttpResponse httpResponse = corsHandler.handleRequest(new TestRequest("invalid_elastic.co", RestRequest.Method.GET));
-//        assertEquals(RestStatus.FORBIDDEN, httpResponse.getRestStatus());
+        final CorsHandler corsHandler = CorsHandler.handlerFromSettings(settings);
+        TestResponse httpResponse = (TestResponse) corsHandler.handleRequest(new TestRequest("invalid_elastic.co", RestRequest.Method.GET));
+        assertEquals(RestStatus.FORBIDDEN, httpResponse.getRestStatus());
     }
 
     public void testSetCorsHeadersWithSpecificOrigin() {
@@ -200,15 +203,15 @@ public class CorsHandlerTests extends ESTestCase {
         }
         final CorsHandler corsHandler = CorsHandler.handlerFromSettings(builder.build());
 
-//        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.GET);
-//        HttpResponse response = request.createResponse(RestStatus.OK, BytesArray.EMPTY);
-//        corsHandler.setCorsResponseHeaders(request, response);
-//        assertEquals("elastic.co", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
-//        if (allowCredentials) {
-//            assertEquals("true", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS).get(0));
-//        } else {
-//            assertNull(response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
-//        }
+        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.GET);
+        TestResponse response = (TestResponse) request.createResponse(RestStatus.OK, BytesArray.EMPTY);
+        corsHandler.setCorsResponseHeaders(request, response);
+        assertEquals("elastic.co", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
+        if (allowCredentials) {
+            assertEquals("true", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS).get(0));
+        } else {
+            assertNull(response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
+        }
     }
 
     public void testSetCorsHeadersWithAnyOrigin() {
@@ -220,40 +223,40 @@ public class CorsHandlerTests extends ESTestCase {
 
         final CorsHandler corsHandler = CorsHandler.handlerFromSettings(builder.build());
 
-//        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.GET);
-//        HttpResponse response = request.createResponse(RestStatus.OK, BytesArray.EMPTY);
-//        corsHandler.setCorsResponseHeaders(request, response);
-//        if (allowCredentials) {
-//            assertEquals("elastic.co", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
-//            assertEquals(CorsHandler.ORIGIN, response.getAllHeaders(CorsHandler.VARY).get(0));
-//            assertEquals("true", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS).get(0));
-//        } else {
-//            assertEquals("*", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
-//            assertNull(response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
-//        }
+        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.GET);
+        TestResponse response = request.createResponse(RestStatus.OK, BytesArray.EMPTY);
+        corsHandler.setCorsResponseHeaders(request, response);
+        if (allowCredentials) {
+            assertEquals("elastic.co", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
+            assertEquals(CorsHandler.ORIGIN, response.getAllHeaders(CorsHandler.VARY).get(0));
+            assertEquals("true", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS).get(0));
+        } else {
+            assertEquals("*", response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN).get(0));
+            assertNull(response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_CREDENTIALS));
+        }
     }
 
-//    public void testSetCorsHeadersWithNonCorsRequest() {
-//        Settings.Builder builder = Settings.builder()
-//            .put(SETTING_CORS_ENABLED.getKey(), true)
-//            .put(SETTING_CORS_ALLOW_ORIGIN.getKey(), "*");
-//
-//        final CorsHandler corsHandler = CorsHandler.handlerFromSettings(builder.build());
-//
-//        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.GET, false);
-//        HttpResponse response = request.createResponse(RestStatus.OK, BytesArray.EMPTY);
-//        corsHandler.setCorsResponseHeaders(request, response);
-//        assertNull(response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN));
-//    }
+    public void testSetCorsHeadersWithNonCorsRequest() {
+        Settings.Builder builder = Settings.builder()
+            .put(SETTING_CORS_ENABLED.getKey(), true)
+            .put(SETTING_CORS_ALLOW_ORIGIN.getKey(), "*");
 
-//    public void testCorsSetHeadersDisabled() {
-//        final Settings settings = Settings.builder().put(SETTING_CORS_ENABLED.getKey(), false).build();
-//        final CorsHandler corsHandler = CorsHandler.handlerFromSettings(settings);
-//        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.OPTIONS);
-//        HttpResponse response = request.createResponse(RestStatus.OK, BytesArray.EMPTY);
-//        corsHandler.setCorsResponseHeaders(request, response);
-//        assertNull(response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN));
-//    }
+        final CorsHandler corsHandler = CorsHandler.handlerFromSettings(builder.build());
+
+        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.GET, false);
+        TestResponse response = request.createResponse(RestStatus.OK, BytesArray.EMPTY);
+        corsHandler.setCorsResponseHeaders(request, response);
+        assertNull(response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
+
+    public void testCorsSetHeadersDisabled() {
+        final Settings settings = Settings.builder().put(SETTING_CORS_ENABLED.getKey(), false).build();
+        final CorsHandler corsHandler = CorsHandler.handlerFromSettings(settings);
+        TestRequest request = new TestRequest("elastic.co", RestRequest.Method.OPTIONS);
+        TestResponse response = request.createResponse(RestStatus.OK, BytesArray.EMPTY);
+        corsHandler.setCorsResponseHeaders(request, response);
+        assertNull(response.getAllHeaders(CorsHandler.ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
 
     private static class TestRequest implements HttpRequest {
 
@@ -312,8 +315,8 @@ public class CorsHandlerTests extends ESTestCase {
         }
 
         @Override
-        public HttpResponse createResponse(RestStatus status, BytesReference content) {
-            return null;
+        public TestResponse createResponse(RestStatus status, BytesReference content) {
+            return new TestResponse(status, content);
         }
 
         @Override
@@ -329,6 +332,38 @@ public class CorsHandlerTests extends ESTestCase {
         @Override
         public HttpRequest releaseAndCopy() {
             return this;
+        }
+    }
+
+    private static class TestResponse implements HttpResponse {
+
+
+        private final RestStatus status;
+        private final BytesReference content;
+        private final HashMap<String, List<String>> headers = new HashMap<>();
+
+        public TestResponse(RestStatus status, BytesReference content) {
+            this.status = status;
+            this.content = content;
+        }
+
+        @Override
+        public void addHeader(String name, String value) {
+            List<String> values = headers.computeIfAbsent(name, (n) -> new ArrayList<>());
+            values.add(value);
+        }
+
+        @Override
+        public boolean containsHeader(String name) {
+            return headers.containsKey(name);
+        }
+
+        public RestStatus getRestStatus() {
+            return status;
+        }
+
+        public List<String> getAllHeaders(String name) {
+            return headers.get(name);
         }
     }
 }
