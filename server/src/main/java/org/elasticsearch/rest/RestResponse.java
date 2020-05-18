@@ -55,12 +55,9 @@ public abstract class RestResponse {
             customHeaders = new HashMap<>(headerKeySet.size());
         }
         for (String key : headerKeySet) {
-            List<String> values = customHeaders.get(key);
-            if (values == null) {
-                values = new ArrayList<>();
-                customHeaders.put(key, values);
-            }
-            values.addAll(ex.getHeader(key));
+            List<String> valuesToCopy = ex.getHeader(key);
+            List<String> values = customHeaders.computeIfAbsent(key, k -> new ArrayList<>(valuesToCopy.size()));
+            values.addAll(valuesToCopy);
         }
     }
 
@@ -71,11 +68,8 @@ public abstract class RestResponse {
         if (customHeaders == null) {
             customHeaders = new HashMap<>(2);
         }
-        List<String> header = customHeaders.get(name);
-        if (header == null) {
-            header = new ArrayList<>();
-            customHeaders.put(name, header);
-        }
+
+        List<String> header = customHeaders.computeIfAbsent(name, k -> new ArrayList<>(1));
         header.add(value);
     }
 
