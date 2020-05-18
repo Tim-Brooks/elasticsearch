@@ -43,6 +43,7 @@ import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.rest.RestChannel;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.BindTransportException;
 
@@ -76,6 +77,7 @@ public abstract class AbstractHttpServerTransport extends AbstractLifecycleCompo
     protected final Dispatcher dispatcher;
     protected final CorsHandler.Config corsConfig;
     private final NamedXContentRegistry xContentRegistry;
+    private final CorsHandler corsHandler;
 
     protected final PortsRange port;
     protected final ByteSizeValue maxContentLength;
@@ -99,6 +101,7 @@ public abstract class AbstractHttpServerTransport extends AbstractLifecycleCompo
         this.dispatcher = dispatcher;
         this.handlingSettings = HttpHandlingSettings.fromSettings(settings);
         this.corsConfig = CorsHandler.fromSettings(settings);
+        this.corsHandler = CorsHandler.handlerFromSettings(settings);
 
         // we can't make the network.bind_host a fallback since we already fall back to http.host hence the extra conditional here
         List<String> httpBindHost = SETTING_HTTP_BIND_HOST.get(settings);
@@ -322,6 +325,22 @@ public abstract class AbstractHttpServerTransport extends AbstractLifecycleCompo
 
     private void handleIncomingRequest(final HttpRequest httpRequest, final HttpChannel httpChannel, final Exception exception) {
         Exception badRequestCause = exception;
+
+        HttpResponse httpResponse = corsHandler.handleRequest(httpRequest);
+        /*
+         * If the CorsHandler returns a response, we must immediately send that response and abandon all
+         * other handling. The only header we need to set is the connection header.
+         */
+//        if (httpResponse != null) {
+//            if (httpResponse.getRestStatus().equals(RestStatus.FORBIDDEN) || HttpUtils.isCloseConnection(httpRequest)) {
+//                httpResponse.addHeader(DefaultRestChannel.CONNECTION, DefaultRestChannel.CLOSE);
+//                httpChannel.sendResponse(httpResponse, ActionListener.wrap(httpChannel::close));
+//            } else {
+//                httpResponse.addHeader(DefaultRestChannel.CONNECTION, DefaultRestChannel.KEEP_ALIVE);
+//                httpChannel.sendResponse(httpResponse, ActionListener.wrap(() -> {}));
+//            }
+//            return;
+//        }
 
         /*
          * We want to create a REST request from the incoming request from Netty. However, creating this request could fail if there
