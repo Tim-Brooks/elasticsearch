@@ -21,11 +21,13 @@ package org.elasticsearch.transport.nio;
 
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.nio.BytesWriteHandler;
 import org.elasticsearch.nio.NioSocketChannel;
 import org.elasticsearch.transport.OutboundHandler;
 import org.elasticsearch.transport.TcpChannel;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.channels.SocketChannel;
 
 public class NioTcpChannel extends NioSocketChannel implements TcpChannel {
@@ -42,14 +44,15 @@ public class NioTcpChannel extends NioSocketChannel implements TcpChannel {
 
     @Override
     public void sendMessage(OutboundHandler.SendContext sendContext) {
-        final BytesReference message;
-        try {
-            message = sendContext.get();
-        } catch (IOException e) {
-            sendContext.onFailure(e);
-            return;
-        }
-        getContext().sendMessage(BytesReference.toByteBuffers(message), ActionListener.toBiConsumer(sendContext));
+        BytesWriteHandler.BytesSupplier bytes = () -> {
+            try {
+                return BytesReference.toByteBuffers(sendContext.get());
+            } catch (IOException e) {
+                // Exceptions during serialization are handled by nio event loop
+                throw new UncheckedIOException(e);
+            }
+        };
+        getContext().sendMessage(bytes, ActionListener.toBiConsumer(sendContext));
     }
 
     @Override
