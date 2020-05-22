@@ -367,14 +367,8 @@ public class MockNioTransport extends TcpTransport {
 
         @Override
         public void sendMessage(OutboundHandler.SendContext sendContext) {
-            final BytesReference message;
-            try {
-                message = sendContext.get();
-            } catch (IOException e) {
-                sendContext.onFailure(e);
-                return;
-            }
-            getContext().sendMessage(BytesReference.toByteBuffers(message), ActionListener.toBiConsumer(sendContext));
+            Supplier<ByteBuffer[]> bytes = () -> BytesReference.toByteBuffers(sendContext.get());
+            getContext().sendMessage(bytes, ActionListener.toBiConsumer(sendContext));
         }
     }
 

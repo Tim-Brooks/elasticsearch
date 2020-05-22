@@ -255,8 +255,9 @@ public class SocketChannelContextTests extends ESTestCase {
         assertFalse(context.readyForFlush());
 
         ByteBuffer[] buffer = {ByteBuffer.allocate(10)};
-        FlushReadyWrite writeOperation = new FlushReadyWrite(context, buffer, listener);
-        when(handler.writeToBytes(writeOperation)).thenReturn(Collections.singletonList(writeOperation));
+        WriteOperation writeOperation = mock(WriteOperation.class);
+        FlushOperation flushOperation = new FlushOperation(buffer, listener);
+        when(handler.writeToBytes(writeOperation)).thenReturn(Collections.singletonList(flushOperation));
         context.queueWriteOperation(writeOperation);
 
         verify(handler).writeToBytes(writeOperation);
