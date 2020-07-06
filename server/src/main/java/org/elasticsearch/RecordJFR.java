@@ -33,6 +33,7 @@ import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 @SuppressForbidden(reason = "JFR")
@@ -74,6 +75,19 @@ public class RecordJFR {
         event.commit();
     }
 
+    public static synchronized void recordGauge(String name, AtomicLong atomicLong) {
+        GaugeEvent event = new GaugeEvent();
+        if (event.isEnabled() == false) {
+            return;
+        }
+
+        event.begin();
+        event.value = atomicLong.get();
+        event.name = name;
+        event.end();
+        event.commit();
+    }
+
     public static void scheduleMeanSample(String name, ThreadPool threadPool, AtomicReference<MeanMetric> meanMetric) {
         threadPool.scheduleWithFixedDelay(new Runnable() {
             @Override
@@ -81,6 +95,17 @@ public class RecordJFR {
                 synchronized (RecordJFR.class) {
                     MeanMetric meanMetric1 = meanMetric.getAndSet(new MeanMetric());
                     RecordJFR.recordMeanMetric(name, meanMetric1);
+                }
+            }
+        }, TimeValue.timeValueSeconds(10), ThreadPool.Names.GENERIC);
+    }
+
+    public static void scheduleGaugeSample(String name, ThreadPool threadPool, AtomicLong atomicLong) {
+        threadPool.scheduleWithFixedDelay(new Runnable() {
+            @Override
+            public void run() {
+                synchronized (RecordJFR.class) {
+                    RecordJFR.recordGauge(name, atomicLong);
                 }
             }
         }, TimeValue.timeValueSeconds(10), ThreadPool.Names.GENERIC);
@@ -213,6 +238,25 @@ public class RecordJFR {
         @SuppressForbidden(reason = "JFR")
         @Label("Sum")
         public long sum;
+
+    }
+
+    @SuppressForbidden(reason = "JFR")
+    @Name(GaugeEvent.NAME)
+    @Label("Gauge")
+    @Category("Elasticsearch")
+    @StackTrace(false)
+    public static class GaugeEvent extends Event {
+
+        static final String NAME = "org.elasticsearch.jfr.GaugeEvent";
+
+        @SuppressForbidden(reason = "JFR")
+        @Label("Name")
+        public String name;
+
+        @SuppressForbidden(reason = "JFR")
+        @Label("Value")
+        public double value;
 
     }
 }

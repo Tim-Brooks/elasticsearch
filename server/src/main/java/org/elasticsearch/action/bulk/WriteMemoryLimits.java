@@ -34,8 +34,8 @@ public class WriteMemoryLimits {
     public static final Setting<ByteSizeValue> MAX_INDEXING_BYTES =
         Setting.memorySizeSetting("indices.write.limit", "10%", Setting.Property.NodeScope, Setting.Property.Dynamic);
 
-    private final AtomicLong writeBytes = new AtomicLong(0);
-    private final AtomicLong replicaWriteBytes = new AtomicLong(0);
+    public final AtomicLong writeBytes = new AtomicLong(0);
+    public final AtomicLong replicaWriteBytes = new AtomicLong(0);
     private volatile long writeLimits;
 
     public WriteMemoryLimits(Settings settings, ClusterSettings clusterSettings) {

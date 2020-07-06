@@ -27,6 +27,7 @@ import org.elasticsearch.Assertions;
 import org.elasticsearch.Build;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ElasticsearchTimeoutException;
+import org.elasticsearch.RecordJFR;
 import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionModule;
 import org.elasticsearch.action.ActionType;
@@ -576,6 +577,8 @@ public class Node implements Closeable {
             resourcesToClose.add(persistentTasksClusterService);
             final PersistentTasksService persistentTasksService = new PersistentTasksService(clusterService, threadPool, client);
             final WriteMemoryLimits bulkIndexingLimits = new WriteMemoryLimits(settings, clusterService.getClusterSettings());
+            RecordJFR.scheduleGaugeSample("write_bytes", threadPool, bulkIndexingLimits.writeBytes);
+            RecordJFR.scheduleGaugeSample("replica_write_bytes", threadPool, bulkIndexingLimits.replicaWriteBytes);
 
             modules.add(b -> {
                     b.bind(Node.class).toInstance(this);
