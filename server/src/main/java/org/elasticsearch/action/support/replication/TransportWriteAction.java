@@ -21,6 +21,7 @@ package org.elasticsearch.action.support.replication;
 
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.elasticsearch.RecordJFR;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRunnable;
 import org.elasticsearch.action.bulk.WriteMemoryLimits;
@@ -35,6 +36,7 @@ import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.lease.Releasable;
+import org.elasticsearch.common.metrics.MeanMetric;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.MapperParsingException;
@@ -63,6 +65,8 @@ public abstract class TransportWriteAction<
     private final boolean forceExecution;
     private final WriteMemoryLimits writeMemoryLimits;
     private final String executor;
+    private final AtomicReference<MeanMetric> writeQueueLag = new AtomicReference<>(new MeanMetric());
+    private final AtomicReference<MeanMetric> replicaQueueLag = new AtomicReference<>(new MeanMetric());
 
     protected TransportWriteAction(Settings settings, String actionName, TransportService transportService,
                                    ClusterService clusterService, IndicesService indicesService, ThreadPool threadPool,
@@ -73,6 +77,8 @@ public abstract class TransportWriteAction<
         // ThreadPool.Names.WRITE thread pool in this class.
         super(settings, actionName, transportService, clusterService, indicesService, threadPool, shardStateAction, actionFilters,
             request, replicaRequest, ThreadPool.Names.SAME, true, forceExecutionOnPrimary);
+        RecordJFR.scheduleMeanSample("write_queue_lag", threadPool, writeQueueLag);
+        RecordJFR.scheduleMeanSample("replica_queue_lag", threadPool, replicaQueueLag);
         this.executor = executor;
         this.forceExecution = forceExecutionOnPrimary;
         this.writeMemoryLimits = writeMemoryLimits;
@@ -148,9 +154,11 @@ public abstract class TransportWriteAction<
     @Override
     protected void shardOperationOnPrimary(
             Request request, IndexShard primary, ActionListener<PrimaryResult<ReplicaRequest, Response>> listener) {
+        long start = System.nanoTime();
         threadPool.executor(executor).execute(new ActionRunnable<>(listener) {
             @Override
             protected void doRun() {
+                writeQueueLag.get().inc(System.nanoTime() - start);
                 dispatchedShardOperationOnPrimary(request, primary, listener);
             }
 
@@ -173,9 +181,11 @@ public abstract class TransportWriteAction<
      */
     @Override
     protected void shardOperationOnReplica(ReplicaRequest request, IndexShard replica, ActionListener<ReplicaResult> listener) {
+        long start = System.nanoTime();
         threadPool.executor(executor).execute(new ActionRunnable<>(listener) {
             @Override
             protected void doRun() {
+                replicaQueueLag.get().inc(System.nanoTime() - start);
                 dispatchedShardOperationOnReplica(request, replica, listener);
             }
 

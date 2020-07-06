@@ -27,10 +27,13 @@ import jdk.jfr.StackTrace;
 import org.HdrHistogram.Histogram;
 import org.HdrHistogram.Recorder;
 import org.HdrHistogram.SynchronizedHistogram;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.common.SuppressForbidden;
 import org.elasticsearch.common.metrics.MeanMetric;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.transport.TcpTransport;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -38,6 +41,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 @SuppressForbidden(reason = "JFR")
 public class RecordJFR {
+
+    private static final Logger logger = LogManager.getLogger(RecordJFR.class);
 
     public static synchronized void recordHistogram(String name, Histogram histogram, HistogramEvent event) {
         if (event.isEnabled() == false) {
@@ -94,6 +99,7 @@ public class RecordJFR {
             public void run() {
                 synchronized (RecordJFR.class) {
                     MeanMetric meanMetric1 = meanMetric.getAndSet(new MeanMetric());
+                    logger.error(name + " : " + meanMetric1.mean());
                     RecordJFR.recordMeanMetric(name, meanMetric1);
                 }
             }
@@ -105,6 +111,7 @@ public class RecordJFR {
             @Override
             public void run() {
                 synchronized (RecordJFR.class) {
+                    logger.error(name + " : " + atomicLong.get());
                     RecordJFR.recordGauge(name, atomicLong);
                 }
             }
