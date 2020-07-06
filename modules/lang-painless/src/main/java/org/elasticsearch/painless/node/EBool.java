@@ -21,59 +21,86 @@ package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.Operation;
-import org.elasticsearch.painless.Scope;
 import org.elasticsearch.painless.ir.BooleanNode;
 import org.elasticsearch.painless.ir.ClassNode;
-import org.elasticsearch.painless.symbol.ScriptRoot;
+import org.elasticsearch.painless.lookup.PainlessCast;
+import org.elasticsearch.painless.phase.UserTreeVisitor;
+import org.elasticsearch.painless.symbol.Decorations.Read;
+import org.elasticsearch.painless.symbol.Decorations.TargetType;
+import org.elasticsearch.painless.symbol.Decorations.ValueType;
+import org.elasticsearch.painless.symbol.Decorations.Write;
+import org.elasticsearch.painless.symbol.SemanticScope;
 
 import java.util.Objects;
 
 /**
  * Represents a boolean expression.
  */
-public final class EBool extends AExpression {
+public class EBool extends AExpression {
 
+    private final AExpression leftNode;
+    private final AExpression rightNode;
     private final Operation operation;
-    private AExpression left;
-    private AExpression right;
 
-    public EBool(Location location, Operation operation, AExpression left, AExpression right) {
-        super(location);
+    public EBool(int identifier, Location location, AExpression leftNode, AExpression rightNode, Operation operation) {
+        super(identifier, location);
 
         this.operation = Objects.requireNonNull(operation);
-        this.left = Objects.requireNonNull(left);
-        this.right = Objects.requireNonNull(right);
+        this.leftNode = Objects.requireNonNull(leftNode);
+        this.rightNode = Objects.requireNonNull(rightNode);
+    }
+
+    public AExpression getLeftNode() {
+        return leftNode;
+    }
+
+    public AExpression getRightNode() {
+        return rightNode;
+    }
+
+    public Operation getOperation() {
+        return operation;
     }
 
     @Override
-    void analyze(ScriptRoot scriptRoot, Scope scope) {
-        left.expected = boolean.class;
-        left.analyze(scriptRoot, scope);
-        left.cast();
-
-        right.expected = boolean.class;
-        right.analyze(scriptRoot, scope);
-        right.cast();
-
-        actual = boolean.class;
+    public <Input, Output> Output visit(UserTreeVisitor<Input, Output> userTreeVisitor, Input input) {
+        return userTreeVisitor.visitBool(this, input);
     }
 
     @Override
-    BooleanNode write(ClassNode classNode) {
+    Output analyze(ClassNode classNode, SemanticScope semanticScope) {
+        if (semanticScope.getCondition(this, Write.class)) {
+            throw createError(new IllegalArgumentException(
+                    "invalid assignment: cannot assign a value to " + operation.name + " operation " + "[" + operation.symbol + "]"));
+        }
+
+        if (semanticScope.getCondition(this, Read.class) == false) {
+            throw createError(new IllegalArgumentException(
+                    "not a statement: result not used from " + operation.name + " operation " + "[" + operation.symbol + "]"));
+        }
+
+        Output output = new Output();
+
+        semanticScope.setCondition(leftNode, Read.class);
+        semanticScope.putDecoration(leftNode, new TargetType(boolean.class));
+        Output leftOutput = analyze(leftNode, classNode, semanticScope);
+        PainlessCast leftCast = leftNode.cast(semanticScope);
+
+        semanticScope.setCondition(rightNode, Read.class);
+        semanticScope.putDecoration(rightNode, new TargetType(boolean.class));
+        Output rightOutput = analyze(rightNode, classNode, semanticScope);
+        PainlessCast rightCast = rightNode.cast(semanticScope);
+
+        semanticScope.putDecoration(this, new ValueType(boolean.class));
+
         BooleanNode booleanNode = new BooleanNode();
-
-        booleanNode.setLeftNode(left.cast(left.write(classNode)));
-        booleanNode.setRightNode(right.cast(right.write(classNode)));
-
-        booleanNode.setLocation(location);
-        booleanNode.setExpressionType(actual);
+        booleanNode.setLeftNode(cast(leftOutput.expressionNode, leftCast));
+        booleanNode.setRightNode(cast(rightOutput.expressionNode, rightCast));
+        booleanNode.setLocation(getLocation());
+        booleanNode.setExpressionType(boolean.class);
         booleanNode.setOperation(operation);
+        output.expressionNode = booleanNode;
 
-        return booleanNode;
-    }
-
-    @Override
-    public String toString() {
-        return singleLineToString(left, operation.symbol, right);
+        return output;
     }
 }

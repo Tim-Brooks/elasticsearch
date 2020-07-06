@@ -13,6 +13,7 @@ import org.elasticsearch.search.sort.NestedSortBuilder;
 import org.elasticsearch.search.sort.ScriptSortBuilder.ScriptSortType;
 import org.elasticsearch.search.sort.SortBuilder;
 import org.elasticsearch.xpack.eql.querydsl.container.QueryContainer;
+import org.elasticsearch.xpack.ql.execution.search.QlSourceBuilder;
 import org.elasticsearch.xpack.ql.expression.Attribute;
 import org.elasticsearch.xpack.ql.expression.FieldAttribute;
 import org.elasticsearch.xpack.ql.querydsl.container.AttributeSort;
@@ -27,7 +28,7 @@ public abstract class SourceGenerator {
 
     private SourceGenerator() {}
 
-    public static SearchSourceBuilder sourceBuilder(QueryContainer container, QueryBuilder filter, Integer size) {
+    public static SearchSourceBuilder sourceBuilder(QueryContainer container, QueryBuilder filter) {
         QueryBuilder finalQuery = null;
         // add the source
         if (container.query() != null) {
@@ -45,15 +46,25 @@ public abstract class SourceGenerator {
         final SearchSourceBuilder source = new SearchSourceBuilder();
 
         source.query(finalQuery);
+
+        // extract fields
+        QlSourceBuilder sourceBuilder = new QlSourceBuilder();
+        // Iterate through all the columns requested, collecting the fields that
+        // need to be retrieved from the result documents
+
+        // NB: the sortBuilder takes care of eliminating duplicates
+        container.fields().forEach(f -> f.v1().collectFields(sourceBuilder));
+        sourceBuilder.build(source);
+
         sorting(container, source);
         source.fetchSource(FetchSourceContext.FETCH_SOURCE);
 
-        // set fetch size
-        if (size != null) {
-            int sz = size;
-
-            if (source.size() == -1) {
-                source.size(sz);
+        if (container.limit() != null) {
+            // add size and from
+            source.size(container.limit().absLimit());
+            // this should be added only for event queries
+            if (container.limit().offset > 0) {
+                source.from(container.limit().offset);
             }
         }
 

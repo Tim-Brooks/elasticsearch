@@ -6,21 +6,28 @@
 
 package org.elasticsearch.xpack.security.authc;
 
-import com.google.common.collect.Sets;
 import org.elasticsearch.ElasticsearchSecurityException;
 import org.elasticsearch.action.DocWriteResponse;
+import org.elasticsearch.action.admin.cluster.node.info.NodeInfo;
+import org.elasticsearch.action.admin.indices.refresh.RefreshAction;
+import org.elasticsearch.action.admin.indices.refresh.RefreshRequestBuilder;
 import org.elasticsearch.action.admin.indices.refresh.RefreshResponse;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.action.support.WriteRequest;
 import org.elasticsearch.action.update.UpdateResponse;
 import org.elasticsearch.client.Client;
+import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RequestOptions;
+import org.elasticsearch.client.ResponseException;
+import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.client.security.AuthenticateResponse;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.common.util.concurrent.EsExecutors;
+import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.test.SecurityIntegTestCase;
 import org.elasticsearch.test.SecuritySettingsSource;
@@ -45,6 +52,7 @@ import org.elasticsearch.xpack.security.transport.filter.IPFilter;
 import org.junit.After;
 import org.junit.Before;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -55,18 +63,22 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static org.elasticsearch.xpack.core.security.index.RestrictedIndicesNames.SECURITY_MAIN_ALIAS;
+import static org.elasticsearch.xpack.security.Security.SECURITY_CRYPTO_THREAD_POOL_NAME;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.in;
 import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.isIn;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -293,7 +305,7 @@ public class ApiKeyIntegTests extends SecurityIntegTestCase {
         Set<String> expectedKeyIds = Sets.newHashSet(createdApiKeys.get(0).getId(), createdApiKeys.get(1).getId());
         boolean apiKeyInvalidatedButNotYetDeletedByExpiredApiKeysRemover = false;
         for (ApiKey apiKey : getApiKeyResponseListener.get().getApiKeyInfos()) {
-            assertThat(apiKey.getId(), isIn(expectedKeyIds));
+            assertThat(apiKey.getId(), is(in(expectedKeyIds)));
             if (apiKey.getId().equals(createdApiKeys.get(0).getId())) {
                 // has been invalidated but not yet deleted by ExpiredApiKeysRemover
                 assertThat(apiKey.isInvalidated(), is(true));
@@ -326,7 +338,7 @@ public class ApiKeyIntegTests extends SecurityIntegTestCase {
         expectedKeyIds = Sets.newHashSet(createdApiKeys.get(1).getId());
         apiKeyInvalidatedButNotYetDeletedByExpiredApiKeysRemover = false;
         for (ApiKey apiKey : getApiKeyResponseListener.get().getApiKeyInfos()) {
-            assertThat(apiKey.getId(), isIn(expectedKeyIds));
+            assertThat(apiKey.getId(), is(in(expectedKeyIds)));
             if (apiKey.getId().equals(createdApiKeys.get(1).getId())) {
                 // has been invalidated but not yet deleted by ExpiredApiKeysRemover
                 assertThat(apiKey.isInvalidated(), is(true));
@@ -409,7 +421,7 @@ public class ApiKeyIntegTests extends SecurityIntegTestCase {
                 createdApiKeys.get(3).getId());
         boolean apiKeyInvalidatedButNotYetDeletedByExpiredApiKeysRemover = false;
         for (ApiKey apiKey : getApiKeyResponseListener.get().getApiKeyInfos()) {
-            assertThat(apiKey.getId(), isIn(expectedKeyIds));
+            assertThat(apiKey.getId(), is(in(expectedKeyIds)));
             if (apiKey.getId().equals(createdApiKeys.get(0).getId())) {
                 // has been expired, not invalidated
                 assertTrue(apiKey.getExpiration().isBefore(Instant.now()));
@@ -756,6 +768,132 @@ public class ApiKeyIntegTests extends SecurityIntegTestCase {
         assertThat(invalidateResponse.getInvalidatedApiKeys(), containsInAnyOrder(responses.get(0).getId()));
         assertThat(invalidateResponse.getPreviouslyInvalidatedApiKeys().size(), equalTo(0));
         assertThat(invalidateResponse.getErrors().size(), equalTo(0));
+    }
+
+    public void testDerivedKeys() throws ExecutionException, InterruptedException {
+        Client client = client().filterWithHeader(Collections.singletonMap("Authorization",
+            UsernamePasswordToken.basicAuthHeaderValue(SecuritySettingsSource.TEST_SUPERUSER,
+                SecuritySettingsSourceField.TEST_PASSWORD_SECURE_STRING)));
+        final CreateApiKeyResponse response = new CreateApiKeyRequestBuilder(client)
+            .setName("key-1")
+            .setRoleDescriptors(Collections.singletonList(
+                new RoleDescriptor("role", new String[] { "manage_api_key" }, null, null)))
+            .get();
+
+        assertEquals("key-1", response.getName());
+        assertNotNull(response.getId());
+        assertNotNull(response.getKey());
+
+        // use the first ApiKey for authorized action
+        final String base64ApiKeyKeyValue = Base64.getEncoder().encodeToString(
+            (response.getId() + ":" + response.getKey().toString()).getBytes(StandardCharsets.UTF_8));
+        final Client clientKey1 = client().filterWithHeader(Collections.singletonMap("Authorization", "ApiKey " + base64ApiKeyKeyValue));
+
+        final String expectedMessage = "creating derived api keys requires an explicit role descriptor that is empty";
+
+        final IllegalArgumentException e1 = expectThrows(IllegalArgumentException.class,
+                () -> new CreateApiKeyRequestBuilder(clientKey1).setName("key-2").get());
+        assertThat(e1.getMessage(), containsString(expectedMessage));
+
+        final IllegalArgumentException e2 = expectThrows(IllegalArgumentException.class,
+            () -> new CreateApiKeyRequestBuilder(clientKey1).setName("key-3")
+                .setRoleDescriptors(Collections.emptyList()).get());
+        assertThat(e2.getMessage(), containsString(expectedMessage));
+
+        final IllegalArgumentException e3 = expectThrows(IllegalArgumentException.class,
+            () -> new CreateApiKeyRequestBuilder(clientKey1).setName("key-4")
+                .setRoleDescriptors(Collections.singletonList(
+                    new RoleDescriptor("role", new String[] {"manage_own_api_key"}, null, null)
+                )).get());
+        assertThat(e3.getMessage(), containsString(expectedMessage));
+
+        final List<RoleDescriptor> roleDescriptors = randomList(2, 10,
+            () -> new RoleDescriptor("role", null, null, null));
+        roleDescriptors.set(randomInt(roleDescriptors.size() - 1),
+            new RoleDescriptor("role", new String[] {"manage_own_api_key"}, null, null));
+
+        final IllegalArgumentException e4 = expectThrows(IllegalArgumentException.class,
+            () -> new CreateApiKeyRequestBuilder(clientKey1).setName("key-5")
+                .setRoleDescriptors(roleDescriptors).get());
+        assertThat(e4.getMessage(), containsString(expectedMessage));
+
+        final CreateApiKeyResponse key100Response = new CreateApiKeyRequestBuilder(clientKey1).setName("key-100")
+            .setRoleDescriptors(Collections.singletonList(
+                new RoleDescriptor("role", null, null, null)
+            )).get();
+        assertEquals("key-100", key100Response.getName());
+        assertNotNull(key100Response.getId());
+        assertNotNull(key100Response.getKey());
+
+        // Check at the end to allow sometime for the operation to happen. Since an erroneous creation is
+        // asynchronous so that the document is not available immediately.
+        assertApiKeyNotCreated(client, "key-2");
+        assertApiKeyNotCreated(client, "key-3");
+        assertApiKeyNotCreated(client, "key-4");
+        assertApiKeyNotCreated(client, "key-5");
+    }
+
+    public void testAuthenticationReturns429WhenThreadPoolIsSaturated() throws IOException, InterruptedException {
+        final String nodeName = randomFrom(internalCluster().getNodeNames());
+        final Settings settings = internalCluster().getInstance(Settings.class, nodeName);
+        final ThreadPool threadPool = internalCluster().getInstance(ThreadPool.class, nodeName);
+
+        final RoleDescriptor descriptor = new RoleDescriptor("auth_only", new String[] { }, null, null);
+        final Client client = client().filterWithHeader(Collections.singletonMap("Authorization",
+            UsernamePasswordToken.basicAuthHeaderValue(SecuritySettingsSource.TEST_SUPERUSER,
+                SecuritySettingsSourceField.TEST_PASSWORD_SECURE_STRING)));
+        final CreateApiKeyResponse createApiKeyResponse = new CreateApiKeyRequestBuilder(client)
+            .setName("auth only key")
+            .setRoleDescriptors(Collections.singletonList(descriptor))
+            .get();
+
+        assertNotNull(createApiKeyResponse.getId());
+        assertNotNull(createApiKeyResponse.getKey());
+
+        final List<NodeInfo> nodeInfos = client().admin().cluster().prepareNodesInfo().get().getNodes().stream()
+            .filter(nodeInfo -> nodeInfo.getNode().getName().equals(nodeName))
+            .collect(Collectors.toList());
+
+        final ExecutorService executorService = threadPool.executor(SECURITY_CRYPTO_THREAD_POOL_NAME);
+        final int allocatedProcessors = EsExecutors.allocatedProcessors(settings);
+        final int numberOfThreads = (allocatedProcessors + 1) / 2;
+        final CountDownLatch blockingLatch = new CountDownLatch(1);
+        final CountDownLatch readyLatch = new CountDownLatch(numberOfThreads);
+
+        for (int i = 0; i < numberOfThreads; i++) {
+            executorService.submit(() -> {
+                readyLatch.countDown();
+                try {
+                    blockingLatch.await();
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        }
+        // Fill the whole queue for the crypto thread pool
+        final int queueSize = 1000;
+        IntStream.range(0, queueSize).forEach(i -> executorService.submit(() -> {}));
+        readyLatch.await();
+
+        try (RestClient restClient = createRestClient(nodeInfos, null, "http")) {
+            final String base64ApiKeyKeyValue = Base64.getEncoder().encodeToString(
+                (createApiKeyResponse.getId() + ":" + createApiKeyResponse.getKey().toString()).getBytes(StandardCharsets.UTF_8));
+
+            final Request authRequest = new Request("GET", "_security/_authenticate");
+            authRequest.setOptions(RequestOptions.DEFAULT.toBuilder().addHeader(
+                "Authorization", "ApiKey " + base64ApiKeyKeyValue).build());
+            final ResponseException responseException = expectThrows(ResponseException.class, () -> restClient.performRequest(authRequest));
+            assertThat(responseException.getMessage(), containsString("429 Too Many Requests"));
+            assertThat(responseException.getResponse().getStatusLine().getStatusCode(), is(429));
+        } finally {
+            blockingLatch.countDown();
+        }
+    }
+
+    private void assertApiKeyNotCreated(Client client, String keyName) throws ExecutionException, InterruptedException {
+        new RefreshRequestBuilder(client, RefreshAction.INSTANCE).setIndices(SECURITY_MAIN_ALIAS).execute().get();
+        assertEquals(0, client.execute(GetApiKeyAction.INSTANCE,
+            GetApiKeyRequest.usingApiKeyName(keyName, false)).get().getApiKeyInfos().length);
     }
 
     private void verifyGetResponse(int expectedNumberOfApiKeys, List<CreateApiKeyResponse> responses,

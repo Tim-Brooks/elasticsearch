@@ -25,6 +25,7 @@ import org.elasticsearch.common.util.concurrent.ReleasableLock;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.license.XPackLicenseState;
+import org.elasticsearch.license.XPackLicenseState.Feature;
 import org.elasticsearch.xpack.core.common.IteratingActionListener;
 import org.elasticsearch.xpack.core.security.authc.Authentication;
 import org.elasticsearch.xpack.core.security.authz.RoleDescriptor;
@@ -86,7 +87,7 @@ public class CompositeRolesStore {
         Setting.intSetting("xpack.security.authz.store.roles.negative_lookup_cache.max_size", 10000, Property.NodeScope);
     private static final Logger logger = LogManager.getLogger(CompositeRolesStore.class);
 
-    private final DeprecationLogger deprecationLogger = new DeprecationLogger(logger);
+    private final DeprecationLogger deprecationLogger = DeprecationLogger.getLogger(CompositeRolesStore.class);
 
     private final FileRolesStore fileRolesStore;
     private final NativeRolesStore nativeRolesStore;
@@ -165,7 +166,7 @@ public class CompositeRolesStore {
                                     rolesRetrievalResult.getMissingRoles()));
                         }
                         final Set<RoleDescriptor> effectiveDescriptors;
-                        if (licenseState.isDocumentAndFieldLevelSecurityAllowed()) {
+                        if (licenseState.checkFeature(Feature.SECURITY_DLS_FLS)) {
                             effectiveDescriptors = rolesRetrievalResult.getRoleDescriptors();
                         } else {
                             effectiveDescriptors = rolesRetrievalResult.getRoleDescriptors().stream()
@@ -190,8 +191,8 @@ public class CompositeRolesStore {
             .forEach(rd -> {
                 String reason = Objects.toString(
                     rd.getMetadata().get(MetadataUtils.DEPRECATED_REASON_METADATA_KEY), "Please check the documentation");
-                deprecationLogger.deprecatedAndMaybeLog("deprecated_role-" + rd.getName(), "The role [" + rd.getName() +
-                    "] is deprecated and will be removed in a future version of Elasticsearch. " + reason);
+                deprecationLogger.deprecate("deprecated_role-" + rd.getName(), "The role [" + rd.getName() +
+                            "] is deprecated and will be removed in a future version of Elasticsearch. " + reason);
             });
     }
 
@@ -320,7 +321,7 @@ public class CompositeRolesStore {
     private void loadRoleDescriptorsAsync(Set<String> roleNames, ActionListener<RolesRetrievalResult> listener) {
         final RolesRetrievalResult rolesResult = new RolesRetrievalResult();
         final List<BiConsumer<Set<String>, ActionListener<RoleRetrievalResult>>> asyncRoleProviders =
-            licenseState.isCustomRoleProvidersAllowed() ? allRoleProviders : builtInRoleProviders;
+            licenseState.checkFeature(Feature.SECURITY_CUSTOM_ROLE_PROVIDERS) ? allRoleProviders : builtInRoleProviders;
 
         final ActionListener<RoleRetrievalResult> descriptorsListener =
             ContextPreservingActionListener.wrapPreservingContext(ActionListener.wrap(ignore -> {

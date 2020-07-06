@@ -6,24 +6,29 @@
 package org.elasticsearch.xpack.test.rest;
 
 import com.carrotsearch.randomizedtesting.annotations.ParametersFactory;
+
+import com.carrotsearch.randomizedtesting.annotations.TimeoutSuite;
 import org.apache.http.HttpStatus;
+import org.apache.lucene.util.TimeUnits;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.common.CheckedFunction;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
-import org.elasticsearch.plugins.MetaDataUpgrader;
+import org.elasticsearch.plugins.MetadataUpgrader;
 import org.elasticsearch.test.SecuritySettingsSourceField;
 import org.elasticsearch.test.rest.ESRestTestCase;
 import org.elasticsearch.test.rest.yaml.ClientYamlTestCandidate;
 import org.elasticsearch.test.rest.yaml.ClientYamlTestResponse;
 import org.elasticsearch.test.rest.yaml.ESClientYamlSuiteTestCase;
+import org.elasticsearch.xpack.core.ml.MlConfigIndex;
 import org.elasticsearch.xpack.core.ml.MlMetaIndex;
 import org.elasticsearch.xpack.core.ml.integration.MlRestTestStateCleaner;
 import org.elasticsearch.xpack.core.ml.job.persistence.AnomalyDetectorsIndex;
 import org.elasticsearch.xpack.core.ml.job.persistence.AnomalyDetectorsIndexFields;
 import org.elasticsearch.xpack.core.ml.notifications.NotificationsIndex;
 import org.elasticsearch.xpack.core.rollup.job.RollupJob;
+import org.elasticsearch.xpack.core.transform.transforms.persistence.TransformInternalIndexConstants;
 import org.junit.After;
 import org.junit.Before;
 
@@ -34,6 +39,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static java.util.Collections.emptyList;
@@ -47,6 +53,8 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 
 /** Runs rest tests against external cluster */
+// TODO: Remove this timeout increase once this test suite is broken up
+@TimeoutSuite(millis = 40 * TimeUnits.MINUTE)
 public class XPackRestIT extends ESClientYamlSuiteTestCase {
     private static final String BASIC_AUTH_VALUE =
             basicAuthHeaderValue("x_pack_rest_user", SecuritySettingsSourceField.TEST_PASSWORD_SECURE_STRING);
@@ -75,7 +83,7 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
     }
 
     /**
-     * Waits for the Security template and the Machine Learning templates to be created by the {@link MetaDataUpgrader}
+     * Waits for Machine Learning and Transform templates to be created by the {@link MetadataUpgrader}
      */
     private void waitForTemplates() throws Exception {
         if (installTemplates()) {
@@ -83,10 +91,13 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
             templates.addAll(
                 Arrays.asList(
                     NotificationsIndex.NOTIFICATIONS_INDEX,
-                    MlMetaIndex.INDEX_NAME,
+                    MlMetaIndex.indexName(),
                     AnomalyDetectorsIndexFields.STATE_INDEX_PREFIX,
                     AnomalyDetectorsIndex.jobResultsIndexPrefix(),
-                    AnomalyDetectorsIndex.configIndexName()));
+                    MlConfigIndex.indexName(),
+                    TransformInternalIndexConstants.AUDIT_INDEX,
+                    TransformInternalIndexConstants.LATEST_INDEX_NAME
+                ));
 
             for (String template : templates) {
                 awaitCallApi("indices.exists_template", singletonMap("name", template), emptyList(),
@@ -117,6 +128,7 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
             final Map<String, Object> settings = new HashMap<>();
             settings.put("xpack.monitoring.collection.enabled", true);
             settings.put("xpack.monitoring.collection.interval", "1s");
+            settings.put("xpack.monitoring.exporters._local.type", "local");
             settings.put("xpack.monitoring.exporters._local.enabled", true);
 
             awaitCallApi("cluster.put_settings", emptyMap(),
@@ -224,11 +236,14 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
                               CheckedFunction<ClientYamlTestResponse, Boolean, IOException> success,
                               Supplier<String> error) {
         try {
-            // The actual method call that sends the API requests returns a Future, but we immediately
-            // call .get() on it so there's no need for this method to do any other awaiting.
-            ClientYamlTestResponse response = callApi(apiName, params, bodies, getApiCallHeaders());
-            assertEquals(response.getStatusCode(), HttpStatus.SC_OK);
-            success.apply(response);
+            final AtomicReference<ClientYamlTestResponse> response = new AtomicReference<>();
+            assertBusy(() -> {
+                // The actual method call that sends the API requests returns a Future, but we immediately
+                // call .get() on it so there's no need for this method to do any other awaiting.
+                response.set(callApi(apiName, params, bodies, getApiCallHeaders()));
+                assertEquals(HttpStatus.SC_OK, response.get().getStatusCode());
+            });
+            success.apply(response.get());
         } catch (Exception e) {
             throw new IllegalStateException(error.get(), e);
         }

@@ -23,10 +23,16 @@ esplugin {
 }
 
 dependencies {
-  compile "org.apache.lucene:lucene-analyzers-smartcn:${versions.lucene}"
+  api "org.apache.lucene:lucene-analyzers-smartcn:${versions.lucene}"
 }
 
-dependencyLicenses {
+restResources {
+  restApi {
+    includeCore '_common', 'indices', 'index', 'search'
+  }
+}
+
+tasks.named("dependencyLicenses").configure {
   mapping from: /lucene-.*/, to: 'lucene'
 }
 

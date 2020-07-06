@@ -20,51 +20,60 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.Scope;
 import org.elasticsearch.painless.ir.ClassNode;
 import org.elasticsearch.painless.ir.ThrowNode;
-import org.elasticsearch.painless.symbol.ScriptRoot;
+import org.elasticsearch.painless.lookup.PainlessCast;
+import org.elasticsearch.painless.phase.UserTreeVisitor;
+import org.elasticsearch.painless.symbol.Decorations.AllEscape;
+import org.elasticsearch.painless.symbol.Decorations.LoopEscape;
+import org.elasticsearch.painless.symbol.Decorations.MethodEscape;
+import org.elasticsearch.painless.symbol.Decorations.Read;
+import org.elasticsearch.painless.symbol.Decorations.TargetType;
+import org.elasticsearch.painless.symbol.SemanticScope;
 
 import java.util.Objects;
 
 /**
  * Represents a throw statement.
  */
-public final class SThrow extends AStatement {
+public class SThrow extends AStatement {
 
-    private AExpression expression;
+    private final AExpression expressionNode;
 
-    public SThrow(Location location, AExpression expression) {
-        super(location);
+    public SThrow(int identifier, Location location, AExpression expressionNode) {
+        super(identifier, location);
 
-        this.expression = Objects.requireNonNull(expression);
+        this.expressionNode = Objects.requireNonNull(expressionNode);
+    }
+
+    public AExpression getExpressionNode() {
+        return expressionNode;
     }
 
     @Override
-    void analyze(ScriptRoot scriptRoot, Scope scope) {
-        expression.expected = Exception.class;
-        expression.analyze(scriptRoot, scope);
-        expression.cast();
-
-        methodEscape = true;
-        loopEscape = true;
-        allEscape = true;
-        statementCount = 1;
+    public <Input, Output> Output visit(UserTreeVisitor<Input, Output> userTreeVisitor, Input input) {
+        return userTreeVisitor.visitThrow(this, input);
     }
 
     @Override
-    ThrowNode write(ClassNode classNode) {
+    Output analyze(ClassNode classNode, SemanticScope semanticScope) {
+        Output output = new Output();
+
+        semanticScope.setCondition(expressionNode, Read.class);
+        semanticScope.putDecoration(expressionNode, new TargetType(Exception.class));
+        AExpression.Output expressionOutput = AExpression.analyze(expressionNode, classNode, semanticScope);
+        PainlessCast expressionCast = expressionNode.cast(semanticScope);
+
+        semanticScope.setCondition(this, MethodEscape.class);
+        semanticScope.setCondition(this, LoopEscape.class);
+        semanticScope.setCondition(this, AllEscape.class);
+
         ThrowNode throwNode = new ThrowNode();
+        throwNode.setExpressionNode(AExpression.cast(expressionOutput.expressionNode, expressionCast));
+        throwNode.setLocation(getLocation());
 
-        throwNode.setExpressionNode(expression.cast(expression.write(classNode)));
+        output.statementNode = throwNode;
 
-        throwNode.setLocation(location);
-
-        return throwNode;
-    }
-
-    @Override
-    public String toString() {
-        return singleLineToString(expression);
+        return output;
     }
 }

@@ -46,6 +46,8 @@ import org.elasticsearch.client.ml.DeleteJobRequest;
 import org.elasticsearch.client.ml.DeleteJobResponse;
 import org.elasticsearch.client.ml.DeleteModelSnapshotRequest;
 import org.elasticsearch.client.ml.DeleteTrainedModelRequest;
+import org.elasticsearch.client.ml.EstimateModelMemoryRequest;
+import org.elasticsearch.client.ml.EstimateModelMemoryResponse;
 import org.elasticsearch.client.ml.EvaluateDataFrameRequest;
 import org.elasticsearch.client.ml.EvaluateDataFrameResponse;
 import org.elasticsearch.client.ml.ExplainDataFrameAnalyticsRequest;
@@ -113,6 +115,7 @@ import org.elasticsearch.client.ml.StopDataFrameAnalyticsRequest;
 import org.elasticsearch.client.ml.StopDataFrameAnalyticsResponse;
 import org.elasticsearch.client.ml.StopDatafeedRequest;
 import org.elasticsearch.client.ml.StopDatafeedResponse;
+import org.elasticsearch.client.ml.UpdateDataFrameAnalyticsRequest;
 import org.elasticsearch.client.ml.UpdateDatafeedRequest;
 import org.elasticsearch.client.ml.UpdateFilterRequest;
 import org.elasticsearch.client.ml.UpdateJobRequest;
@@ -127,6 +130,7 @@ import org.elasticsearch.client.ml.datafeed.DatafeedState;
 import org.elasticsearch.client.ml.datafeed.DatafeedStats;
 import org.elasticsearch.client.ml.datafeed.DatafeedUpdate;
 import org.elasticsearch.client.ml.dataframe.DataFrameAnalyticsConfig;
+import org.elasticsearch.client.ml.dataframe.DataFrameAnalyticsConfigUpdate;
 import org.elasticsearch.client.ml.dataframe.DataFrameAnalyticsDest;
 import org.elasticsearch.client.ml.dataframe.DataFrameAnalyticsSource;
 import org.elasticsearch.client.ml.dataframe.DataFrameAnalyticsState;
@@ -138,6 +142,8 @@ import org.elasticsearch.client.ml.dataframe.evaluation.classification.AccuracyM
 import org.elasticsearch.client.ml.dataframe.evaluation.classification.Classification;
 import org.elasticsearch.client.ml.dataframe.evaluation.classification.MulticlassConfusionMatrixMetric;
 import org.elasticsearch.client.ml.dataframe.evaluation.regression.MeanSquaredErrorMetric;
+import org.elasticsearch.client.ml.dataframe.evaluation.regression.MeanSquaredLogarithmicErrorMetric;
+import org.elasticsearch.client.ml.dataframe.evaluation.regression.HuberMetric;
 import org.elasticsearch.client.ml.dataframe.evaluation.regression.RSquaredMetric;
 import org.elasticsearch.client.ml.dataframe.evaluation.regression.Regression;
 import org.elasticsearch.client.ml.dataframe.evaluation.softclassification.AucRocMetric;
@@ -147,6 +153,8 @@ import org.elasticsearch.client.ml.dataframe.evaluation.softclassification.Preci
 import org.elasticsearch.client.ml.dataframe.evaluation.softclassification.RecallMetric;
 import org.elasticsearch.client.ml.dataframe.explain.FieldSelection;
 import org.elasticsearch.client.ml.dataframe.explain.MemoryEstimation;
+import org.elasticsearch.client.ml.dataframe.stats.common.DataCounts;
+import org.elasticsearch.client.ml.dataframe.stats.common.MemoryUsage;
 import org.elasticsearch.client.ml.filestructurefinder.FileStructure;
 import org.elasticsearch.client.ml.inference.InferenceToXContentCompressor;
 import org.elasticsearch.client.ml.inference.MlInferenceNamedXContentProvider;
@@ -155,9 +163,11 @@ import org.elasticsearch.client.ml.inference.TrainedModelDefinition;
 import org.elasticsearch.client.ml.inference.TrainedModelDefinitionTests;
 import org.elasticsearch.client.ml.inference.TrainedModelInput;
 import org.elasticsearch.client.ml.inference.TrainedModelStats;
+import org.elasticsearch.client.ml.inference.trainedmodel.RegressionConfig;
 import org.elasticsearch.client.ml.inference.trainedmodel.TargetType;
 import org.elasticsearch.client.ml.inference.trainedmodel.langident.LangIdentNeuralNetwork;
 import org.elasticsearch.client.ml.job.config.AnalysisConfig;
+import org.elasticsearch.client.ml.job.config.AnalysisLimits;
 import org.elasticsearch.client.ml.job.config.DataDescription;
 import org.elasticsearch.client.ml.job.config.Detector;
 import org.elasticsearch.client.ml.job.config.Job;
@@ -874,7 +884,7 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         {
             // Index a randomly named unused state document
             String docId = "non_existing_job_" + randomFrom("model_state_1234567#1", "quantiles", "categorizer_state#1");
-            IndexRequest indexRequest = new IndexRequest(".ml-state").id(docId);
+            IndexRequest indexRequest = new IndexRequest(".ml-state-000001").id(docId);
             indexRequest.source(Collections.emptyMap(), XContentType.JSON);
             indexRequest.setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE);
             highLevelClient().index(indexRequest, RequestOptions.DEFAULT);
@@ -944,8 +954,8 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         assertTrue(forecastExists(jobId, forecastId));
 
         {
-            // Verify .ml-state contains the expected unused state document
-            Iterable<SearchHit> hits = searchAll(".ml-state");
+            // Verify .ml-state* contains the expected unused state document
+            Iterable<SearchHit> hits = searchAll(".ml-state*");
             List<SearchHit> target = new ArrayList<>();
             hits.forEach(target::add);
             long numMatches = target.stream()
@@ -974,8 +984,8 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         assertFalse(forecastExists(jobId, forecastId));
 
         {
-            // Verify .ml-state doesn't contain unused state documents
-            Iterable<SearchHit> hits = searchAll(".ml-state");
+            // Verify .ml-state* doesn't contain unused state documents
+            Iterable<SearchHit> hits = searchAll(".ml-state*");
             List<SearchHit> hitList = new ArrayList<>();
             hits.forEach(hitList::add);
             long numMatches = hitList.stream()
@@ -1244,6 +1254,27 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         assertThat(remainingIds, not(hasItem(deletedEvent)));
     }
 
+    public void testEstimateModelMemory() throws Exception {
+        MachineLearningClient machineLearningClient = highLevelClient().machineLearning();
+
+        String byFieldName = randomAlphaOfLength(10);
+        String influencerFieldName = randomAlphaOfLength(10);
+        AnalysisConfig analysisConfig = AnalysisConfig.builder(
+            Collections.singletonList(
+                Detector.builder().setFunction("count").setByFieldName(byFieldName).build()
+            )).setInfluencers(Collections.singletonList(influencerFieldName)).build();
+        EstimateModelMemoryRequest estimateModelMemoryRequest = new EstimateModelMemoryRequest(analysisConfig);
+        estimateModelMemoryRequest.setOverallCardinality(Collections.singletonMap(byFieldName, randomNonNegativeLong()));
+        estimateModelMemoryRequest.setMaxBucketCardinality(Collections.singletonMap(influencerFieldName, randomNonNegativeLong()));
+
+        EstimateModelMemoryResponse estimateModelMemoryResponse = execute(
+            estimateModelMemoryRequest,
+            machineLearningClient::estimateModelMemory, machineLearningClient::estimateModelMemoryAsync);
+
+        ByteSizeValue modelMemoryEstimate = estimateModelMemoryResponse.getModelMemoryEstimate();
+        assertThat(modelMemoryEstimate.getBytes(), greaterThanOrEqualTo(10000000L));
+    }
+
     public void testPutDataFrameAnalyticsConfig_GivenOutlierDetectionAnalysis() throws Exception {
         MachineLearningClient machineLearningClient = highLevelClient().machineLearning();
         String configId = "test-put-df-analytics-outlier-detection";
@@ -1297,9 +1328,11 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
                 .setLambda(1.0)
                 .setGamma(1.0)
                 .setEta(1.0)
-                .setMaximumNumberTrees(10)
+                .setMaxTrees(10)
                 .setFeatureBagFraction(0.5)
                 .setNumTopFeatureImportanceValues(3)
+                .setLossFunction(org.elasticsearch.client.ml.dataframe.Regression.LossFunction.MSLE)
+                .setLossFunctionParameter(1.0)
                 .build())
             .setDescription("this is a regression")
             .build();
@@ -1336,11 +1369,13 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
                 .setPredictionFieldName("my_dependent_variable_prediction")
                 .setTrainingPercent(80.0)
                 .setRandomizeSeed(42L)
+                .setClassAssignmentObjective(
+                    org.elasticsearch.client.ml.dataframe.Classification.ClassAssignmentObjective.MAXIMIZE_ACCURACY)
                 .setNumTopClasses(1)
                 .setLambda(1.0)
                 .setGamma(1.0)
                 .setEta(1.0)
-                .setMaximumNumberTrees(10)
+                .setMaxTrees(10)
                 .setFeatureBagFraction(0.5)
                 .setNumTopFeatureImportanceValues(3)
                 .build())
@@ -1362,6 +1397,33 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         assertThat(createdConfig.getAnalyzedFields(), equalTo(config.getAnalyzedFields()));
         assertThat(createdConfig.getModelMemoryLimit(), equalTo(ByteSizeValue.parseBytesSizeValue("1gb", "")));  // default value
         assertThat(createdConfig.getDescription(), equalTo("this is a classification"));
+    }
+
+    public void testUpdateDataFrameAnalytics() throws Exception {
+        MachineLearningClient machineLearningClient = highLevelClient().machineLearning();
+        String configId = "test-update-df-analytics-classification";
+        DataFrameAnalyticsConfig config = DataFrameAnalyticsConfig.builder()
+            .setId(configId)
+            .setSource(DataFrameAnalyticsSource.builder().setIndex("update-test-source-index").build())
+            .setDest(DataFrameAnalyticsDest.builder().setIndex("update-test-dest-index").build())
+            .setAnalysis(org.elasticsearch.client.ml.dataframe.Classification.builder("my_dependent_variable").build())
+            .setDescription("this is a classification")
+            .build();
+
+        createIndex("update-test-source-index", defaultMappingForTest());
+
+        machineLearningClient.putDataFrameAnalytics(new PutDataFrameAnalyticsRequest(config), RequestOptions.DEFAULT);
+
+        UpdateDataFrameAnalyticsRequest request =
+            new UpdateDataFrameAnalyticsRequest(
+                DataFrameAnalyticsConfigUpdate.builder().setId(config.getId()).setDescription("Updated description").build());
+        PutDataFrameAnalyticsResponse response =
+            execute(request, machineLearningClient::updateDataFrameAnalytics, machineLearningClient::updateDataFrameAnalyticsAsync);
+        assertThat(response.getConfig().getDescription(), equalTo("Updated description"));
+
+        GetDataFrameAnalyticsRequest getRequest = new GetDataFrameAnalyticsRequest(config.getId());
+        GetDataFrameAnalyticsResponse getResponse = machineLearningClient.getDataFrameAnalytics(getRequest, RequestOptions.DEFAULT);
+        assertThat(getResponse.getAnalytics().get(0).getDescription(), equalTo("Updated description"));
     }
 
     public void testGetDataFrameAnalyticsConfig_SingleConfig() throws Exception {
@@ -1504,9 +1566,12 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         assertThat(progress.size(), equalTo(4));
         assertThat(progress.get(0), equalTo(new PhaseProgress("reindexing", 0)));
         assertThat(progress.get(1), equalTo(new PhaseProgress("loading_data", 0)));
-        assertThat(progress.get(2), equalTo(new PhaseProgress("analyzing", 0)));
+        assertThat(progress.get(2), equalTo(new PhaseProgress("computing_outliers", 0)));
         assertThat(progress.get(3), equalTo(new PhaseProgress("writing_results", 0)));
-        assertThat(stats.getMemoryUsage(), is(nullValue()));
+        assertThat(stats.getMemoryUsage().getPeakUsageBytes(), equalTo(0L));
+        assertThat(stats.getMemoryUsage().getStatus(), equalTo(MemoryUsage.Status.OK));
+        assertThat(stats.getMemoryUsage().getMemoryReestimateBytes(), is(nullValue()));
+        assertThat(stats.getDataCounts(), equalTo(new DataCounts(0, 0, 0)));
     }
 
     public void testStartDataFrameAnalyticsConfig() throws Exception {
@@ -1789,16 +1854,31 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
             new EvaluateDataFrameRequest(
                 regressionIndex,
                 null,
-                new Regression(actualRegression, predictedRegression, new MeanSquaredErrorMetric(), new RSquaredMetric()));
+                new Regression(
+                    actualRegression,
+                    predictedRegression,
+                    new MeanSquaredErrorMetric(),
+                    new MeanSquaredLogarithmicErrorMetric(1.0),
+                    new HuberMetric(1.0),
+                    new RSquaredMetric()));
 
         EvaluateDataFrameResponse evaluateDataFrameResponse =
             execute(evaluateDataFrameRequest, machineLearningClient::evaluateDataFrame, machineLearningClient::evaluateDataFrameAsync);
         assertThat(evaluateDataFrameResponse.getEvaluationName(), equalTo(Regression.NAME));
-        assertThat(evaluateDataFrameResponse.getMetrics().size(), equalTo(2));
+        assertThat(evaluateDataFrameResponse.getMetrics().size(), equalTo(4));
 
         MeanSquaredErrorMetric.Result mseResult = evaluateDataFrameResponse.getMetricByName(MeanSquaredErrorMetric.NAME);
         assertThat(mseResult.getMetricName(), equalTo(MeanSquaredErrorMetric.NAME));
-        assertThat(mseResult.getError(), closeTo(0.061000000, 1e-9));
+        assertThat(mseResult.getValue(), closeTo(0.061000000, 1e-9));
+
+        MeanSquaredLogarithmicErrorMetric.Result msleResult =
+            evaluateDataFrameResponse.getMetricByName(MeanSquaredLogarithmicErrorMetric.NAME);
+        assertThat(msleResult.getMetricName(), equalTo(MeanSquaredLogarithmicErrorMetric.NAME));
+        assertThat(msleResult.getValue(), closeTo(0.02759231770210426, 1e-9));
+
+        HuberMetric.Result huberResult = evaluateDataFrameResponse.getMetricByName(HuberMetric.NAME);
+        assertThat(huberResult.getMetricName(), equalTo(HuberMetric.NAME));
+        assertThat(huberResult.getValue(), closeTo(0.029669771640929276, 1e-9));
 
         RSquaredMetric.Result rSquaredResult = evaluateDataFrameResponse.getMetricByName(RSquaredMetric.NAME);
         assertThat(rSquaredResult.getMetricName(), equalTo(RSquaredMetric.NAME));
@@ -2215,6 +2295,7 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         TrainedModelConfig trainedModelConfig = TrainedModelConfig.builder()
             .setDefinition(definition)
             .setModelId(modelId)
+            .setInferenceConfig(new RegressionConfig())
             .setInput(new TrainedModelInput(Arrays.asList("col1", "col2", "col3", "col4")))
             .setDescription("test model")
             .build();
@@ -2228,6 +2309,7 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         trainedModelConfig = TrainedModelConfig.builder()
             .setCompressedDefinition(InferenceToXContentCompressor.deflate(definition))
             .setModelId(modelIdCompressed)
+            .setInferenceConfig(new RegressionConfig())
             .setInput(new TrainedModelInput(Arrays.asList("col1", "col2", "col3", "col4")))
             .setDescription("test model")
             .build();
@@ -2265,7 +2347,7 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
             "          \"target_field\": \"regression_value\",\n" +
             "          \"model_id\": \"" + modelIdPrefix + 0 + "\",\n" +
             "          \"inference_config\": {\"regression\": {}},\n" +
-            "          \"field_mappings\": {\n" +
+            "          \"field_map\": {\n" +
             "            \"col1\": \"col1\",\n" +
             "            \"col2\": \"col2\",\n" +
             "            \"col3\": \"col3\",\n" +
@@ -2486,10 +2568,12 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
             .setFunction("count")
             .setDetectorDescription(randomAlphaOfLength(10))
             .build();
-        AnalysisConfig.Builder configBuilder = new AnalysisConfig.Builder(Arrays.asList(detector));
+        AnalysisConfig.Builder configBuilder = new AnalysisConfig.Builder(Collections.singletonList(detector));
         //should not be random, see:https://github.com/elastic/ml-cpp/issues/208
         configBuilder.setBucketSpan(new TimeValue(1, TimeUnit.HOURS));
         builder.setAnalysisConfig(configBuilder);
+        builder.setModelSnapshotRetentionDays(1L);
+        builder.setDailyModelSnapshotRetentionAfterDays(1L);
 
         DataDescription.Builder dataDescription = new DataDescription.Builder();
         dataDescription.setTimeFormat(DataDescription.EPOCH_MS);
@@ -2512,6 +2596,7 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         //should not be random, see:https://github.com/elastic/ml-cpp/issues/208
         configBuilder.setBucketSpan(new TimeValue(5, TimeUnit.SECONDS));
         builder.setAnalysisConfig(configBuilder);
+        builder.setAnalysisLimits(new AnalysisLimits(512L, 4L));
 
         DataDescription.Builder dataDescription = new DataDescription.Builder();
         dataDescription.setTimeFormat(DataDescription.EPOCH_MS);
@@ -2534,6 +2619,7 @@ public class MachineLearningIT extends ESRestHighLevelClientTestCase {
         TrainedModelConfig trainedModelConfig = TrainedModelConfig.builder()
             .setDefinition(definition)
             .setModelId(modelId)
+            .setInferenceConfig(new RegressionConfig())
             .setInput(new TrainedModelInput(Arrays.asList("col1", "col2", "col3", "col4")))
             .setDescription("test model")
             .build();

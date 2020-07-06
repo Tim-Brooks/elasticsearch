@@ -20,46 +20,57 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.Scope;
 import org.elasticsearch.painless.ir.ClassNode;
 import org.elasticsearch.painless.ir.ConstantNode;
-import org.elasticsearch.painless.ir.ExpressionNode;
-import org.elasticsearch.painless.symbol.ScriptRoot;
+import org.elasticsearch.painless.phase.UserTreeVisitor;
+import org.elasticsearch.painless.symbol.Decorations.Read;
+import org.elasticsearch.painless.symbol.Decorations.ValueType;
+import org.elasticsearch.painless.symbol.Decorations.Write;
+import org.elasticsearch.painless.symbol.SemanticScope;
 
 /**
  * Represents a boolean constant.
  */
-public final class EBoolean extends AExpression {
+public class EBoolean extends AExpression {
 
-    protected boolean constant;
+    private final boolean bool;
 
-    public EBoolean(Location location, boolean constant) {
-        super(location);
+    public EBoolean(int identifier, Location location, boolean bool) {
+        super(identifier, location);
 
-        this.constant = constant;
+        this.bool = bool;
+    }
+
+    public boolean getBool() {
+        return bool;
     }
 
     @Override
-    void analyze(ScriptRoot scriptRoot, Scope scope) {
-        if (!read) {
-            throw createError(new IllegalArgumentException("Must read from constant [" + constant + "]."));
+    public <Input, Output> Output visit(UserTreeVisitor<Input, Output> userTreeVisitor, Input input) {
+        return userTreeVisitor.visitBoolean(this, input);
+    }
+
+    @Override
+    Output analyze(ClassNode classNode, SemanticScope semanticScope) {
+        if (semanticScope.getCondition(this, Write.class)) {
+            throw createError(new IllegalArgumentException(
+                    "invalid assignment: cannot assign a value to boolean constant [" + bool + "]"));
         }
 
-        actual = boolean.class;
-    }
+        if (semanticScope.getCondition(this, Read.class) == false) {
+            throw createError(new IllegalArgumentException("not a statement: boolean constant [" + bool + "] not used"));
+        }
 
-    @Override
-    ExpressionNode write(ClassNode classNode) {
+        Output output = new Output();
+
+        semanticScope.putDecoration(this, new ValueType(boolean.class));
+
         ConstantNode constantNode = new ConstantNode();
-        constantNode.setLocation(location);
-        constantNode.setExpressionType(actual);
-        constantNode.setConstant(constant);
+        constantNode.setLocation(getLocation());
+        constantNode.setExpressionType(boolean.class);
+        constantNode.setConstant(bool);
+        output.expressionNode = constantNode;
 
-        return constantNode;
-    }
-
-    @Override
-    public String toString() {
-        return singleLineToString(constant);
+        return output;
     }
 }

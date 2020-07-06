@@ -44,6 +44,7 @@ import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.MultiValueMode;
+import org.elasticsearch.search.aggregations.support.ValuesSourceType;
 import org.elasticsearch.search.sort.BucketedSort;
 import org.elasticsearch.search.sort.NestedSortBuilder;
 import org.elasticsearch.search.sort.SortOrder;
@@ -54,12 +55,18 @@ import java.io.IOException;
  * Thread-safe utility class that allows to get per-segment values via the
  * {@link #load(LeafReaderContext)} method.
  */
-public interface IndexFieldData<FD extends AtomicFieldData> extends IndexComponent {
+public interface IndexFieldData<FD extends LeafFieldData> extends IndexComponent {
 
     /**
      * The field name.
      */
     String getFieldName();
+
+    /**
+     * The ValuesSourceType of the underlying data.  It's possible for fields that use the same IndexFieldData implementation to have
+     * different ValuesSourceTypes, such as in the case of Longs and Dates.
+     */
+    ValuesSourceType getValuesSourceType();
 
     /**
      * Loads the atomic field data for the reader, possibly cached.
@@ -251,7 +258,7 @@ public interface IndexFieldData<FD extends AtomicFieldData> extends IndexCompone
                              CircuitBreakerService breakerService, MapperService mapperService);
     }
 
-    interface Global<FD extends AtomicFieldData> extends IndexFieldData<FD> {
+    interface Global<FD extends LeafFieldData> extends IndexFieldData<FD> {
 
         IndexFieldData<FD> loadGlobal(DirectoryReader indexReader);
 

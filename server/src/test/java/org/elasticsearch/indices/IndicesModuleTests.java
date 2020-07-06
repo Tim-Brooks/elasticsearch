@@ -20,6 +20,7 @@
 package org.elasticsearch.indices;
 
 import org.elasticsearch.Version;
+import org.elasticsearch.index.mapper.TimestampFieldMapper;
 import org.elasticsearch.index.mapper.FieldNamesFieldMapper;
 import org.elasticsearch.index.mapper.IdFieldMapper;
 import org.elasticsearch.index.mapper.IgnoredFieldMapper;
@@ -56,7 +57,7 @@ public class IndicesModuleTests extends ESTestCase {
 
     private static class FakeMapperParser implements Mapper.TypeParser {
         @Override
-        public Mapper.Builder<?, ?> parse(String name, Map<String, Object> node, ParserContext parserContext)
+        public Mapper.Builder<?> parse(String name, Map<String, Object> node, ParserContext parserContext)
             throws MapperParsingException {
             return null;
         }
@@ -64,7 +65,7 @@ public class IndicesModuleTests extends ESTestCase {
 
     private static class FakeMetadataMapperParser implements MetadataFieldMapper.TypeParser {
         @Override
-        public MetadataFieldMapper.Builder<?, ?> parse(String name, Map<String, Object> node, ParserContext parserContext)
+        public MetadataFieldMapper.Builder<?> parse(String name, Map<String, Object> node, ParserContext parserContext)
             throws MapperParsingException {
             return null;
         }
@@ -87,7 +88,8 @@ public class IndicesModuleTests extends ESTestCase {
 
     private static final String[] EXPECTED_METADATA_FIELDS = new String[]{ IgnoredFieldMapper.NAME, IdFieldMapper.NAME,
             RoutingFieldMapper.NAME, IndexFieldMapper.NAME, SourceFieldMapper.NAME, TypeFieldMapper.NAME,
-            NestedPathFieldMapper.NAME, VersionFieldMapper.NAME, SeqNoFieldMapper.NAME, FieldNamesFieldMapper.NAME };
+            NestedPathFieldMapper.NAME, VersionFieldMapper.NAME, SeqNoFieldMapper.NAME, TimestampFieldMapper.NAME,
+            FieldNamesFieldMapper.NAME };
 
     public void testBuiltinMappers() {
         IndicesModule module = new IndicesModule(Collections.emptyList());
@@ -129,10 +131,10 @@ public class IndicesModuleTests extends ESTestCase {
         assertEquals(FieldNamesFieldMapper.NAME, last);
     }
 
-    public void testGetBuiltInMetaDataFields() {
-        Set<String> builtInMetaDataFields = IndicesModule.getBuiltInMetaDataFields();
+    public void testGetBuiltInMetadataFields() {
+        Set<String> builtInMetadataFields = IndicesModule.getBuiltInMetadataFields();
         int i = 0;
-        for (String field : builtInMetaDataFields) {
+        for (String field : builtInMetadataFields) {
             assertEquals(EXPECTED_METADATA_FIELDS[i++], field);
         }
     }

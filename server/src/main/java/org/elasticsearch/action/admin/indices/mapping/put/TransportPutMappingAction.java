@@ -32,7 +32,7 @@ import org.elasticsearch.cluster.ack.ClusterStateUpdateResponse;
 import org.elasticsearch.cluster.block.ClusterBlockException;
 import org.elasticsearch.cluster.block.ClusterBlockLevel;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
-import org.elasticsearch.cluster.metadata.MetaDataMappingService;
+import org.elasticsearch.cluster.metadata.MetadataMappingService;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -54,7 +54,7 @@ public class TransportPutMappingAction extends TransportMasterNodeAction<PutMapp
 
     private static final Logger logger = LogManager.getLogger(TransportPutMappingAction.class);
 
-    private final MetaDataMappingService metaDataMappingService;
+    private final MetadataMappingService metadataMappingService;
     private final RequestValidators<PutMappingRequest> requestValidators;
 
     @Inject
@@ -62,13 +62,13 @@ public class TransportPutMappingAction extends TransportMasterNodeAction<PutMapp
             final TransportService transportService,
             final ClusterService clusterService,
             final ThreadPool threadPool,
-            final MetaDataMappingService metaDataMappingService,
+            final MetadataMappingService metadataMappingService,
             final ActionFilters actionFilters,
             final IndexNameExpressionResolver indexNameExpressionResolver,
             final RequestValidators<PutMappingRequest> requestValidators) {
         super(PutMappingAction.NAME, transportService, clusterService, threadPool, actionFilters, PutMappingRequest::new,
             indexNameExpressionResolver);
-        this.metaDataMappingService = metaDataMappingService;
+        this.metadataMappingService = metadataMappingService;
         this.requestValidators = Objects.requireNonNull(requestValidators);
     }
 
@@ -106,29 +106,36 @@ public class TransportPutMappingAction extends TransportMasterNodeAction<PutMapp
                 listener.onFailure(maybeValidationException.get());
                 return;
             }
-            PutMappingClusterStateUpdateRequest updateRequest = new PutMappingClusterStateUpdateRequest(request.source())
-                .indices(concreteIndices)
-                .ackTimeout(request.timeout()).masterNodeTimeout(request.masterNodeTimeout());
-
-            metaDataMappingService.putMapping(updateRequest, new ActionListener<ClusterStateUpdateResponse>() {
-
-                @Override
-                public void onResponse(ClusterStateUpdateResponse response) {
-                    listener.onResponse(new AcknowledgedResponse(response.isAcknowledged()));
-                }
-
-                @Override
-                public void onFailure(Exception t) {
-                    logger.debug(() -> new ParameterizedMessage("failed to put mappings on indices [{}]",
-                        Arrays.asList(concreteIndices)), t);
-                    listener.onFailure(t);
-                }
-            });
+            performMappingUpdate(concreteIndices, request, listener, metadataMappingService);
         } catch (IndexNotFoundException ex) {
             logger.debug(() -> new ParameterizedMessage("failed to put mappings on indices [{}]",
                 Arrays.asList(request.indices())), ex);
             throw ex;
         }
+    }
+
+    static void performMappingUpdate(Index[] concreteIndices,
+                                     PutMappingRequest request,
+                                     ActionListener<AcknowledgedResponse> listener,
+                                     MetadataMappingService metadataMappingService) {
+        PutMappingClusterStateUpdateRequest updateRequest = new PutMappingClusterStateUpdateRequest(request.source())
+            .indices(concreteIndices)
+            .ackTimeout(request.timeout()).masterNodeTimeout(request.masterNodeTimeout());
+
+        metadataMappingService.putMapping(updateRequest, new ActionListener<>() {
+
+            @Override
+            public void onResponse(ClusterStateUpdateResponse response) {
+                listener.onResponse(new AcknowledgedResponse(response.isAcknowledged()));
+            }
+
+            @Override
+            public void onFailure(Exception t) {
+                logger.debug(() -> new ParameterizedMessage("failed to put mappings on indices [{}]",
+                    Arrays.asList(concreteIndices)), t);
+                listener.onFailure(t);
+            }
+        });
     }
 
 }

@@ -20,43 +20,46 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.Scope;
 import org.elasticsearch.painless.ir.BreakNode;
 import org.elasticsearch.painless.ir.ClassNode;
-import org.elasticsearch.painless.symbol.ScriptRoot;
+import org.elasticsearch.painless.phase.UserTreeVisitor;
+import org.elasticsearch.painless.symbol.Decorations.AllEscape;
+import org.elasticsearch.painless.symbol.Decorations.AnyBreak;
+import org.elasticsearch.painless.symbol.Decorations.InLoop;
+import org.elasticsearch.painless.symbol.Decorations.LoopEscape;
+import org.elasticsearch.painless.symbol.SemanticScope;
 
 /**
  * Represents a break statement.
  */
-public final class SBreak extends AStatement {
+public class SBreak extends AStatement {
 
-    public SBreak(Location location) {
-        super(location);
+    public SBreak(int identifier, Location location) {
+        super(identifier, location);
     }
 
     @Override
-    void analyze(ScriptRoot scriptRoot, Scope scope) {
-        if (!inLoop) {
+    public <Input, Output> Output visit(UserTreeVisitor<Input, Output> userTreeVisitor, Input input) {
+        return userTreeVisitor.visitBreak(this, input);
+    }
+
+    @Override
+    Output analyze(ClassNode classNode, SemanticScope semanticScope) {
+        Output output = new Output();
+
+        if (semanticScope.getCondition(this, InLoop.class) == false) {
             throw createError(new IllegalArgumentException("Break statement outside of a loop."));
         }
 
-        loopEscape = true;
-        allEscape = true;
-        anyBreak = true;
-        statementCount = 1;
-    }
+        semanticScope.setCondition(this, AllEscape.class);
+        semanticScope.setCondition(this, LoopEscape.class);
+        semanticScope.setCondition(this, AnyBreak.class);
 
-    @Override
-    BreakNode write(ClassNode classNode) {
         BreakNode breakNode = new BreakNode();
+        breakNode.setLocation(getLocation());
 
-        breakNode.setLocation(location);
+        output.statementNode = breakNode;
 
-        return breakNode;
-    }
-
-    @Override
-    public String toString() {
-        return singleLineToString();
+        return output;
     }
 }

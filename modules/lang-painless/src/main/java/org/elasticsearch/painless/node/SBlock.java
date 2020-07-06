@@ -20,75 +20,126 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.Scope;
 import org.elasticsearch.painless.ir.BlockNode;
 import org.elasticsearch.painless.ir.ClassNode;
-import org.elasticsearch.painless.symbol.ScriptRoot;
+import org.elasticsearch.painless.phase.UserTreeVisitor;
+import org.elasticsearch.painless.symbol.Decorations.AllEscape;
+import org.elasticsearch.painless.symbol.Decorations.AnyBreak;
+import org.elasticsearch.painless.symbol.Decorations.AnyContinue;
+import org.elasticsearch.painless.symbol.Decorations.BeginLoop;
+import org.elasticsearch.painless.symbol.Decorations.InLoop;
+import org.elasticsearch.painless.symbol.Decorations.LastLoop;
+import org.elasticsearch.painless.symbol.Decorations.LastSource;
+import org.elasticsearch.painless.symbol.Decorations.LoopEscape;
+import org.elasticsearch.painless.symbol.Decorations.MethodEscape;
+import org.elasticsearch.painless.symbol.SemanticScope;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-
-import static java.util.Collections.emptyList;
+import java.util.Objects;
 
 /**
  * Represents a set of statements as a branch of control-flow.
  */
-public final class SBlock extends AStatement {
+public class SBlock extends AStatement {
 
-    final List<AStatement> statements;
+    private final List<AStatement> statementNodes;
 
-    public SBlock(Location location, List<AStatement> statements) {
-        super(location);
+    public SBlock(int identifier, Location location, List<AStatement> statementNodes) {
+        super(identifier, location);
 
-        this.statements = Collections.unmodifiableList(statements);
+        this.statementNodes = Collections.unmodifiableList(Objects.requireNonNull(statementNodes));
+    }
+
+    public List<AStatement> getStatementNodes() {
+        return statementNodes;
     }
 
     @Override
-    void analyze(ScriptRoot scriptRoot, Scope scope) {
-        if (statements == null || statements.isEmpty()) {
+    public <Input, Output> Output visit(UserTreeVisitor<Input, Output> userTreeVisitor, Input input) {
+        return userTreeVisitor.visitBlock(this, input);
+    }
+
+    @Override
+    Output analyze(ClassNode classNode, SemanticScope semanticScope) {
+        Output output = new Output();
+
+        if (statementNodes.isEmpty()) {
             throw createError(new IllegalArgumentException("A block must contain at least one statement."));
         }
 
-        AStatement last = statements.get(statements.size() - 1);
+        AStatement last = statementNodes.get(statementNodes.size() - 1);
 
-        for (AStatement statement : statements) {
-            // Note that we do not need to check after the last statement because
-            // there is no statement that can be unreachable after the last.
-            if (allEscape) {
-                throw createError(new IllegalArgumentException("Unreachable statement."));
+        List<Output> statementOutputs = new ArrayList<>(statementNodes.size());
+
+        boolean lastSource = semanticScope.getCondition(this, LastSource.class);
+        boolean beginLoop = semanticScope.getCondition(this, BeginLoop.class);
+        boolean inLoop = semanticScope.getCondition(this, InLoop.class);
+        boolean lastLoop = semanticScope.getCondition(this, LastLoop.class);
+
+        boolean allEscape = false;
+        boolean anyContinue = false;
+        boolean anyBreak = false;
+
+        for (AStatement statement : statementNodes) {
+            if (inLoop) {
+                semanticScope.setCondition(statement, InLoop.class);
             }
 
-            statement.inLoop = inLoop;
-            statement.lastSource = lastSource && statement == last;
-            statement.lastLoop = (beginLoop || lastLoop) && statement == last;
-            statement.analyze(scriptRoot, scope);
+            if (statement == last) {
+                if (beginLoop || lastLoop) {
+                    semanticScope.setCondition(statement, LastLoop.class);
+                }
 
-            methodEscape = statement.methodEscape;
-            loopEscape = statement.loopEscape;
-            allEscape = statement.allEscape;
-            anyContinue |= statement.anyContinue;
-            anyBreak |= statement.anyBreak;
-            statementCount += statement.statementCount;
+                if (lastSource) {
+                    semanticScope.setCondition(statement, LastSource.class);
+                }
+            }
+
+            Output statementOutput = statement.analyze(classNode, semanticScope);
+            allEscape = semanticScope.getCondition(statement, AllEscape.class);
+
+            if (statement == last) {
+                semanticScope.replicateCondition(statement, this, MethodEscape.class);
+                semanticScope.replicateCondition(statement, this, LoopEscape.class);
+
+                if (allEscape) {
+                    semanticScope.setCondition(this, AllEscape.class);
+                }
+            } else {
+                // Note that we do not need to check after the last statement because
+                // there is no statement that can be unreachable after the last.
+                if (allEscape) {
+                    throw createError(new IllegalArgumentException("Unreachable statement."));
+                }
+            }
+
+            anyContinue |= semanticScope.getCondition(statement, AnyContinue.class);
+            anyBreak |= semanticScope.getCondition(statement, AnyBreak.class);;
+
+            statementOutputs.add(statementOutput);
         }
-    }
 
-    @Override
-    BlockNode write(ClassNode classNode) {
+        if (anyContinue) {
+            semanticScope.setCondition(this, AnyContinue.class);
+        }
+
+        if (anyBreak) {
+            semanticScope.setCondition(this, AnyBreak.class);
+        }
+
         BlockNode blockNode = new BlockNode();
 
-        for (AStatement statement : statements) {
-            blockNode.addStatementNode(statement.write(classNode));
+        for (Output statementOutput : statementOutputs) {
+            blockNode.addStatementNode(statementOutput.statementNode);
         }
 
-        blockNode.setLocation(location);
+        blockNode.setLocation(getLocation());
         blockNode.setAllEscape(allEscape);
-        blockNode.setStatementCount(statementCount);
 
-        return blockNode;
-    }
+        output.statementNode = blockNode;
 
-    @Override
-    public String toString() {
-        return multilineToString(emptyList(), statements);
+        return output;
     }
 }

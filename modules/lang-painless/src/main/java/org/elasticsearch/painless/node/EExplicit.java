@@ -20,49 +20,75 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.Scope;
 import org.elasticsearch.painless.ir.ClassNode;
-import org.elasticsearch.painless.ir.ExpressionNode;
-import org.elasticsearch.painless.symbol.ScriptRoot;
+import org.elasticsearch.painless.lookup.PainlessCast;
+import org.elasticsearch.painless.phase.UserTreeVisitor;
+import org.elasticsearch.painless.symbol.Decorations.Explicit;
+import org.elasticsearch.painless.symbol.Decorations.Read;
+import org.elasticsearch.painless.symbol.Decorations.TargetType;
+import org.elasticsearch.painless.symbol.Decorations.ValueType;
+import org.elasticsearch.painless.symbol.Decorations.Write;
+import org.elasticsearch.painless.symbol.SemanticScope;
 
 import java.util.Objects;
 
 /**
  * Represents an explicit cast.
  */
-public final class EExplicit extends AExpression {
+public class EExplicit extends AExpression {
 
-    private final String type;
-    private AExpression child;
+    private final String canonicalTypeName;
+    private final AExpression childNode;
 
-    public EExplicit(Location location, String type, AExpression child) {
-        super(location);
+    public EExplicit(int identifier, Location location, String canonicalTypeName, AExpression childNode) {
+        super(identifier, location);
 
-        this.type = Objects.requireNonNull(type);
-        this.child = Objects.requireNonNull(child);
+        this.canonicalTypeName = Objects.requireNonNull(canonicalTypeName);
+        this.childNode = Objects.requireNonNull(childNode);
+    }
+
+    public String getCanonicalTypeName() {
+        return canonicalTypeName;
+    }
+
+    public AExpression getChildNode() {
+        return childNode;
     }
 
     @Override
-    void analyze(ScriptRoot scriptRoot, Scope scope) {
-        actual = scriptRoot.getPainlessLookup().canonicalTypeNameToType(type);
+    public <Input, Output> Output visit(UserTreeVisitor<Input, Output> userTreeVisitor, Input input) {
+        return userTreeVisitor.visitExplicit(this, input);
+    }
 
-        if (actual == null) {
-            throw createError(new IllegalArgumentException("Not a type [" + type + "]."));
+    @Override
+    Output analyze(ClassNode classNode, SemanticScope semanticScope) {
+        if (semanticScope.getCondition(this, Write.class)) {
+            throw createError(new IllegalArgumentException(
+                    "invalid assignment: cannot assign a value to an explicit cast with target type [" + canonicalTypeName + "]"));
         }
 
-        child.expected = actual;
-        child.explicit = true;
-        child.analyze(scriptRoot, scope);
-        child.cast();
-    }
+        if (semanticScope.getCondition(this, Read.class) == false) {
+            throw createError(new IllegalArgumentException(
+                    "not a statement: result not used from explicit cast with target type [" + canonicalTypeName + "]"));
+        }
 
-    @Override
-    ExpressionNode write(ClassNode classNode) {
-        return child.cast(child.write(classNode));
-    }
+        Class<?> valueType = semanticScope.getScriptScope().getPainlessLookup().canonicalTypeNameToType(canonicalTypeName);
 
-    @Override
-    public String toString() {
-        return singleLineToString(type, child);
+        if (valueType == null) {
+            throw createError(new IllegalArgumentException("cannot resolve type [" + canonicalTypeName + "]"));
+        }
+
+        semanticScope.setCondition(childNode, Read.class);
+        semanticScope.putDecoration(childNode, new TargetType(valueType));
+        semanticScope.setCondition(childNode, Explicit.class);
+        Output childOutput = analyze(childNode, classNode, semanticScope);
+        PainlessCast childCast = childNode.cast(semanticScope);
+
+        semanticScope.putDecoration(this, new ValueType(valueType));
+
+        Output output = new Output();
+        output.expressionNode = cast(childOutput.expressionNode, childCast);
+
+        return output;
     }
 }

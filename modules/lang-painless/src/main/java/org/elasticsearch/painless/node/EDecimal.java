@@ -20,68 +20,88 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.Scope;
 import org.elasticsearch.painless.ir.ClassNode;
 import org.elasticsearch.painless.ir.ConstantNode;
-import org.elasticsearch.painless.ir.ExpressionNode;
-import org.elasticsearch.painless.symbol.ScriptRoot;
+import org.elasticsearch.painless.phase.UserTreeVisitor;
+import org.elasticsearch.painless.symbol.Decorations.Read;
+import org.elasticsearch.painless.symbol.Decorations.ValueType;
+import org.elasticsearch.painless.symbol.Decorations.Write;
+import org.elasticsearch.painless.symbol.SemanticScope;
 
 import java.util.Objects;
 
 /**
  * Represents a decimal constant.
  */
-public final class EDecimal extends AExpression {
+public class EDecimal extends AExpression {
 
-    private final String value;
+    private final String decimal;
 
-    protected Object constant;
+    public EDecimal(int identifier, Location location, String decimal) {
+        super(identifier, location);
 
-    public EDecimal(Location location, String value) {
-        super(location);
+        this.decimal = Objects.requireNonNull(decimal);
+    }
 
-        this.value = Objects.requireNonNull(value);
+    public String getDecimal() {
+        return decimal;
     }
 
     @Override
-    void analyze(ScriptRoot scriptRoot, Scope scope) {
-        if (!read) {
-            throw createError(new IllegalArgumentException("Must read from constant [" + value + "]."));
+    public <Input, Output> Output visit(UserTreeVisitor<Input, Output> userTreeVisitor, Input input) {
+        return userTreeVisitor.visitDecimal(this, input);
+    }
+
+    @Override
+    Output analyze(ClassNode classNode, SemanticScope semanticScope) {
+        return analyze(semanticScope, false);
+    }
+
+    Output analyze(SemanticScope semanticScope, boolean negate) {
+        if (semanticScope.getCondition(this, Write.class)) {
+            throw createError(new IllegalArgumentException(
+                    "invalid assignment: cannot assign a value to decimal constant [" + decimal + "]"));
         }
 
-        if (value.endsWith("f") || value.endsWith("F")) {
+        if (semanticScope.getCondition(this, Read.class) == false) {
+            throw createError(new IllegalArgumentException("not a statement: decimal constant [" + decimal + "] not used"));
+        }
+
+        Output output = new Output();
+        Class<?> valueType;
+        Object constant;
+
+        String decimal = negate ? "-" + this.decimal : this.decimal;
+
+        if (decimal.endsWith("f") || decimal.endsWith("F")) {
             try {
-                constant = Float.parseFloat(value.substring(0, value.length() - 1));
-                actual = float.class;
+                constant = Float.parseFloat(decimal.substring(0, decimal.length() - 1));
+                valueType = float.class;
             } catch (NumberFormatException exception) {
-                throw createError(new IllegalArgumentException("Invalid float constant [" + value + "]."));
+                throw createError(new IllegalArgumentException("Invalid float constant [" + decimal + "]."));
             }
         } else {
-            String toParse = value;
-            if (toParse.endsWith("d") || value.endsWith("D")) {
-                toParse = toParse.substring(0, value.length() - 1);
+            String toParse = decimal;
+            if (toParse.endsWith("d") || decimal.endsWith("D")) {
+                toParse = toParse.substring(0, decimal.length() - 1);
             }
             try {
                 constant = Double.parseDouble(toParse);
-                actual = double.class;
+                valueType = double.class;
             } catch (NumberFormatException exception) {
-                throw createError(new IllegalArgumentException("Invalid double constant [" + value + "]."));
+                throw createError(new IllegalArgumentException("Invalid double constant [" + decimal + "]."));
             }
         }
-    }
 
-    @Override
-    ExpressionNode write(ClassNode classNode) {
+        semanticScope.putDecoration(this, new ValueType(valueType));
+
         ConstantNode constantNode = new ConstantNode();
-        constantNode.setLocation(location);
-        constantNode.setExpressionType(actual);
+        constantNode.setLocation(getLocation());
+        constantNode.setExpressionType(valueType);
         constantNode.setConstant(constant);
 
-        return constantNode;
-    }
+        output.expressionNode = constantNode;
 
-    @Override
-    public String toString() {
-        return singleLineToString(value);
+        return output;
     }
 }

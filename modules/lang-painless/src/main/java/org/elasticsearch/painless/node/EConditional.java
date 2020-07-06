@@ -21,82 +21,119 @@ package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.AnalyzerCaster;
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.Scope;
 import org.elasticsearch.painless.ir.ClassNode;
 import org.elasticsearch.painless.ir.ConditionalNode;
+import org.elasticsearch.painless.lookup.PainlessCast;
 import org.elasticsearch.painless.lookup.PainlessLookupUtility;
-import org.elasticsearch.painless.symbol.ScriptRoot;
+import org.elasticsearch.painless.phase.UserTreeVisitor;
+import org.elasticsearch.painless.symbol.Decorations.Explicit;
+import org.elasticsearch.painless.symbol.Decorations.Internal;
+import org.elasticsearch.painless.symbol.Decorations.Read;
+import org.elasticsearch.painless.symbol.Decorations.TargetType;
+import org.elasticsearch.painless.symbol.Decorations.ValueType;
+import org.elasticsearch.painless.symbol.Decorations.Write;
+import org.elasticsearch.painless.symbol.SemanticScope;
 
 import java.util.Objects;
 
 /**
  * Represents a conditional expression.
  */
-public final class EConditional extends AExpression {
+public class EConditional extends AExpression {
 
-    private AExpression condition;
-    private AExpression left;
-    private AExpression right;
+    private final AExpression conditionNode;
+    private final AExpression trueNode;
+    private final AExpression falseNode;
 
-    public EConditional(Location location, AExpression condition, AExpression left, AExpression right) {
-        super(location);
+    public EConditional(int identifier, Location location, AExpression conditionNode, AExpression trueNode, AExpression falseNode) {
+        super(identifier, location);
 
-        this.condition = Objects.requireNonNull(condition);
-        this.left = Objects.requireNonNull(left);
-        this.right = Objects.requireNonNull(right);
+        this.conditionNode = Objects.requireNonNull(conditionNode);
+        this.trueNode = Objects.requireNonNull(trueNode);
+        this.falseNode = Objects.requireNonNull(falseNode);
+    }
+
+    public AExpression getConditionNode() {
+        return conditionNode;
+    }
+
+    public AExpression getTrueNode() {
+        return trueNode;
+    }
+
+    public AExpression getFalseNode() {
+        return falseNode;
     }
 
     @Override
-    void analyze(ScriptRoot scriptRoot, Scope scope) {
-        condition.expected = boolean.class;
-        condition.analyze(scriptRoot, scope);
-        condition.cast();
+    public <Input, Output> Output visit(UserTreeVisitor<Input, Output> userTreeVisitor, Input input) {
+        return userTreeVisitor.visitConditional(this, input);
+    }
 
-        left.expected = expected;
-        left.explicit = explicit;
-        left.internal = internal;
-        right.expected = expected;
-        right.explicit = explicit;
-        right.internal = internal;
-        actual = expected;
-
-        left.analyze(scriptRoot, scope);
-        right.analyze(scriptRoot, scope);
-
-        if (expected == null) {
-            Class<?> promote = AnalyzerCaster.promoteConditional(left.actual, right.actual);
-
-            if (promote == null) {
-                throw createError(new ClassCastException("cannot apply a conditional operator [?:] to the types " +
-                        "[" + PainlessLookupUtility.typeToCanonicalTypeName(left.actual) + "] and " +
-                        "[" + PainlessLookupUtility.typeToCanonicalTypeName(right.actual) + "]"));
-            }
-
-            left.expected = promote;
-            right.expected = promote;
-            actual = promote;
+    @Override
+    Output analyze(ClassNode classNode, SemanticScope semanticScope) {
+        if (semanticScope.getCondition(this, Write.class)) {
+            throw createError(new IllegalArgumentException("invalid assignment: cannot assign a value to conditional operation [?:]"));
         }
 
-        left.cast();
-        right.cast();
-    }
+        if (semanticScope.getCondition(this, Read.class) == false) {
+            throw createError(new IllegalArgumentException("not a statement: result not used from conditional operation [?:]"));
+        }
 
-    @Override
-    ConditionalNode write(ClassNode classNode) {
+        Output output = new Output();
+
+
+        semanticScope.setCondition(conditionNode, Read.class);
+        semanticScope.putDecoration(conditionNode, new TargetType(boolean.class));
+        Output conditionOutput = analyze(conditionNode, classNode, semanticScope);
+        PainlessCast conditionCast = conditionNode.cast(semanticScope);
+
+        semanticScope.setCondition(trueNode, Read.class);
+        semanticScope.copyDecoration(this, trueNode, TargetType.class);
+        semanticScope.replicateCondition(this, trueNode, Explicit.class);
+        semanticScope.replicateCondition(this, trueNode, Internal.class);
+        Output leftOutput = analyze(trueNode, classNode, semanticScope);
+        Class<?> leftValueType = semanticScope.getDecoration(trueNode, ValueType.class).getValueType();
+
+        semanticScope.setCondition(falseNode, Read.class);
+        semanticScope.copyDecoration(this, falseNode, TargetType.class);
+        semanticScope.replicateCondition(this, falseNode, Explicit.class);
+        semanticScope.replicateCondition(this, falseNode, Internal.class);
+        Output rightOutput = analyze(falseNode, classNode, semanticScope);
+        Class<?> rightValueType = semanticScope.getDecoration(falseNode, ValueType.class).getValueType();
+
+        TargetType targetType = semanticScope.getDecoration(this, TargetType.class);
+        Class<?> valueType;
+
+        if (targetType == null) {
+            Class<?> promote = AnalyzerCaster.promoteConditional(leftValueType, rightValueType);
+
+            if (promote == null) {
+                throw createError(new ClassCastException("cannot apply the conditional operator [?:] to the types " +
+                        "[" + PainlessLookupUtility.typeToCanonicalTypeName(leftValueType) + "] and " +
+                        "[" + PainlessLookupUtility.typeToCanonicalTypeName(rightValueType) + "]"));
+            }
+
+            semanticScope.putDecoration(trueNode, new TargetType(promote));
+            semanticScope.putDecoration(falseNode, new TargetType(promote));
+            valueType = promote;
+        } else {
+            valueType = targetType.getTargetType();
+        }
+
+        PainlessCast leftCast = trueNode.cast(semanticScope);
+        PainlessCast rightCast = falseNode.cast(semanticScope);
+
+        semanticScope.putDecoration(this, new ValueType(valueType));
+
         ConditionalNode conditionalNode = new ConditionalNode();
+        conditionalNode.setLeftNode(cast(leftOutput.expressionNode, leftCast));
+        conditionalNode.setRightNode(cast(rightOutput.expressionNode, rightCast));
+        conditionalNode.setConditionNode(cast(conditionOutput.expressionNode, conditionCast));
+        conditionalNode.setLocation(getLocation());
+        conditionalNode.setExpressionType(valueType);
+        output.expressionNode = conditionalNode;
 
-        conditionalNode.setLeftNode(left.cast(left.write(classNode)));
-        conditionalNode.setRightNode(right.cast(right.write(classNode)));
-        conditionalNode.setConditionNode(condition.cast(condition.write(classNode)));
-
-        conditionalNode.setLocation(location);
-        conditionalNode.setExpressionType(actual);
-
-        return conditionalNode;
-    }
-
-    @Override
-    public String toString() {
-        return singleLineToString(condition, left, right);
+        return output;
     }
 }
