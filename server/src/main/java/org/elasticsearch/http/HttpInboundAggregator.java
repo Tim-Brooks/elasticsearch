@@ -32,23 +32,78 @@ public class HttpInboundAggregator {
     private ReleasableBytesReference firstContent;
     private ArrayList<ReleasableBytesReference> contentAggregation;
     private HttpRequestHeader currentHeader;
+    private long contentLengthHeaderValue = -1;
+    private boolean isClosed = false;
 
-    public void forwardFragment(Object fragment) {
+    public HttpRequest fragmentReceived(Object fragment) {
         if (fragment instanceof HttpRequestHeader) {
-
+            headerReceived((HttpRequestHeader) fragment);
+            return null;
         } else if (fragment instanceof ReleasableBytesReference) {
-
+            contentReceived((ReleasableBytesReference) fragment);
+            return null;
         } else if (fragment instanceof Exception) {
 
+            return null;
         } else if (fragment instanceof EndContent) {
-
+            return finishAggregation();
         } else {
             throw new AssertionError();
         }
     }
 
+    public void headerReceived(HttpRequestHeader header) {
+        ensureOpen();
+        if (isAggregating()) {
+            // Shortcircuit, this is non-recoverable. Maybe close.
+            throw new IllegalStateException("Received new http header, but already aggregating request");
+        }
+        assert firstContent == null && contentAggregation == null;
+        currentHeader = header;
+        String stringValue = header.headers.get(DefaultRestChannel.CONTENT_LENGTH).get(0);
+        if (stringValue != null) {
+            this.contentLengthHeaderValue = Long.parseLong(stringValue);
+        }
+    }
+
+    public void contentReceived(ReleasableBytesReference content) {
+        ensureOpen();
+        assert isAggregating();
+        if (isShortCircuited() == false) {
+            if (isFirstContent()) {
+                firstContent = content.retain();
+            } else {
+                if (contentAggregation == null) {
+                    contentAggregation = new ArrayList<>(4);
+                    assert firstContent != null;
+                    contentAggregation.add(firstContent);
+                    firstContent = null;
+                }
+                contentAggregation.add(content.retain());
+            }
+        }
+    }
+
     public HttpRequest finishAggregation() {
         return null;
+    }
+
+    public boolean isAggregating() {
+        return currentHeader != null;
+    }
+
+    private boolean isShortCircuited() {
+        return false;
+    }
+
+    private boolean isFirstContent() {
+        return firstContent == null && contentAggregation == null;
+    }
+
+    private void ensureOpen() {
+        if (isClosed) {
+            throw new IllegalStateException("Aggregator is already closed");
+        }
     }
 
     private static class HttpRequestHeader {
@@ -67,6 +122,10 @@ public class HttpInboundAggregator {
             this.headers = headers;
             this.strictCookies = strictCookies;
         }
+    }
+
+    private static class AggregatedRequest {
+
     }
 
     private static class EndContent {
