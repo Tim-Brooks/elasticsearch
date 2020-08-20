@@ -19,7 +19,57 @@
 
 package org.elasticsearch.http;
 
+import org.elasticsearch.common.bytes.ReleasableBytesReference;
+import org.elasticsearch.rest.RestRequest;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Supplier;
+
 public class HttpInboundAggregator {
 
+    private ReleasableBytesReference firstContent;
+    private ArrayList<ReleasableBytesReference> contentAggregation;
+    private HttpRequestHeader currentHeader;
 
+    public void forwardFragment(Object fragment) {
+        if (fragment instanceof HttpRequestHeader) {
+
+        } else if (fragment instanceof ReleasableBytesReference) {
+
+        } else if (fragment instanceof Exception) {
+
+        } else if (fragment instanceof EndContent) {
+
+        } else {
+            throw new AssertionError();
+        }
+    }
+
+    public HttpRequest finishAggregation() {
+        return null;
+    }
+
+    private static class HttpRequestHeader {
+
+        private final HttpRequest.HttpVersion httpVersion;
+        private final RestRequest.Method method;
+        private final String uri;
+        private final Map<String, List<String>> headers;
+        private final Supplier<List<String>> strictCookies;
+
+        private HttpRequestHeader(HttpRequest.HttpVersion httpVersion, RestRequest.Method method, String uri,
+                                  Map<String, List<String>> headers, Supplier<List<String>> strictCookies) {
+            this.httpVersion = httpVersion;
+            this.method = method;
+            this.uri = uri;
+            this.headers = headers;
+            this.strictCookies = strictCookies;
+        }
+    }
+
+    private static class EndContent {
+
+    }
 }
