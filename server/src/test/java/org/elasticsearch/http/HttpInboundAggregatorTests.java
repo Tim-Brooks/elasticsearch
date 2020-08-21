@@ -19,11 +19,24 @@
 
 package org.elasticsearch.http;
 
+import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.test.ESTestCase;
+
+import java.util.Collections;
 
 public class HttpInboundAggregatorTests extends ESTestCase {
 
     public void testAggregation() {
+        HttpInboundAggregator aggregator = new HttpInboundAggregator();
+
+        HttpInboundAggregator.HttpRequestHeader header = new HttpInboundAggregator.HttpRequestHeader(
+            HttpRequest.HttpVersion.HTTP_1_1,
+            RestRequest.Method.GET,
+            "",
+            Collections.emptyMap(),
+            Collections::emptyList);
+
+        aggregator.fragmentReceived(header);
 
     }
 }

@@ -114,7 +114,7 @@ public class HttpInboundAggregator {
         }
     }
 
-    private static class HttpRequestHeader {
+    public static class HttpRequestHeader {
 
         private final HttpRequest.HttpVersion protocolVersion;
         private final RestRequest.Method method;
@@ -122,8 +122,8 @@ public class HttpInboundAggregator {
         private final Map<String, List<String>> headers;
         private final Supplier<List<String>> strictCookies;
 
-        private HttpRequestHeader(HttpRequest.HttpVersion protocolVersion, RestRequest.Method method, String uri,
-                                  Map<String, List<String>> headers, Supplier<List<String>> strictCookies) {
+        public HttpRequestHeader(HttpRequest.HttpVersion protocolVersion, RestRequest.Method method, String uri,
+                                 Map<String, List<String>> headers, Supplier<List<String>> strictCookies) {
             this.protocolVersion = protocolVersion;
             this.method = method;
             this.uri = uri;
@@ -136,7 +136,11 @@ public class HttpInboundAggregator {
 
         private final HttpRequestHeader header;
 
-        private AggregatedRequest(HttpRequestHeader header) {
+        private AggregatedRequest(HttpRequestHeader header, ReleasableBytesReference content) {
+            this.header = header;
+        }
+
+        private AggregatedRequest(HttpRequestHeader header, Exception inboundException) {
             this.header = header;
         }
 
