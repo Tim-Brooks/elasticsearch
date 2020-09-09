@@ -37,9 +37,9 @@ import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.http.CorsHandler;
 import org.elasticsearch.http.HttpChannel;
 import org.elasticsearch.http.HttpHandlingSettings;
+import org.elasticsearch.http.HttpPipeline;
 import org.elasticsearch.http.HttpPipelinedRequest;
 import org.elasticsearch.http.HttpPipelinedResponse;
 import org.elasticsearch.http.HttpReadTimeoutException;
@@ -75,25 +75,28 @@ public class HttpReadWriteHandlerTests extends ESTestCase {
 
     private HttpReadWriteHandler handler;
     private NioHttpChannel channel;
-    private NioHttpServerTransport transport;
+    private BiConsumer<HttpChannel, Exception> exceptionHandler;
+    private HttpPipeline pipeline;
     private TaskScheduler taskScheduler;
 
     private final RequestEncoder requestEncoder = new RequestEncoder();
     private final ResponseDecoder responseDecoder = new ResponseDecoder();
 
     @Before
+    @SuppressWarnings("unchecked")
     public void setMocks() {
-        transport = mock(NioHttpServerTransport.class);
+        exceptionHandler = (BiConsumer<HttpChannel, Exception>) mock(BiConsumer.class);
+        pipeline = mock(HttpPipeline.class);
         doAnswer(invocation -> {
             ((HttpRequest) invocation.getArguments()[0]).releaseAndCopy();
             return null;
-        }).when(transport).incomingRequest(any(HttpRequest.class), any(HttpChannel.class));
+        }).when(pipeline).handleHttpRequest(any(HttpChannel.class), any(HttpRequest.class));
         Settings settings = Settings.builder().put(SETTING_HTTP_MAX_CONTENT_LENGTH.getKey(), new ByteSizeValue(1024)).build();
         HttpHandlingSettings httpHandlingSettings = HttpHandlingSettings.fromSettings(settings);
         channel = mock(NioHttpChannel.class);
         taskScheduler = mock(TaskScheduler.class);
 
-        handler = new HttpReadWriteHandler(channel, transport, httpHandlingSettings, taskScheduler, System::nanoTime);
+        handler = new HttpReadWriteHandler(channel, pipeline, exceptionHandler, httpHandlingSettings, taskScheduler, System::nanoTime);
         handler.channelActive();
     }
 
@@ -108,12 +111,12 @@ public class HttpReadWriteHandlerTests extends ESTestCase {
         try {
             handler.consumeReads(toChannelBuffer(slicedBuf));
 
-            verify(transport, times(0)).incomingRequest(any(HttpRequest.class), any(NioHttpChannel.class));
+            verify(pipeline, times(0)).handleHttpRequest(any(NioHttpChannel.class), any(HttpRequest.class));
 
             handler.consumeReads(toChannelBuffer(slicedBuf2));
 
             ArgumentCaptor<HttpRequest> requestCaptor = ArgumentCaptor.forClass(HttpRequest.class);
-            verify(transport).incomingRequest(requestCaptor.capture(), any(NioHttpChannel.class));
+            verify(pipeline).handleHttpRequest(any(NioHttpChannel.class), requestCaptor.capture());
 
             HttpRequest nioHttpRequest = requestCaptor.getValue();
             assertEquals(HttpRequest.HttpVersion.HTTP_1_1, nioHttpRequest.protocolVersion());
@@ -139,7 +142,7 @@ public class HttpReadWriteHandlerTests extends ESTestCase {
             handler.consumeReads(toChannelBuffer(buf));
 
             ArgumentCaptor<HttpRequest> requestCaptor = ArgumentCaptor.forClass(HttpRequest.class);
-            verify(transport).incomingRequest(requestCaptor.capture(), any(NioHttpChannel.class));
+            verify(pipeline).handleHttpRequest(any(NioHttpChannel.class), requestCaptor.capture());
 
             assertNotNull(requestCaptor.getValue().getInboundException());
             assertTrue(requestCaptor.getValue().getInboundException() instanceof IllegalArgumentException);
@@ -160,7 +163,7 @@ public class HttpReadWriteHandlerTests extends ESTestCase {
         } finally {
             buf.release();
         }
-        verify(transport, times(0)).incomingRequest(any(), any());
+        verify(pipeline, times(0)).handleHttpRequest(any(), any());
 
         List<FlushOperation> flushOperations = handler.pollFlushOperations();
         assertFalse(flushOperations.isEmpty());
@@ -205,11 +208,10 @@ public class HttpReadWriteHandlerTests extends ESTestCase {
         Settings settings = Settings.builder().put(SETTING_HTTP_READ_TIMEOUT.getKey(), timeValue).build();
         HttpHandlingSettings httpHandlingSettings = HttpHandlingSettings.fromSettings(settings);
 
-        CorsHandler corsHandler = CorsHandler.disabled();
         TaskScheduler taskScheduler = new TaskScheduler();
 
         Iterator<Integer> timeValues = Arrays.asList(0, 2, 4, 6, 8).iterator();
-        handler = new HttpReadWriteHandler(channel, transport, httpHandlingSettings, taskScheduler, timeValues::next);
+        handler = new HttpReadWriteHandler(channel, pipeline, exceptionHandler, httpHandlingSettings, taskScheduler, timeValues::next);
         handler.channelActive();
 
         prepareHandlerForResponse(handler);
@@ -219,28 +221,28 @@ public class HttpReadWriteHandlerTests extends ESTestCase {
 
         taskScheduler.pollTask(timeValue.getNanos() + 1).run();
         // There was a read. Do not close.
-        verify(transport, times(0)).onException(eq(channel), any(HttpReadTimeoutException.class));
+        verify(exceptionHandler, times(0)).accept(eq(channel), any(HttpReadTimeoutException.class));
 
         prepareHandlerForResponse(handler);
         prepareHandlerForResponse(handler);
 
         taskScheduler.pollTask(timeValue.getNanos() + 3).run();
         // There was a read. Do not close.
-        verify(transport, times(0)).onException(eq(channel), any(HttpReadTimeoutException.class));
+        verify(exceptionHandler, times(0)).accept(eq(channel), any(HttpReadTimeoutException.class));
 
         HttpWriteOperation writeOperation1 = new HttpWriteOperation(context, emptyGetResponse(1), mock(BiConsumer.class));
         ((ChannelPromise) handler.writeToBytes(writeOperation1).get(0).getListener()).setSuccess();
 
         taskScheduler.pollTask(timeValue.getNanos() + 5).run();
         // There has not been a read, however there is still an inflight request. Do not close.
-        verify(transport, times(0)).onException(eq(channel), any(HttpReadTimeoutException.class));
+        verify(exceptionHandler, times(0)).accept(eq(channel), any(HttpReadTimeoutException.class));
 
         HttpWriteOperation writeOperation2 = new HttpWriteOperation(context, emptyGetResponse(2), mock(BiConsumer.class));
         ((ChannelPromise) handler.writeToBytes(writeOperation2).get(0).getListener()).setSuccess();
 
         taskScheduler.pollTask(timeValue.getNanos() + 7).run();
         // No reads and no inflight requests, close
-        verify(transport, times(1)).onException(eq(channel), any(HttpReadTimeoutException.class));
+        verify(exceptionHandler, times(1)).accept(eq(channel), any(HttpReadTimeoutException.class));
         assertNull(taskScheduler.pollTask(timeValue.getNanos() + 9));
     }
 
@@ -268,7 +270,7 @@ public class HttpReadWriteHandlerTests extends ESTestCase {
         }
 
         ArgumentCaptor<HttpPipelinedRequest> requestCaptor = ArgumentCaptor.forClass(HttpPipelinedRequest.class);
-        verify(transport, atLeastOnce()).incomingRequest(requestCaptor.capture(), any(HttpChannel.class));
+        verify(pipeline, atLeastOnce()).handleHttpRequest(any(HttpChannel.class), requestCaptor.capture());
 
         HttpRequest httpRequest = requestCaptor.getValue();
         assertNotNull(httpRequest);

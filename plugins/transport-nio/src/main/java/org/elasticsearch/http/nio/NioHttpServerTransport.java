@@ -168,7 +168,7 @@ public class NioHttpServerTransport extends AbstractHttpServerTransport {
         @Override
         public NioHttpChannel createChannel(NioSelector selector, SocketChannel channel, Config.Socket socketConfig) {
             NioHttpChannel httpChannel = new NioHttpChannel(channel);
-            HttpReadWriteHandler handler = new HttpReadWriteHandler(httpChannel,NioHttpServerTransport.this,
+            HttpReadWriteHandler handler = new HttpReadWriteHandler(httpChannel, null, NioHttpServerTransport.this::onException,
                 handlingSettings, selector.getTaskScheduler(), threadPool::relativeTimeInMillis);
             Consumer<Exception> exceptionHandler = (e) -> onException(httpChannel, e);
             SocketChannelContext context = new BytesChannelContext(httpChannel, selector, socketConfig, exceptionHandler, handler,

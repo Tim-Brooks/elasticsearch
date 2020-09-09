@@ -27,10 +27,13 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpRequestDecoder;
 import io.netty.handler.codec.http.HttpResponseEncoder;
 import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.core.internal.io.IOUtils;
+import org.elasticsearch.http.HttpChannel;
 import org.elasticsearch.http.HttpHandlingSettings;
-import org.elasticsearch.http.HttpPipelinedRequest;
+import org.elasticsearch.http.HttpPipeline;
 import org.elasticsearch.http.HttpPipelinedResponse;
 import org.elasticsearch.http.HttpReadTimeoutException;
+import org.elasticsearch.http.HttpRequest;
 import org.elasticsearch.nio.FlushOperation;
 import org.elasticsearch.nio.InboundChannelBuffer;
 import org.elasticsearch.nio.NioChannelHandler;
@@ -49,7 +52,8 @@ public class HttpReadWriteHandler implements NioChannelHandler {
 
     private final NettyAdaptor adaptor;
     private final NioHttpChannel nioHttpChannel;
-    private final NioHttpServerTransport transport;
+    private final HttpPipeline pipeline;
+    private final BiConsumer<HttpChannel, Exception> exceptionHandler;
     private final TaskScheduler taskScheduler;
     private final LongSupplier nanoClock;
     private final long readTimeoutNanos;
@@ -57,10 +61,11 @@ public class HttpReadWriteHandler implements NioChannelHandler {
     private boolean requestSinceReadTimeoutTrigger = false;
     private int inFlightRequests = 0;
 
-    public HttpReadWriteHandler(NioHttpChannel nioHttpChannel, NioHttpServerTransport transport, HttpHandlingSettings settings,
-                                TaskScheduler taskScheduler, LongSupplier nanoClock) {
+    public HttpReadWriteHandler(NioHttpChannel nioHttpChannel, HttpPipeline pipeline, BiConsumer<HttpChannel, Exception> exceptionHandler,
+                                HttpHandlingSettings settings, TaskScheduler taskScheduler, LongSupplier nanoClock) {
         this.nioHttpChannel = nioHttpChannel;
-        this.transport = transport;
+        this.pipeline = pipeline;
+        this.exceptionHandler = exceptionHandler;
         this.taskScheduler = taskScheduler;
         this.nanoClock = nanoClock;
         this.readTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(settings.getReadTimeoutMillis());
@@ -77,7 +82,6 @@ public class HttpReadWriteHandler implements NioChannelHandler {
             handlers.add(new HttpContentCompressor(settings.getCompressionLevel()));
         }
         handlers.add(new NioHttpRequestCreator());
-        handlers.add(new NioHttpPipeliningHandler(transport.getLogger(), settings.getPipeliningMaxEvents()));
 
         adaptor = new NettyAdaptor(handlers.toArray(new ChannelHandler[0]));
         adaptor.addCloseListener((v, e) -> nioHttpChannel.close());
@@ -139,6 +143,7 @@ public class HttpReadWriteHandler implements NioChannelHandler {
     @Override
     public void close() throws IOException {
         try {
+            IOUtils.closeWhileHandlingException(pipeline);
             adaptor.close();
         } catch (Exception e) {
             throw new IOException(e);
@@ -146,21 +151,13 @@ public class HttpReadWriteHandler implements NioChannelHandler {
     }
 
     private void handleRequest(Object msg) {
-        final HttpPipelinedRequest pipelinedRequest = (HttpPipelinedRequest) msg;
-        boolean success = false;
-        try {
-            transport.incomingRequest(pipelinedRequest, nioHttpChannel);
-            success = true;
-        } finally {
-            if (success == false) {
-                pipelinedRequest.release();
-            }
-        }
+        final HttpRequest httpRequest = (HttpRequest) msg;
+        pipeline.handleHttpRequest(nioHttpChannel, httpRequest);
     }
 
     private void maybeReadTimeout() {
         if (requestSinceReadTimeoutTrigger == false && inFlightRequests == 0) {
-            transport.onException(nioHttpChannel, new HttpReadTimeoutException(TimeValue.nsecToMSec(readTimeoutNanos)));
+            exceptionHandler.accept(nioHttpChannel, new HttpReadTimeoutException(TimeValue.nsecToMSec(readTimeoutNanos)));
         } else {
             requestSinceReadTimeoutTrigger = false;
             scheduleReadTimeout();

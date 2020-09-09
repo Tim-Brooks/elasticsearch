@@ -19,6 +19,8 @@
 
 package org.elasticsearch.http;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.lease.Releasable;
@@ -32,6 +34,7 @@ import java.util.function.Supplier;
 public class HttpPipeline implements Releasable {
 
     private static final ActionListener<Void> NO_OP = ActionListener.wrap(() -> {});
+    private static final Logger logger = LogManager.getLogger(HttpPipeline.class);
 
     private final HttpPipeliningAggregator<ActionListener<Void>> aggregator;
     private final CorsHandler corsHandler;
@@ -48,9 +51,9 @@ public class HttpPipeline implements Releasable {
         boolean success = false;
         try {
             final HttpPipelinedRequest pipelinedRequest = aggregator.read(httpRequest);
-            HttpResponse earlyCorsResponse = corsHandler.handleInbound(pipelinedRequest);
+            HttpPipelinedResponse earlyCorsResponse = (HttpPipelinedResponse) corsHandler.handleInbound(pipelinedRequest);
             if (earlyCorsResponse != null) {
-                httpChannel.sendResponse(earlyCorsResponse, earlyResponseListener(httpRequest, httpChannel));
+                sendHttpResponse(earlyCorsResponse, earlyResponseListener(httpRequest, httpChannel));
                 httpRequest.release();
             } else {
                 messageHandler.accept(httpChannel, pipelinedRequest);
@@ -65,7 +68,8 @@ public class HttpPipeline implements Releasable {
 
     public void sendHttpResponse(final HttpPipelinedResponse response, final ActionListener<Void> listener) {
         Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>> requests = () -> aggregator.write(response, listener);
-        
+        BiConsumer<Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>>, ActionListener<Void>> requestSender = (s, l) -> {};
+        requestSender.accept(requests, listener);
     }
 
     @Override
@@ -77,7 +81,7 @@ public class HttpPipeline implements Releasable {
                 try {
                     inflightResponse.v2().onFailure(closedChannelException);
                 } catch (RuntimeException e) {
-//                    logger.error("unexpected error while releasing pipelined http responses", e);
+                    logger.error("unexpected error while releasing pipelined http responses", e);
                 }
             }
         }

@@ -93,7 +93,7 @@ public class SecurityNioHttpServerTransport extends NioHttpServerTransport {
         @Override
         public NioHttpChannel createChannel(NioSelector selector, SocketChannel channel, Config.Socket socketConfig) throws IOException {
             NioHttpChannel httpChannel = new NioHttpChannel(channel);
-            HttpReadWriteHandler httpHandler = new HttpReadWriteHandler(httpChannel,SecurityNioHttpServerTransport.this,
+            HttpReadWriteHandler httpHandler = new HttpReadWriteHandler(httpChannel, null, SecurityNioHttpServerTransport.this::onException,
                 handlingSettings, selector.getTaskScheduler(), threadPool::relativeTimeInNanos);
             final NioChannelHandler handler;
             if (ipFilter != null) {

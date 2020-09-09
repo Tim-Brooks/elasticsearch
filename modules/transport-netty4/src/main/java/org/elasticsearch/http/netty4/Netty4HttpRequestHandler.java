@@ -19,18 +19,19 @@
 
 package org.elasticsearch.http.netty4;
 
-import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.elasticsearch.ExceptionsHelper;
+import org.elasticsearch.http.HttpPipeline;
 import org.elasticsearch.http.HttpPipelinedRequest;
 
-@ChannelHandler.Sharable
 class Netty4HttpRequestHandler extends SimpleChannelInboundHandler<HttpPipelinedRequest> {
 
+    private final HttpPipeline pipeline;
     private final Netty4HttpServerTransport serverTransport;
 
-    Netty4HttpRequestHandler(Netty4HttpServerTransport serverTransport) {
+    Netty4HttpRequestHandler(HttpPipeline pipeline, Netty4HttpServerTransport serverTransport) {
+        this.pipeline = pipeline;
         this.serverTransport = serverTransport;
     }
 
@@ -39,7 +40,7 @@ class Netty4HttpRequestHandler extends SimpleChannelInboundHandler<HttpPipelined
         final Netty4HttpChannel channel = ctx.channel().attr(Netty4HttpServerTransport.HTTP_CHANNEL_KEY).get();
         boolean success = false;
         try {
-            serverTransport.incomingRequest(httpRequest, channel);
+            pipeline.handleHttpRequest(channel, httpRequest);
             success = true;
         } finally {
             if (success == false) {
