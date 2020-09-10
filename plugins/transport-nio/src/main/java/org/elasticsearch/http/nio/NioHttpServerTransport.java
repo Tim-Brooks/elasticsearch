@@ -24,6 +24,7 @@ import org.apache.logging.log4j.Logger;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.PlainActionFuture;
+import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
@@ -32,7 +33,12 @@ import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.http.AbstractHttpServerTransport;
+import org.elasticsearch.http.CorsHandler;
 import org.elasticsearch.http.HttpChannel;
+import org.elasticsearch.http.HttpPipeline;
+import org.elasticsearch.http.HttpPipelinedResponse;
+import org.elasticsearch.http.HttpPipeliningAggregator;
+import org.elasticsearch.http.HttpRequest;
 import org.elasticsearch.http.HttpServerChannel;
 import org.elasticsearch.nio.BytesChannelContext;
 import org.elasticsearch.nio.ChannelFactory;
@@ -51,7 +57,10 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.util.List;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static org.elasticsearch.http.HttpTransportSettings.SETTING_HTTP_MAX_CHUNK_SIZE;
 import static org.elasticsearch.http.HttpTransportSettings.SETTING_HTTP_MAX_HEADER_SIZE;
@@ -167,8 +176,14 @@ public class NioHttpServerTransport extends AbstractHttpServerTransport {
 
         @Override
         public NioHttpChannel createChannel(NioSelector selector, SocketChannel channel, Config.Socket socketConfig) {
-            NioHttpChannel httpChannel = new NioHttpChannel(channel);
-            HttpReadWriteHandler handler = new HttpReadWriteHandler(httpChannel, null, NioHttpServerTransport.this::onException,
+            final NioHttpChannel httpChannel = new NioHttpChannel(channel);
+            int maxEvents = handlingSettings.getPipeliningMaxEvents();
+            final HttpPipeliningAggregator<ActionListener<Void>> pipeliningAggregator = new HttpPipeliningAggregator<>(maxEvents);
+//            final Consumer<Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>>> responseSender =
+//                (t) -> httpChannel.getContext().sendMessage();
+            final BiConsumer<HttpRequest, HttpChannel> requestHandler = NioHttpServerTransport.this::incomingRequest;
+            final HttpPipeline httpPipeline = new HttpPipeline(pipeliningAggregator, corsHandler, requestHandler, null);
+            HttpReadWriteHandler handler = new HttpReadWriteHandler(httpChannel, httpPipeline, NioHttpServerTransport.this::onException,
                 handlingSettings, selector.getTaskScheduler(), threadPool::relativeTimeInMillis);
             Consumer<Exception> exceptionHandler = (e) -> onException(httpChannel, e);
             SocketChannelContext context = new BytesChannelContext(httpChannel, selector, socketConfig, exceptionHandler, handler,
@@ -188,6 +203,5 @@ public class NioHttpServerTransport extends AbstractHttpServerTransport {
             httpServerChannel.setContext(context);
             return httpServerChannel;
         }
-
     }
 }

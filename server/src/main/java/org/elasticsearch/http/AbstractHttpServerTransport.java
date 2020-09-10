@@ -322,16 +322,7 @@ public abstract class AbstractHttpServerTransport extends AbstractLifecycleCompo
     }
 
     private void handleIncomingRequest(final HttpRequest httpRequest, final HttpChannel httpChannel, final Exception exception) {
-        if (exception == null) {
-            HttpResponse earlyResponse = corsHandler.handleInbound(httpRequest);
-            if (earlyResponse != null) {
-                httpChannel.sendResponse(earlyResponse, earlyResponseListener(httpRequest, httpChannel));
-                httpRequest.release();
-                return;
-            }
-        }
-
-        Exception badRequestCause = exception;
+       Exception badRequestCause = exception;
 
         /*
          * We want to create a REST request from the incoming request from Netty. However, creating this request could fail if there

@@ -42,6 +42,8 @@ import io.netty.util.AttributeKey;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.ExceptionsHelper;
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Setting;
@@ -55,9 +57,14 @@ import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.core.internal.io.IOUtils;
 import org.elasticsearch.core.internal.net.NetUtils;
 import org.elasticsearch.http.AbstractHttpServerTransport;
+import org.elasticsearch.http.CorsHandler;
 import org.elasticsearch.http.HttpChannel;
 import org.elasticsearch.http.HttpHandlingSettings;
+import org.elasticsearch.http.HttpPipeline;
+import org.elasticsearch.http.HttpPipelinedResponse;
+import org.elasticsearch.http.HttpPipeliningAggregator;
 import org.elasticsearch.http.HttpReadTimeoutException;
+import org.elasticsearch.http.HttpRequest;
 import org.elasticsearch.http.HttpServerChannel;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.NettyAllocator;
@@ -66,7 +73,11 @@ import org.elasticsearch.transport.netty4.Netty4Utils;
 
 import java.net.InetSocketAddress;
 import java.net.SocketOption;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static org.elasticsearch.http.HttpTransportSettings.SETTING_HTTP_MAX_CHUNK_SIZE;
 import static org.elasticsearch.http.HttpTransportSettings.SETTING_HTTP_MAX_CONTENT_LENGTH;
@@ -283,20 +294,18 @@ public class Netty4HttpServerTransport extends AbstractHttpServerTransport {
 
         private final Netty4HttpServerTransport transport;
         private final Netty4HttpRequestCreator requestCreator;
-        private final Netty4HttpRequestHandler requestHandler;
+        private final Netty4HttpResponseCreator responseCreator;
         private final HttpHandlingSettings handlingSettings;
 
         protected HttpChannelHandler(final Netty4HttpServerTransport transport, final HttpHandlingSettings handlingSettings) {
             this.transport = transport;
             this.handlingSettings = handlingSettings;
             this.requestCreator =  new Netty4HttpRequestCreator();
-            this.requestHandler = new Netty4HttpRequestHandler(null, transport);
+            this.responseCreator =  new Netty4HttpResponseCreator();
         }
 
         @Override
         protected void initChannel(Channel ch) throws Exception {
-            Netty4HttpChannel nettyHttpChannel = new Netty4HttpChannel(ch);
-            ch.attr(HTTP_CHANNEL_KEY).set(nettyHttpChannel);
             ch.pipeline().addLast("read_timeout", new ReadTimeoutHandler(transport.readTimeoutMillis, TimeUnit.MILLISECONDS));
             final HttpRequestDecoder decoder = new HttpRequestDecoder(
                 handlingSettings.getMaxInitialLineLength(),
@@ -304,7 +313,7 @@ public class Netty4HttpServerTransport extends AbstractHttpServerTransport {
                 handlingSettings.getMaxChunkSize());
             decoder.setCumulator(ByteToMessageDecoder.COMPOSITE_CUMULATOR);
             ch.pipeline().addLast("decoder", decoder);
-            ch.pipeline().addLast("decoder_compress", new HttpContentDecompressor());
+            ch.pipeline().addLast("decoder_decompress", new HttpContentDecompressor());
             ch.pipeline().addLast("encoder", new HttpResponseEncoder());
             final HttpObjectAggregator aggregator = new HttpObjectAggregator(handlingSettings.getMaxContentLength());
             aggregator.setMaxCumulationBufferComponents(transport.maxCompositeBufferComponents);
@@ -313,7 +322,18 @@ public class Netty4HttpServerTransport extends AbstractHttpServerTransport {
                 ch.pipeline().addLast("encoder_compress", new HttpContentCompressor(handlingSettings.getCompressionLevel()));
             }
             ch.pipeline().addLast("request_creator", requestCreator);
-            ch.pipeline().addLast("handler", requestHandler);
+            ch.pipeline().addLast("response_creator", responseCreator);
+
+            int maxEvents = handlingSettings.getPipeliningMaxEvents();
+            final HttpPipeliningAggregator<ActionListener<Void>> pipeliningAggregator = new HttpPipeliningAggregator<>(maxEvents);
+            final CorsHandler corsHandler = transport.corsHandler;
+            final Consumer<Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>>> responseSender = ch::writeAndFlush;
+            final BiConsumer<HttpRequest, HttpChannel> requestHandler = transport::incomingRequest;
+            final HttpPipeline httpPipeline = new HttpPipeline(pipeliningAggregator, corsHandler, requestHandler, responseSender);
+            ch.pipeline().addLast("handler", new Netty4HttpRequestHandler(httpPipeline, transport));
+
+            Netty4HttpChannel nettyHttpChannel = new Netty4HttpChannel(ch, httpPipeline);
+            ch.attr(HTTP_CHANNEL_KEY).set(nettyHttpChannel);
             transport.serverAcceptedChannel(nettyHttpChannel);
         }
 

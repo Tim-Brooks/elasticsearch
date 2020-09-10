@@ -29,6 +29,7 @@ import org.elasticsearch.common.network.CloseableChannel;
 import java.nio.channels.ClosedChannelException;
 import java.util.List;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 public class HttpPipeline implements Releasable {
@@ -38,26 +39,31 @@ public class HttpPipeline implements Releasable {
 
     private final HttpPipeliningAggregator<ActionListener<Void>> aggregator;
     private final CorsHandler corsHandler;
-    private final BiConsumer<HttpChannel, HttpPipelinedRequest> messageHandler;
+    private final BiConsumer<HttpRequest, HttpChannel> requestHandler;
+    private final Consumer<Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>>> responseSender;
 
     public HttpPipeline(HttpPipeliningAggregator<ActionListener<Void>> aggregator, CorsHandler corsHandler,
-                        BiConsumer<HttpChannel, HttpPipelinedRequest> requestHandler) {
-        this.corsHandler = corsHandler;
-        this.messageHandler = requestHandler;
+                        BiConsumer<HttpRequest, HttpChannel> requestHandler,
+                        Consumer<Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>>> responseSender) {
         this.aggregator = aggregator;
+        this.corsHandler = corsHandler;
+        this.requestHandler = requestHandler;
+        this.responseSender = responseSender;
     }
 
     public void handleHttpRequest(final HttpChannel httpChannel, final HttpRequest httpRequest) {
         boolean success = false;
         try {
             final HttpPipelinedRequest pipelinedRequest = aggregator.read(httpRequest);
-            HttpPipelinedResponse earlyCorsResponse = (HttpPipelinedResponse) corsHandler.handleInbound(pipelinedRequest);
-            if (earlyCorsResponse != null) {
-                sendHttpResponse(earlyCorsResponse, earlyResponseListener(httpRequest, httpChannel));
-                httpRequest.release();
-            } else {
-                messageHandler.accept(httpChannel, pipelinedRequest);
+            if (httpRequest.getInboundException() == null) {
+                HttpPipelinedResponse earlyCorsResponse = (HttpPipelinedResponse) corsHandler.handleInbound(pipelinedRequest);
+                if (earlyCorsResponse != null) {
+                    sendHttpResponse(earlyCorsResponse, earlyResponseListener(httpRequest, httpChannel));
+                    httpRequest.release();
+                    return;
+                }
             }
+            requestHandler.accept(pipelinedRequest, httpChannel);
             success = true;
         } finally {
             if (success == false) {
@@ -66,10 +72,9 @@ public class HttpPipeline implements Releasable {
         }
     }
 
-    public void sendHttpResponse(final HttpPipelinedResponse response, final ActionListener<Void> listener) {
-        Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>> requests = () -> aggregator.write(response, listener);
-        BiConsumer<Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>>, ActionListener<Void>> requestSender = (s, l) -> {};
-        requestSender.accept(requests, listener);
+    public void sendHttpResponse(final HttpResponse response, final ActionListener<Void> listener) {
+        HttpPipelinedResponse pipelinedResponse = (HttpPipelinedResponse) response;
+        responseSender.accept(new HttpResponseContext(pipelinedResponse, listener));
     }
 
     @Override
@@ -92,6 +97,27 @@ public class HttpPipeline implements Releasable {
             return ActionListener.wrap(() -> CloseableChannel.closeChannel(httpChannel));
         } else {
             return NO_OP;
+        }
+    }
+
+    public class HttpResponseContext implements Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>> {
+
+        private final HttpPipelinedResponse pipelinedResponse;
+        private final ActionListener<Void> listener;
+
+        private HttpResponseContext(HttpPipelinedResponse pipelinedResponse, ActionListener<Void> listener) {
+            this.pipelinedResponse = pipelinedResponse;
+            this.listener = listener;
+        }
+
+        @Override
+        public List<Tuple<HttpPipelinedResponse, ActionListener<Void>>> get() {
+            try {
+                return aggregator.write(pipelinedResponse, listener);
+            } catch (IllegalStateException e) {
+                listener.onFailure(e);
+                throw e;
+            }
         }
     }
 }

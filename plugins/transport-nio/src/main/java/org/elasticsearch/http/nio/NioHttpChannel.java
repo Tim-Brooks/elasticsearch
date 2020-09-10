@@ -32,6 +32,7 @@ public class NioHttpChannel extends NioSocketChannel implements HttpChannel {
         super(socketChannel);
     }
 
+    @Override
     public void sendResponse(HttpResponse response, ActionListener<Void> listener) {
         getContext().sendMessage(response, ActionListener.toBiConsumer(listener));
     }
@@ -40,6 +41,8 @@ public class NioHttpChannel extends NioSocketChannel implements HttpChannel {
     public void addCloseListener(ActionListener<Void> listener) {
         addCloseListener(ActionListener.toBiConsumer(listener));
     }
+
+
 
     @Override
     public String toString() {
