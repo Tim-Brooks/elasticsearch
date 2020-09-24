@@ -82,6 +82,7 @@ public class HttpReadWriteHandler implements NioChannelHandler {
             handlers.add(new HttpContentCompressor(settings.getCompressionLevel()));
         }
         handlers.add(new NioHttpRequestCreator());
+        handlers.add(new NioHttpResponseCreator());
 
         adaptor = new NettyAdaptor(handlers.toArray(new ChannelHandler[0]));
         adaptor.addCloseListener((v, e) -> nioHttpChannel.close());

@@ -160,6 +160,7 @@ public class Netty4HttpServerTransport extends AbstractHttpServerTransport {
                                      SharedGroupFactory sharedGroupFactory) {
         super(settings, networkService, bigArrays, threadPool, xContentRegistry, dispatcher, clusterSettings);
         Netty4Utils.setAvailableProcessors(EsExecutors.NODE_PROCESSORS_SETTING.get(settings));
+        NettyAllocator.logAllocatorDescriptionIfNeeded();
         this.sharedGroupFactory = sharedGroupFactory;
 
         this.maxChunkSize = SETTING_HTTP_MAX_CHUNK_SIZE.get(settings);
@@ -300,8 +301,8 @@ public class Netty4HttpServerTransport extends AbstractHttpServerTransport {
         protected HttpChannelHandler(final Netty4HttpServerTransport transport, final HttpHandlingSettings handlingSettings) {
             this.transport = transport;
             this.handlingSettings = handlingSettings;
-            this.requestCreator =  new Netty4HttpRequestCreator();
-            this.responseCreator =  new Netty4HttpResponseCreator();
+            this.requestCreator = new Netty4HttpRequestCreator();
+            this.responseCreator = new Netty4HttpResponseCreator();
         }
 
         @Override

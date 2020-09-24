@@ -7,7 +7,11 @@
  * not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
+<<<<<<< HEAD
  *     http://www.apache.org/licenses/LICENSE-2.0
+=======
+ *    http://www.apache.org/licenses/LICENSE-2.0
+>>>>>>> upstream/master
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -19,26 +23,55 @@
 
 package org.elasticsearch.http.netty4;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.MessageToMessageEncoder;
+import io.netty.handler.codec.compression.JdkZlibEncoder;
+import io.netty.handler.codec.http.DefaultHttpContent;
+import io.netty.handler.codec.http.DefaultHttpResponse;
+import io.netty.handler.codec.http.DefaultLastHttpContent;
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.common.Booleans;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.http.HttpPipeline;
 import org.elasticsearch.http.HttpPipelinedResponse;
-import org.elasticsearch.http.HttpResponse;
-import org.elasticsearch.transport.netty4.Netty4TcpChannel;
+import org.elasticsearch.transport.NettyAllocator;
 
 import java.util.List;
 
+/**
+ * Split up large responses to prevent batch compression {@link JdkZlibEncoder} down the pipeline.
+ */
 @ChannelHandler.Sharable
-public class Netty4HttpResponseCreator extends MessageToMessageEncoder<HttpPipeline.HttpResponseContext> {
+class Netty4HttpResponseCreator extends MessageToMessageEncoder<HttpPipeline.HttpResponseContext> {
+
+    private static final String DO_NOT_SPLIT = "es.unsafe.do_not_split_http_responses";
+
+    private static final boolean DO_NOT_SPLIT_HTTP_RESPONSES;
+    private static final int SPLIT_THRESHOLD;
+
+    static {
+        DO_NOT_SPLIT_HTTP_RESPONSES = Booleans.parseBoolean(System.getProperty(DO_NOT_SPLIT), false);
+        // Netty will add some header bytes if it compresses this message. So we downsize slightly.
+        SPLIT_THRESHOLD = (int) (NettyAllocator.suggestedMaxAllocationSize() * 0.99);
+    }
+
     @Override
     protected void encode(ChannelHandlerContext ctx, HttpPipeline.HttpResponseContext msg, List<Object> out) {
         for (Tuple<HttpPipelinedResponse, ActionListener<Void>> readyResponse : msg.get()) {
-            HttpResponse response = readyResponse.v1().getDelegateRequest();
-            assert response instanceof Netty4HttpResponse;
-            ctx.write(response, Netty4TcpChannel.addPromise(readyResponse.v2(), ctx.channel()));
+            assert readyResponse.v1().getDelegateRequest() instanceof Netty4HttpResponse;
+            Netty4HttpResponse response = (Netty4HttpResponse) readyResponse.v1().getDelegateRequest();
+            if (DO_NOT_SPLIT_HTTP_RESPONSES || response.content().readableBytes() <= SPLIT_THRESHOLD) {
+                out.add(response.retain());
+            } else {
+                out.add(new DefaultHttpResponse(response.protocolVersion(), response.status(), response.headers()));
+                ByteBuf content = response.content();
+                while (content.readableBytes() > SPLIT_THRESHOLD) {
+                    out.add(new DefaultHttpContent(content.readRetainedSlice(SPLIT_THRESHOLD)));
+                }
+                out.add(new DefaultLastHttpContent(content.readRetainedSlice(content.readableBytes())));
+            }
         }
     }
 }
