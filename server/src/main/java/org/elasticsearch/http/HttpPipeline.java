@@ -27,6 +27,7 @@ import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.network.CloseableChannel;
 
 import java.nio.channels.ClosedChannelException;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -98,6 +99,18 @@ public class HttpPipeline implements Releasable {
         } else {
             return NO_OP;
         }
+    }
+
+    private final ArrayDeque<Tuple<HttpPipelinedResponse, ActionListener<Void>>> outbound = new ArrayDeque<>();
+
+    public void handleOutboundRequest(final HttpPipelinedResponse response, final ActionListener<Void> listener) {
+        try {
+            List<Tuple<HttpPipelinedResponse, ActionListener<Void>>> readyResponses = aggregator.write(response, listener);
+        } catch (IllegalStateException e) {
+            listener.onFailure(e);
+            throw e;
+        }
+
     }
 
     public class HttpResponseContext implements Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>> {
