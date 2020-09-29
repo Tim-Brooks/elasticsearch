@@ -23,7 +23,6 @@ import io.netty.channel.Channel;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.common.concurrent.CompletableContext;
 import org.elasticsearch.http.HttpChannel;
-import org.elasticsearch.http.HttpPipeline;
 import org.elasticsearch.http.HttpResponse;
 import org.elasticsearch.transport.netty4.Netty4TcpChannel;
 
@@ -32,18 +31,16 @@ import java.net.InetSocketAddress;
 public class Netty4HttpChannel implements HttpChannel {
 
     private final Channel channel;
-    private final HttpPipeline httpPipeline;
     private final CompletableContext<Void> closeContext = new CompletableContext<>();
 
-    Netty4HttpChannel(Channel channel, HttpPipeline httpPipeline) {
+    Netty4HttpChannel(Channel channel) {
         this.channel = channel;
-        this.httpPipeline = httpPipeline;
         Netty4TcpChannel.addListener(this.channel.closeFuture(), closeContext);
     }
 
     @Override
     public void sendResponse(HttpResponse response, ActionListener<Void> listener) {
-        httpPipeline.sendHttpResponse(response, listener);
+        channel.writeAndFlush(response, Netty4TcpChannel.addPromise(listener, channel));
     }
 
     @Override

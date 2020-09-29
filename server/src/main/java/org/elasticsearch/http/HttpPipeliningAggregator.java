@@ -46,9 +46,9 @@ public class HttpPipeliningAggregator<Listener> {
         return new HttpPipelinedRequest(readSequence++, request);
     }
 
-    public List<Tuple<HttpPipelinedResponse, Listener>> write(final HttpPipelinedResponse response, Listener listener) {
+    public List<Tuple<HttpResponse, Listener>> write(final HttpPipelinedResponse response, Listener listener) {
         if (outboundHoldingQueue.size() < maxEventsHeld) {
-            ArrayList<Tuple<HttpPipelinedResponse, Listener>> readyResponses = new ArrayList<>();
+            ArrayList<Tuple<HttpResponse, Listener>> readyResponses = new ArrayList<>();
             outboundHoldingQueue.add(new Tuple<>(response, listener));
             while (!outboundHoldingQueue.isEmpty()) {
                 /*
@@ -61,7 +61,7 @@ public class HttpPipeliningAggregator<Listener> {
                     break;
                 }
                 outboundHoldingQueue.poll();
-                readyResponses.add(top);
+                readyResponses.add(new Tuple<>(top.v1().getDelegateRequest(), listener));
                 writeSequence++;
             }
 

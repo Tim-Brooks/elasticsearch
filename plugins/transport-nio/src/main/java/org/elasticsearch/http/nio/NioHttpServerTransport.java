@@ -174,10 +174,8 @@ public class NioHttpServerTransport extends AbstractHttpServerTransport {
             final NioHttpChannel httpChannel = new NioHttpChannel(channel);
             int maxEvents = handlingSettings.getPipeliningMaxEvents();
             final HttpPipeliningAggregator<ActionListener<Void>> pipeliningAggregator = new HttpPipeliningAggregator<>(maxEvents);
-//            final Consumer<Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>>> responseSender =
-//                (t) -> httpChannel.getContext().sendMessage();
             final BiConsumer<HttpRequest, HttpChannel> requestHandler = NioHttpServerTransport.this::incomingRequest;
-            final HttpPipeline httpPipeline = new HttpPipeline(pipeliningAggregator, corsHandler, requestHandler, null);
+            final HttpPipeline httpPipeline = new HttpPipeline(pipeliningAggregator, corsHandler, requestHandler);
             HttpReadWriteHandler handler = new HttpReadWriteHandler(httpChannel, httpPipeline, NioHttpServerTransport.this::onException,
                 handlingSettings, selector.getTaskScheduler(), threadPool::relativeTimeInMillis);
             Consumer<Exception> exceptionHandler = (e) -> onException(httpChannel, e);

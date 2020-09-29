@@ -25,12 +25,11 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.network.CloseableChannel;
+import org.elasticsearch.transport.Transports;
 
 import java.nio.channels.ClosedChannelException;
-import java.util.ArrayDeque;
 import java.util.List;
 import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 public class HttpPipeline implements Releasable {
@@ -41,15 +40,12 @@ public class HttpPipeline implements Releasable {
     private final HttpPipeliningAggregator<ActionListener<Void>> aggregator;
     private final CorsHandler corsHandler;
     private final BiConsumer<HttpRequest, HttpChannel> requestHandler;
-    private final Consumer<Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>>> responseSender;
 
     public HttpPipeline(HttpPipeliningAggregator<ActionListener<Void>> aggregator, CorsHandler corsHandler,
-                        BiConsumer<HttpRequest, HttpChannel> requestHandler,
-                        Consumer<Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>>> responseSender) {
+                        BiConsumer<HttpRequest, HttpChannel> requestHandler) {
         this.aggregator = aggregator;
         this.corsHandler = corsHandler;
         this.requestHandler = requestHandler;
-        this.responseSender = responseSender;
     }
 
     public void handleHttpRequest(final HttpChannel httpChannel, final HttpRequest httpRequest) {
@@ -75,7 +71,7 @@ public class HttpPipeline implements Releasable {
 
     public void sendHttpResponse(final HttpResponse response, final ActionListener<Void> listener) {
         HttpPipelinedResponse pipelinedResponse = (HttpPipelinedResponse) response;
-        responseSender.accept(new HttpResponseContext(pipelinedResponse, listener));
+//        responseSender.accept(new HttpResponseContext(pipelinedResponse, listener));
     }
 
     @Override
@@ -101,19 +97,18 @@ public class HttpPipeline implements Releasable {
         }
     }
 
-    private final ArrayDeque<Tuple<HttpPipelinedResponse, ActionListener<Void>>> outbound = new ArrayDeque<>();
-
-    public void handleOutboundRequest(final HttpPipelinedResponse response, final ActionListener<Void> listener) {
+    public List<Tuple<HttpResponse, ActionListener<Void>>> handleOutboundRequest(final HttpPipelinedResponse response,
+                                                                                 final ActionListener<Void> listener) {
+        Transports.assertTransportThread();
         try {
-            List<Tuple<HttpPipelinedResponse, ActionListener<Void>>> readyResponses = aggregator.write(response, listener);
+            return aggregator.write(response, listener);
         } catch (IllegalStateException e) {
             listener.onFailure(e);
             throw e;
         }
-
     }
 
-    public class HttpResponseContext implements Supplier<List<Tuple<HttpPipelinedResponse, ActionListener<Void>>>> {
+    public class HttpResponseContext implements Supplier<List<Tuple<HttpResponse, ActionListener<Void>>>> {
 
         private final HttpPipelinedResponse pipelinedResponse;
         private final ActionListener<Void> listener;
@@ -124,13 +119,14 @@ public class HttpPipeline implements Releasable {
         }
 
         @Override
-        public List<Tuple<HttpPipelinedResponse, ActionListener<Void>>> get() {
-            try {
-                return aggregator.write(pipelinedResponse, listener);
-            } catch (IllegalStateException e) {
-                listener.onFailure(e);
-                throw e;
-            }
+        public List<Tuple<HttpResponse, ActionListener<Void>>> get() {
+            return null;
+//            try {
+//                return aggregator.write(pipelinedResponse, listener);
+//            } catch (IllegalStateException e) {
+//                listener.onFailure(e);
+//                throw e;
+//            }
         }
     }
 }

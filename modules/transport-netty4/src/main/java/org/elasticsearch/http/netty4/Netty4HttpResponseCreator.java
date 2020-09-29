@@ -24,9 +24,9 @@
 package org.elasticsearch.http.netty4;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.handler.codec.MessageToMessageEncoder;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.compression.JdkZlibEncoder;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.DefaultHttpResponse;
@@ -36,15 +36,14 @@ import org.elasticsearch.common.Booleans;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.http.HttpPipeline;
 import org.elasticsearch.http.HttpPipelinedResponse;
+import org.elasticsearch.http.HttpResponse;
 import org.elasticsearch.transport.NettyAllocator;
-
-import java.util.List;
+import org.elasticsearch.transport.netty4.Netty4TcpChannel;
 
 /**
  * Split up large responses to prevent batch compression {@link JdkZlibEncoder} down the pipeline.
  */
-@ChannelHandler.Sharable
-class Netty4HttpResponseCreator extends MessageToMessageEncoder<HttpPipeline.HttpResponseContext> {
+class Netty4HttpResponseCreator extends ChannelOutboundHandlerAdapter {
 
     private static final String DO_NOT_SPLIT = "es.unsafe.do_not_split_http_responses";
 
@@ -57,20 +56,28 @@ class Netty4HttpResponseCreator extends MessageToMessageEncoder<HttpPipeline.Htt
         SPLIT_THRESHOLD = (int) (NettyAllocator.suggestedMaxAllocationSize() * 0.99);
     }
 
+    private final HttpPipeline httpPipeline;
+
+    Netty4HttpResponseCreator(HttpPipeline httpPipeline) {
+        this.httpPipeline = httpPipeline;
+    }
+
     @Override
-    protected void encode(ChannelHandlerContext ctx, HttpPipeline.HttpResponseContext msg, List<Object> out) {
-        for (Tuple<HttpPipelinedResponse, ActionListener<Void>> readyResponse : msg.get()) {
-            assert readyResponse.v1().getDelegateRequest() instanceof Netty4HttpResponse;
-            Netty4HttpResponse response = (Netty4HttpResponse) readyResponse.v1().getDelegateRequest();
+    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+        HttpPipelinedResponse pipelinedResponse = (HttpPipelinedResponse) msg;
+        for (Tuple<HttpResponse, ActionListener<Void>> readyResponse : httpPipeline.handleOutboundRequest(pipelinedResponse, null)) {
+            assert readyResponse.v1() instanceof Netty4HttpResponse;
+            Netty4HttpResponse response = (Netty4HttpResponse) readyResponse.v1();
             if (DO_NOT_SPLIT_HTTP_RESPONSES || response.content().readableBytes() <= SPLIT_THRESHOLD) {
-                out.add(response.retain());
+                ctx.write(response.retain(), Netty4TcpChannel.addPromise(readyResponse.v2(), ctx.channel()));
             } else {
-                out.add(new DefaultHttpResponse(response.protocolVersion(), response.status(), response.headers()));
+                ctx.write(new DefaultHttpResponse(response.protocolVersion(), response.status(), response.headers()));
                 ByteBuf content = response.content();
                 while (content.readableBytes() > SPLIT_THRESHOLD) {
-                    out.add(new DefaultHttpContent(content.readRetainedSlice(SPLIT_THRESHOLD)));
+                    ctx.write(new DefaultHttpContent(content.readRetainedSlice(SPLIT_THRESHOLD)));
                 }
-                out.add(new DefaultLastHttpContent(content.readRetainedSlice(content.readableBytes())));
+                ctx.write(new DefaultLastHttpContent(content.readRetainedSlice(content.readableBytes())),
+                    Netty4TcpChannel.addPromise(readyResponse.v2(), ctx.channel()));
             }
         }
     }

@@ -27,6 +27,7 @@ import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.http.HttpPipelinedRequest;
 import org.elasticsearch.http.HttpPipelinedResponse;
 import org.elasticsearch.http.HttpPipeliningAggregator;
+import org.elasticsearch.http.HttpResponse;
 
 import java.nio.channels.ClosedChannelException;
 import java.util.List;
@@ -64,9 +65,9 @@ public class Netty4HttpPipeliningHandler extends ChannelDuplexHandler {
         HttpPipelinedResponse response = (HttpPipelinedResponse) msg;
         boolean success = false;
         try {
-            List<Tuple<HttpPipelinedResponse, ChannelPromise>> readyResponses = aggregator.write(response, promise);
-            for (Tuple<HttpPipelinedResponse, ChannelPromise> readyResponse : readyResponses) {
-                ctx.write(readyResponse.v1().getDelegateRequest(), readyResponse.v2());
+            List<Tuple<HttpResponse, ChannelPromise>> readyResponses = aggregator.write(response, promise);
+            for (Tuple<HttpResponse, ChannelPromise> readyResponse : readyResponses) {
+                ctx.write(readyResponse.v1(), readyResponse.v2());
             }
             success = true;
         } catch (IllegalStateException e) {
