@@ -1058,16 +1058,20 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             }
         }
 
+        static void writeOperation(final StreamOutput output, final Operation operation) throws IOException {
+            writeOperation(output, operation, false);
+        }
+
         /**
          * Writes the type and translog operation to the given stream
          */
-        static void writeOperation(final StreamOutput output, final Operation operation) throws IOException {
+        static void writeOperation(final StreamOutput output, final Operation operation, boolean half) throws IOException {
             output.writeByte(operation.opType().id());
             switch(operation.opType()) {
                 case CREATE:
                     // the serialization logic in Index was identical to that of Create when create was deprecated
                 case INDEX:
-                    ((Index) operation).write(output);
+                    ((Index) operation).write(output, half);
                     break;
                 case DELETE:
                     ((Delete) operation).write(output);
@@ -1200,14 +1204,18 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             return new Source(source, routing);
         }
 
-        private void write(final StreamOutput out) throws IOException {
+        private void write(final StreamOutput out, boolean half) throws IOException {
             final int format = out.getVersion().onOrAfter(Version.V_8_0_0) ? SERIALIZATION_FORMAT : FORMAT_NO_VERSION_TYPE;
             out.writeVInt(format);
             out.writeString(id);
             if (format < FORMAT_NO_DOC_TYPE) {
                 out.writeString(MapperService.SINGLE_MAPPING_NAME);
             }
-            out.writeBytesReference(source);
+            if (half) {
+                out.writeBytesReference(source.slice(0, source.length() / 2));
+            } else {
+                out.writeBytesReference(source);
+            }
             out.writeOptionalString(routing);
             if (format < FORMAT_NO_PARENT) {
                  out.writeOptionalString(null); // _parent
@@ -1592,7 +1600,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         // because closing it closes the underlying stream, which we don't
         // want to do here.
         out.resetDigest();
-        Translog.Operation.writeOperation(out, op);
+        Translog.Operation.writeOperation(out, op, true);
         long checksum = out.getChecksum();
         out.writeInt((int) checksum);
     }
