@@ -495,7 +495,7 @@ public class ShardChangesAction extends ActionType<ShardChangesAction.Response> 
 
     private static void checkHistoryUUID(IndexShard indexShard, String expectedHistoryUUID) {
         final String historyUUID = indexShard.getHistoryUUID();
-        if (historyUUID.equals(expectedHistoryUUID) == false) {
+        if ("irrelevant".equals(expectedHistoryUUID) == false && historyUUID.equals(expectedHistoryUUID) == false) {
             throw new IllegalStateException(
                 "unexpected history uuid, expected [" + expectedHistoryUUID + "], actual [" + historyUUID + "]");
         }

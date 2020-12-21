@@ -54,6 +54,7 @@ import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.watcher.ResourceWatcherService;
 import org.elasticsearch.xpack.ccr.action.AutoFollowCoordinator;
 import org.elasticsearch.xpack.ccr.action.CcrRequests;
+import org.elasticsearch.xpack.ccr.action.GetChangesAction;
 import org.elasticsearch.xpack.ccr.action.ShardChangesAction;
 import org.elasticsearch.xpack.ccr.action.ShardFollowTask;
 import org.elasticsearch.xpack.ccr.action.ShardFollowTaskCleaner;
@@ -87,6 +88,7 @@ import org.elasticsearch.xpack.ccr.rest.RestFollowInfoAction;
 import org.elasticsearch.xpack.ccr.rest.RestFollowStatsAction;
 import org.elasticsearch.xpack.ccr.rest.RestForgetFollowerAction;
 import org.elasticsearch.xpack.ccr.rest.RestGetAutoFollowPatternAction;
+import org.elasticsearch.xpack.ccr.rest.RestGetChangesAction;
 import org.elasticsearch.xpack.ccr.rest.RestPauseAutoFollowPatternAction;
 import org.elasticsearch.xpack.ccr.rest.RestPauseFollowAction;
 import org.elasticsearch.xpack.ccr.rest.RestPutAutoFollowPatternAction;
@@ -251,6 +253,8 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
                 new ActionHandler<>(ActivateAutoFollowPatternAction.INSTANCE, TransportActivateAutoFollowPatternAction.class),
                 // forget follower action
                 new ActionHandler<>(ForgetFollowerAction.INSTANCE, TransportForgetFollowerAction.class),
+
+                new ActionHandler<>(GetChangesAction.INSTANCE, GetChangesAction.TransportGetChangesAction.class),
                 usageAction,
                 infoAction);
     }
@@ -280,7 +284,10 @@ public class Ccr extends Plugin implements ActionPlugin, PersistentTaskPlugin, E
                 new RestPauseAutoFollowPatternAction(),
                 new RestResumeAutoFollowPatternAction(),
                 // forget follower API
-                new RestForgetFollowerAction());
+                new RestForgetFollowerAction(),
+
+                new RestGetChangesAction()
+            );
     }
 
     public List<NamedWriteableRegistry.Entry> getNamedWriteables() {

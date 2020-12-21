@@ -11,17 +11,34 @@ import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.ActionResponse;
 import org.elasticsearch.action.ActionType;
+import org.elasticsearch.action.bulk.BulkItemResponse;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.TransportAction;
+import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.common.util.concurrent.AtomicArray;
+import org.elasticsearch.common.util.concurrent.CountDown;
+import org.elasticsearch.common.xcontent.ToXContentObject;
+import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.seqno.SequenceNumbers;
+import org.elasticsearch.index.shard.ShardId;
+import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.tasks.Task;
-import org.elasticsearch.tasks.TaskManager;
+import org.elasticsearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class GetChangesAction extends ActionType<GetChangesAction.Response> {
 
@@ -34,8 +51,13 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
 
     public static class Request extends ActionRequest {
 
-        private String index;
-        private String currentStateToken;
+        private final String index;
+        private final String currentStateToken;
+
+        public Request(String index, String currentStateToken) {
+            this.index = index;
+            this.currentStateToken = currentStateToken;
+        }
 
         @Override
         public ActionRequestValidationException validate() {
@@ -43,27 +65,41 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
         }
     }
 
-    public static class Response extends ActionResponse {
+    public static class Response extends ActionResponse implements ToXContentObject {
+
+        private final List<BytesReference> operations;
 
         Response(StreamInput in) throws IOException {
             super(in);
+            operations = null;
+        }
+
+        Response(List<BytesReference> operations) {
+            this.operations = operations;
         }
 
         @Override
         public void writeTo(StreamOutput out) throws IOException {
 
         }
+
+        @Override
+        public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
+            return builder;
+        }
     }
 
-    public static class GetChangesTransportAction extends TransportAction<Request, Response> {
-
+    public static class TransportGetChangesAction extends TransportAction<Request, Response> {
 
         private final ClusterService clusterService;
+        private final NodeClient client;
 
-        protected GetChangesTransportAction(final ActionFilters actionFilters, final ClusterService clusterService,
-                                            final TaskManager taskManager) {
-            super(NAME, actionFilters, taskManager);
+        @Inject
+        public TransportGetChangesAction(final ActionFilters actionFilters, final ClusterService clusterService,
+                                         final TransportService transportService, final NodeClient client) {
+            super(NAME, actionFilters, transportService.getTaskManager());
             this.clusterService = clusterService;
+            this.client = client;
         }
 
         @Override
@@ -71,7 +107,7 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
             final IndexMetadata indexMetadata = clusterService.state().getMetadata().index(request.index);
             if (indexMetadata == null) {
                 // Index not found
-                listener.onFailure(new Exception());
+                listener.onFailure(new IndexNotFoundException(request.index));
                 return;
             }
 
@@ -80,7 +116,7 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
             final long[] longSeqNos = new long[numberOfShards];
             if (currentStateToken == null) {
                 for (int i = 0; i < numberOfShards; ++i) {
-                    longSeqNos[i] = SequenceNumbers.NO_OPS_PERFORMED;
+                    longSeqNos[i] = 0;
                 }
             } else {
                 final String[] currentStringSeqNos = currentStateToken.split(",");
@@ -99,6 +135,36 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
                         return;
                     }
                 }
+            }
+            final AtomicArray<ShardChangesAction.Response> responses = new AtomicArray<>(numberOfShards);
+            for (int i = 0; i < numberOfShards; ++i) {
+                final int shardIndex = i;
+                ShardChangesAction.Request shardChangesRequest =
+                    new ShardChangesAction.Request(new ShardId(indexMetadata.getIndex(), shardIndex), "irrelevant");
+                shardChangesRequest.setFromSeqNo(longSeqNos[shardIndex]);
+                shardChangesRequest.setMaxOperationCount(128);
+                shardChangesRequest.setMaxBatchSize(ByteSizeValue.ofMb(4));
+                shardChangesRequest.setPollTimeout(TimeValue.timeValueSeconds(30));
+                final CountDown countDown = new CountDown(numberOfShards);
+                client.execute(ShardChangesAction.INSTANCE, shardChangesRequest, new ActionListener<>() {
+                    @Override
+                    public void onResponse(ShardChangesAction.Response response) {
+                        responses.set(shardIndex, response);
+                        if (countDown.countDown()) {
+                            listener.onResponse(new Response(responses.asList().stream().flatMap(r -> {
+                                Translog.Operation[] operations = r.getOperations();
+                                return Arrays.stream(operations).map(operation -> operation.getSource().source);
+                            }).collect(Collectors.toList())));
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(Exception e) {
+                        if (countDown.fastForward()) {
+                            listener.onFailure(e);
+                        }
+                    }
+                });
             }
         }
     }
