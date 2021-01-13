@@ -7,6 +7,8 @@
 package org.elasticsearch.xpack.ccr.rest;
 
 import org.elasticsearch.client.node.NodeClient;
+import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.action.RestToXContentListener;
@@ -32,7 +34,11 @@ public class RestGetChangesAction extends BaseRestHandler {
     protected RestChannelConsumer prepareRequest(RestRequest restRequest, NodeClient client) throws IOException {
         String index = restRequest.param("index");
         String stateToken = restRequest.param("state_token");
-        GetChangesAction.Request request = new GetChangesAction.Request(index, stateToken);
+        // TODO: Add max values
+        long maxDocs = restRequest.paramAsLong("max_docs", 128);
+        ByteSizeValue maxDocBytes = restRequest.paramAsSize("max_doc_bytes", ByteSizeValue.ofMb(4));
+        TimeValue pollTimeout = restRequest.paramAsTime("poll_timeout", TimeValue.timeValueSeconds(30));
+        GetChangesAction.Request request = new GetChangesAction.Request(index, stateToken, pollTimeout, maxDocs, maxDocBytes);
         return channel -> client.execute(GetChangesAction.INSTANCE, request, new RestToXContentListener<>(channel));
     }
 }

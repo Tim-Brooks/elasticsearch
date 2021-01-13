@@ -6,18 +6,17 @@
 
 package org.elasticsearch.xpack.ccr.action;
 
+import joptsimple.internal.Strings;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.ActionResponse;
 import org.elasticsearch.action.ActionType;
-import org.elasticsearch.action.bulk.BulkItemResponse;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.TransportAction;
 import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.service.ClusterService;
-import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
@@ -27,8 +26,9 @@ import org.elasticsearch.common.util.concurrent.AtomicArray;
 import org.elasticsearch.common.util.concurrent.CountDown;
 import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.index.IndexNotFoundException;
-import org.elasticsearch.index.seqno.SequenceNumbers;
+import org.elasticsearch.index.mapper.SourceFieldMapper;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.tasks.Task;
@@ -36,9 +36,6 @@ import org.elasticsearch.transport.TransportService;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 public class GetChangesAction extends ActionType<GetChangesAction.Response> {
 
@@ -53,10 +50,16 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
 
         private final String index;
         private final String currentStateToken;
+        private final TimeValue pollTimeout;
+        private final long maxDocs;
+        private final ByteSizeValue maxDocBytes;
 
-        public Request(String index, String currentStateToken) {
+        public Request(String index, String currentStateToken, TimeValue pollTimeout, long maxDocs, ByteSizeValue maxDocBytes) {
             this.index = index;
             this.currentStateToken = currentStateToken;
+            this.pollTimeout = pollTimeout;
+            this.maxDocs = maxDocs;
+            this.maxDocBytes = maxDocBytes;
         }
 
         @Override
@@ -67,25 +70,39 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
 
     public static class Response extends ActionResponse implements ToXContentObject {
 
-        private final List<BytesReference> operations;
+        private final String stateToken;
+        private final Translog.Operation[] operations;
 
         Response(StreamInput in) throws IOException {
             super(in);
-            operations = null;
+            stateToken = in.readString();
+            operations = in.readArray(Translog.Operation::readOperation, Translog.Operation[]::new);
         }
 
-        Response(List<BytesReference> operations) {
+        Response(String stateToken, Translog.Operation[] operations) {
+            this.stateToken = stateToken;
             this.operations = operations;
         }
 
         @Override
         public void writeTo(StreamOutput out) throws IOException {
-
+            out.writeArray(Translog.Operation::writeOperation, operations);
         }
 
         @Override
         public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
-            return builder;
+            builder.startObject();
+            builder.field("state_token", stateToken);
+            builder.startArray("docs");
+            for (Translog.Operation operation : operations) {
+                builder.startObject();
+                // TODO: Evaluate if we want to support more operation types
+                builder.field("_id", ((Translog.Index) operation).id());
+                XContentHelper.writeRawField(SourceFieldMapper.NAME, operation.getSource().source, builder, params);
+                builder.endObject();
+            }
+            builder.endArray();
+            return builder.endObject();
         }
     }
 
@@ -137,24 +154,43 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
                 }
             }
             final AtomicArray<ShardChangesAction.Response> responses = new AtomicArray<>(numberOfShards);
+            final CountDown countDown = new CountDown(numberOfShards);
             for (int i = 0; i < numberOfShards; ++i) {
                 final int shardIndex = i;
                 ShardChangesAction.Request shardChangesRequest =
                     new ShardChangesAction.Request(new ShardId(indexMetadata.getIndex(), shardIndex), "irrelevant");
-                shardChangesRequest.setFromSeqNo(longSeqNos[shardIndex]);
-                shardChangesRequest.setMaxOperationCount(128);
-                shardChangesRequest.setMaxBatchSize(ByteSizeValue.ofMb(4));
-                shardChangesRequest.setPollTimeout(TimeValue.timeValueSeconds(30));
-                final CountDown countDown = new CountDown(numberOfShards);
+                shardChangesRequest.setFromSeqNo(longSeqNos[shardIndex] + 1);
+                final int adjustedMaxDocs;
+                if (numberOfShards > 1) {
+                    adjustedMaxDocs = (int) request.maxDocs / numberOfShards;
+                } else {
+                    adjustedMaxDocs = (int) request.maxDocs;
+                }
+                shardChangesRequest.setMaxOperationCount(adjustedMaxDocs);
+                final ByteSizeValue adjustedMaxBytes;
+                if (numberOfShards > 1) {
+                    adjustedMaxBytes = ByteSizeValue.ofBytes(request.maxDocBytes.getBytes() / numberOfShards);
+                } else {
+                    adjustedMaxBytes = request.maxDocBytes;
+                }
+                shardChangesRequest.setMaxBatchSize(adjustedMaxBytes);
+                shardChangesRequest.setPollTimeout(request.pollTimeout);
                 client.execute(ShardChangesAction.INSTANCE, shardChangesRequest, new ActionListener<>() {
                     @Override
                     public void onResponse(ShardChangesAction.Response response) {
                         responses.set(shardIndex, response);
                         if (countDown.countDown()) {
-                            listener.onResponse(new Response(responses.asList().stream().flatMap(r -> {
+                            String[] seqNos = new String[responses.length()];
+                            int i = 0;
+                            for (ShardChangesAction.Response r : responses.asList()) {
+                                seqNos[i++] = Long.toString(r.getMaxSeqNo());
+                            }
+                            String newToken = Strings.join(seqNos, ",");
+                            listener.onResponse(new Response(newToken, responses.asList().stream().flatMap(r -> {
                                 Translog.Operation[] operations = r.getOperations();
-                                return Arrays.stream(operations).map(operation -> operation.getSource().source);
-                            }).collect(Collectors.toList())));
+                                // TODO: Only indexing operations. Could be a concern if not append-only
+                                return Arrays.stream(operations).filter(op -> op instanceof Translog.Index);
+                            }).toArray(Translog.Operation[]::new)));
                         }
                     }
 
