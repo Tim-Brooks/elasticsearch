@@ -7,6 +7,7 @@
 package org.elasticsearch.xpack.ccr.action;
 
 import joptsimple.internal.Strings;
+import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.ActionRequestValidationException;
@@ -138,8 +139,7 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
             } else {
                 final String[] currentStringSeqNos = currentStateToken.split(",");
                 if (numberOfShards != currentStringSeqNos.length) {
-                    // Token improper format
-                    listener.onFailure(new Exception());
+                    listener.onFailure(new ElasticsearchException("Improper token format: unexpected number of shards"));
                     return;
                 }
                 int i = 0;
@@ -148,7 +148,7 @@ public class GetChangesAction extends ActionType<GetChangesAction.Response> {
                         longSeqNos[i++] = Long.parseLong(currentSeqNo);
                     } catch (NumberFormatException e) {
                         // Token improper format
-                        listener.onFailure(new Exception());
+                        listener.onFailure(new ElasticsearchException("Improper token format: cannot parse seqNos"));
                         return;
                     }
                 }
