@@ -22,9 +22,9 @@ package org.elasticsearch.http;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.common.collect.Tuple;
-import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.network.CloseableChannel;
+import org.elasticsearch.core.Releasable;
+import org.elasticsearch.core.Tuple;
 import org.elasticsearch.transport.Transports;
 
 import java.nio.channels.ClosedChannelException;

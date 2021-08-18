@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.ml.integration;
 
@@ -9,6 +10,7 @@ import org.apache.http.util.EntityUtils;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
+import org.elasticsearch.client.ml.inference.MlInferenceNamedXContentProvider;
 import org.elasticsearch.client.ml.inference.TrainedModelConfig;
 import org.elasticsearch.client.ml.inference.TrainedModelDefinition;
 import org.elasticsearch.client.ml.inference.TrainedModelInput;
@@ -22,6 +24,7 @@ import org.elasticsearch.client.ml.inference.trainedmodel.tree.TreeNode;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.ToXContent;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
@@ -43,11 +46,18 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-import static org.elasticsearch.xpack.core.security.authc.support.UsernamePasswordToken.basicAuthHeaderValue;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
+/**
+ * This test uses a mixture of HLRC and server side classes.
+ *
+ * The server classes have builders that set the one-time fields that
+ * can only be set on creation e.g. create_time. The HLRC classes must
+ * be used when creating PUT trained model requests as they do not set
+ * these one-time fields.
+ */
 public class TrainedModelIT extends ESRestTestCase {
 
     private static final String BASIC_AUTH_VALUE = UsernamePasswordToken.basicAuthHeaderValue("x_pack_rest_user",
@@ -56,6 +66,11 @@ public class TrainedModelIT extends ESRestTestCase {
     @Override
     protected Settings restClientSettings() {
         return Settings.builder().put(super.restClientSettings()).put(ThreadContext.PREFIX + ".Authorization", BASIC_AUTH_VALUE).build();
+    }
+
+    @Override
+    protected NamedXContentRegistry xContentRegistry() {
+        return new NamedXContentRegistry(new MlInferenceNamedXContentProvider().getNamedXContentParsers());
     }
 
     @Override
@@ -69,7 +84,7 @@ public class TrainedModelIT extends ESRestTestCase {
         putRegressionModel(modelId);
         putRegressionModel(modelId2);
         Response getModel = client().performRequest(new Request("GET",
-            MachineLearning.BASE_PATH + "inference/" + modelId));
+            MachineLearning.BASE_PATH + "trained_models/" + modelId));
 
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
         String response = EntityUtils.toString(getModel.getEntity());
@@ -78,7 +93,7 @@ public class TrainedModelIT extends ESRestTestCase {
         assertThat(response, containsString("\"count\":1"));
 
         getModel = client().performRequest(new Request("GET",
-            MachineLearning.BASE_PATH + "inference/a_test_regression*"));
+            MachineLearning.BASE_PATH + "trained_models/a_test_regression*"));
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
 
         response = EntityUtils.toString(getModel.getEntity());
@@ -88,19 +103,20 @@ public class TrainedModelIT extends ESRestTestCase {
         assertThat(response, containsString("\"count\":2"));
 
         getModel = client().performRequest(new Request("GET",
-            MachineLearning.BASE_PATH + "inference/a_test_regression_model?human=true&include=definition"));
+            MachineLearning.BASE_PATH + "trained_models/a_test_regression_model?human=true&include=definition"));
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
 
         response = EntityUtils.toString(getModel.getEntity());
         assertThat(response, containsString("\"model_id\":\"a_test_regression_model\""));
         assertThat(response, containsString("\"estimated_heap_memory_usage_bytes\""));
         assertThat(response, containsString("\"estimated_heap_memory_usage\""));
+        assertThat(response, containsString("\"model_type\":\"tree_ensemble\""));
         assertThat(response, containsString("\"definition\""));
         assertThat(response, not(containsString("\"compressed_definition\"")));
         assertThat(response, containsString("\"count\":1"));
 
         getModel = client().performRequest(new Request("GET",
-            MachineLearning.BASE_PATH + "inference/a_test_regression_model?decompress_definition=false&include=definition"));
+            MachineLearning.BASE_PATH + "trained_models/a_test_regression_model?decompress_definition=false&include=definition"));
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
 
         response = EntityUtils.toString(getModel.getEntity());
@@ -112,12 +128,12 @@ public class TrainedModelIT extends ESRestTestCase {
 
         ResponseException responseException = expectThrows(ResponseException.class, () ->
             client().performRequest(new Request("GET",
-                MachineLearning.BASE_PATH + "inference/a_test_regression*?human=true&include=definition")));
+                MachineLearning.BASE_PATH + "trained_models/a_test_regression*?human=true&include=definition")));
         assertThat(EntityUtils.toString(responseException.getResponse().getEntity()),
             containsString(Messages.INFERENCE_TOO_MANY_DEFINITIONS_REQUESTED));
 
         getModel = client().performRequest(new Request("GET",
-            MachineLearning.BASE_PATH + "inference/a_test_regression_model,a_test_regression_model-2"));
+            MachineLearning.BASE_PATH + "trained_models/a_test_regression_model,a_test_regression_model-2"));
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
 
         response = EntityUtils.toString(getModel.getEntity());
@@ -126,17 +142,17 @@ public class TrainedModelIT extends ESRestTestCase {
         assertThat(response, containsString("\"count\":2"));
 
         getModel = client().performRequest(new Request("GET",
-            MachineLearning.BASE_PATH + "inference/classification*?allow_no_match=true"));
+            MachineLearning.BASE_PATH + "trained_models/classification*?allow_no_match=true"));
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
 
         response = EntityUtils.toString(getModel.getEntity());
         assertThat(response, containsString("\"count\":0"));
 
         ResponseException ex = expectThrows(ResponseException.class, () -> client().performRequest(new Request("GET",
-            MachineLearning.BASE_PATH + "inference/classification*?allow_no_match=false")));
+            MachineLearning.BASE_PATH + "trained_models/classification*?allow_no_match=false")));
         assertThat(ex.getResponse().getStatusLine().getStatusCode(), equalTo(404));
 
-        getModel = client().performRequest(new Request("GET", MachineLearning.BASE_PATH + "inference?from=0&size=1"));
+        getModel = client().performRequest(new Request("GET", MachineLearning.BASE_PATH + "trained_models?from=0&size=1"));
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
 
         response = EntityUtils.toString(getModel.getEntity());
@@ -144,7 +160,7 @@ public class TrainedModelIT extends ESRestTestCase {
         assertThat(response, containsString("\"model_id\":\"a_test_regression_model\""));
         assertThat(response, not(containsString("\"model_id\":\"a_test_regression_model-2\"")));
 
-        getModel = client().performRequest(new Request("GET", MachineLearning.BASE_PATH + "inference?from=1&size=1"));
+        getModel = client().performRequest(new Request("GET", MachineLearning.BASE_PATH + "trained_models?from=1&size=1"));
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
 
         response = EntityUtils.toString(getModel.getEntity());
@@ -158,12 +174,12 @@ public class TrainedModelIT extends ESRestTestCase {
         putRegressionModel(modelId);
 
         Response delModel = client().performRequest(new Request("DELETE",
-            MachineLearning.BASE_PATH + "inference/" + modelId));
+            MachineLearning.BASE_PATH + "trained_models/" + modelId));
         String response = EntityUtils.toString(delModel.getEntity());
         assertThat(response, containsString("\"acknowledged\":true"));
 
         ResponseException responseException = expectThrows(ResponseException.class,
-            () -> client().performRequest(new Request("DELETE", MachineLearning.BASE_PATH + "inference/" + modelId)));
+            () -> client().performRequest(new Request("DELETE", MachineLearning.BASE_PATH + "trained_models/" + modelId)));
         assertThat(responseException.getResponse().getStatusLine().getStatusCode(), equalTo(404));
 
         responseException = expectThrows(ResponseException.class,
@@ -181,7 +197,7 @@ public class TrainedModelIT extends ESRestTestCase {
 
     public void testGetPrePackagedModels() throws IOException {
         Response getModel = client().performRequest(new Request("GET",
-            MachineLearning.BASE_PATH + "inference/lang_ident_model_1?human=true&include=definition"));
+            MachineLearning.BASE_PATH + "trained_models/lang_ident_model_1?human=true&include=definition"));
 
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
         String response = EntityUtils.toString(getModel.getEntity());
@@ -194,7 +210,7 @@ public class TrainedModelIT extends ESRestTestCase {
         String modelId = "regression_model_to_export";
         putRegressionModel(modelId);
         Response getModel = client().performRequest(new Request("GET",
-            MachineLearning.BASE_PATH + "inference/" + modelId));
+            MachineLearning.BASE_PATH + "trained_models/" + modelId));
 
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
         String response = EntityUtils.toString(getModel.getEntity());
@@ -203,21 +219,22 @@ public class TrainedModelIT extends ESRestTestCase {
 
         getModel = client().performRequest(new Request("GET",
             MachineLearning.BASE_PATH +
-                "inference/" + modelId +
-                "?include=definition&decompress_definition=false&for_export=true"));
+                "trained_models/" + modelId +
+                "?include=definition&decompress_definition=false&exclude_generated=true"));
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
 
         Map<String, Object> exportedModel = entityAsMap(getModel);
         Map<String, Object> modelDefinition = ((List<Map<String, Object>>)exportedModel.get("trained_model_configs")).get(0);
+        modelDefinition.remove("model_id");
 
         String importedModelId = "regression_model_to_import";
         try (XContentBuilder builder = XContentFactory.jsonBuilder()) {
             builder.map(modelDefinition);
-            Request model = new Request("PUT", "_ml/inference/" + importedModelId);
+            Request model = new Request("PUT", "_ml/trained_models/" + importedModelId);
             model.setJsonEntity(XContentHelper.convertToJson(BytesReference.bytes(builder), false, XContentType.JSON));
             assertThat(client().performRequest(model).getStatusLine().getStatusCode(), equalTo(200));
         }
-        getModel = client().performRequest(new Request("GET", MachineLearning.BASE_PATH + "inference/regression*"));
+        getModel = client().performRequest(new Request("GET", MachineLearning.BASE_PATH + "trained_models/regression*"));
 
         assertThat(getModel.getStatusLine().getStatusCode(), equalTo(200));
         response = EntityUtils.toString(getModel.getEntity());
@@ -237,7 +254,7 @@ public class TrainedModelIT extends ESRestTestCase {
                 .setModelId(modelId)
                 .setInput(new TrainedModelInput(Arrays.asList("col1", "col2", "col3")))
                 .build().toXContent(builder, ToXContent.EMPTY_PARAMS);
-            Request model = new Request("PUT", "_ml/inference/" + modelId);
+            Request model = new Request("PUT", "_ml/trained_models/" + modelId);
             model.setJsonEntity(XContentHelper.convertToJson(BytesReference.bytes(builder), false, XContentType.JSON));
             assertThat(client().performRequest(model).getStatusLine().getStatusCode(), equalTo(200));
         }

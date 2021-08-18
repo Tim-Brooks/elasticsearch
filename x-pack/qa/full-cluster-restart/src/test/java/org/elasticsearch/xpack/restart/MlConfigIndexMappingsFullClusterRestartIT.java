@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.restart;
 
@@ -44,8 +45,12 @@ public class MlConfigIndexMappingsFullClusterRestartIT extends AbstractFullClust
 
     @Before
     public void waitForMlTemplates() throws Exception {
-        List<String> templatesToWaitFor = XPackRestTestConstants.ML_POST_V660_TEMPLATES;
-        XPackRestTestHelper.waitForTemplates(client(), templatesToWaitFor);
+        List<String> templatesToWaitFor = (isRunningAgainstOldCluster() && getOldClusterVersion().before(Version.V_7_12_0))
+            ? XPackRestTestConstants.ML_POST_V660_TEMPLATES
+            : XPackRestTestConstants.ML_POST_V7120_TEMPLATES;
+        boolean clusterUnderstandsComposableTemplates =
+            isRunningAgainstOldCluster() == false || getOldClusterVersion().onOrAfter(Version.V_7_8_0);
+        XPackRestTestHelper.waitForTemplates(client(), templatesToWaitFor, clusterUnderstandsComposableTemplates);
     }
 
     public void testMlConfigIndexMappingsAfterMigration() throws Exception {
@@ -71,6 +76,12 @@ public class MlConfigIndexMappingsFullClusterRestartIT extends AbstractFullClust
 
     private void assertThatMlConfigIndexDoesNotExist() {
         Request getIndexRequest = new Request("GET", ".ml-config");
+        getIndexRequest.setOptions(expectVersionSpecificWarnings(v -> {
+            final String systemIndexWarning = "this request accesses system indices: [.ml-config], but in a future major version, direct " +
+                "access to system indices will be prevented by default";
+            v.current(systemIndexWarning);
+            v.compatible(systemIndexWarning);
+        }));
         ResponseException e = expectThrows(ResponseException.class, () -> client().performRequest(getIndexRequest));
         assertThat(e.getResponse().getStatusLine().getStatusCode(), equalTo(404));
     }
@@ -98,6 +109,12 @@ public class MlConfigIndexMappingsFullClusterRestartIT extends AbstractFullClust
     @SuppressWarnings("unchecked")
     private Map<String, Object> getConfigIndexMappings() throws Exception {
         Request getIndexMappingsRequest = new Request("GET", ".ml-config/_mappings");
+        getIndexMappingsRequest.setOptions(expectVersionSpecificWarnings(v -> {
+            final String systemIndexWarning = "this request accesses system indices: [.ml-config], but in a future major version, direct " +
+                "access to system indices will be prevented by default";
+            v.current(systemIndexWarning);
+            v.compatible(systemIndexWarning);
+        }));
         Response getIndexMappingsResponse = client().performRequest(getIndexMappingsRequest);
         assertThat(getIndexMappingsResponse.getStatusLine().getStatusCode(), equalTo(200));
 

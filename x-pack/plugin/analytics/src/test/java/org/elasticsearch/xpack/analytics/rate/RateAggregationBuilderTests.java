@@ -1,12 +1,13 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 
 package org.elasticsearch.xpack.analytics.rate;
 
-import org.elasticsearch.common.ParseField;
+import org.elasticsearch.common.xcontent.ParseField;
 import org.elasticsearch.common.Rounding;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.io.stream.Writeable;
@@ -55,6 +56,9 @@ public class RateAggregationBuilderTests extends AbstractSerializingTestCase<Rat
                 aggregationBuilder.field(randomAlphaOfLength(10));
             } else {
                 aggregationBuilder.script(new Script(randomAlphaOfLength(10)));
+            }
+            if (randomBoolean()) {
+                aggregationBuilder.rateMode(randomFrom(RateMode.values()));
             }
         }
         if (randomBoolean()) {

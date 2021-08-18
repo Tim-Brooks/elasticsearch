@@ -1,15 +1,19 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 
 package org.elasticsearch.test.eql;
 
+import org.apache.http.HttpHost;
+import org.apache.http.client.config.RequestConfig;
 import org.elasticsearch.client.EqlClient;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.RequestOptions;
 import org.elasticsearch.client.ResponseException;
+import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.client.eql.EqlSearchRequest;
 import org.elasticsearch.client.eql.EqlSearchResponse;
@@ -18,21 +22,21 @@ import org.elasticsearch.client.eql.EqlSearchResponse.Hits;
 import org.elasticsearch.client.eql.EqlSearchResponse.Sequence;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.logging.LoggerMessageFormat;
-import org.elasticsearch.test.rest.ESRestTestCase;
+import org.elasticsearch.common.settings.Settings;
 import org.junit.AfterClass;
 import org.junit.Before;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
+import java.util.StringJoiner;
 
 import static java.util.stream.Collectors.toList;
 
-public abstract class BaseEqlSpecTestCase extends ESRestTestCase {
+public abstract class BaseEqlSpecTestCase extends RemoteClusterAwareEqlRestTestCase {
 
-    protected static final String PARAM_FORMATTING = "%1$s.test -> %2$s";
+    protected static final String PARAM_FORMATTING = "%2$s";
 
     private RestHighLevelClient highLevelClient;
 
@@ -40,19 +44,19 @@ public abstract class BaseEqlSpecTestCase extends ESRestTestCase {
     private final String query;
     private final String name;
     private final long[] eventIds;
-    private final boolean caseSensitive;
 
     @Before
-    private void setup() throws Exception {
-        if (client().performRequest(new Request("HEAD", "/" + index)).getStatusLine().getStatusCode() == 404) {
-            DataLoader.loadDatasetIntoEs(highLevelClient(), this::createParser);
+    public void setup() throws Exception {
+        RestClient provisioningClient = provisioningClient();
+        if (provisioningClient.performRequest(new Request("HEAD", "/" + unqualifiedIndexName())).getStatusLine().getStatusCode() == 404) {
+            DataLoader.loadDatasetIntoEs(highLevelClient(provisioningClient), this::createParser);
         }
     }
 
     @AfterClass
     public static void wipeTestData() throws IOException {
         try {
-            adminClient().performRequest(new Request("DELETE", "/*"));
+            provisioningAdminClient().performRequest(new Request("DELETE", "/*"));
         } catch (ResponseException e) {
             // 404 here just means we had no indexes
             if (e.getResponse().getStatusLine().getStatusCode() != 404) {
@@ -74,28 +78,22 @@ public abstract class BaseEqlSpecTestCase extends ESRestTestCase {
                 name = "" + (counter);
             }
 
-            boolean[] values = spec.caseSensitive() == null ? new boolean[] { true, false } : new boolean[] { spec.caseSensitive() };
-
-            for (boolean sensitive : values) {
-                String prefixed = name + (sensitive ? "-sensitive" : "-insensitive");
-                results.add(new Object[] { spec.query(), prefixed, spec.expectedEventIds(), sensitive });
-            }
+            results.add(new Object[] { spec.query(), name, spec.expectedEventIds() });
         }
 
         return results;
     }
 
-    BaseEqlSpecTestCase(String index, String query, String name, long[] eventIds, boolean caseSensitive) {
+    BaseEqlSpecTestCase(String index, String query, String name, long[] eventIds) {
         this.index = index;
 
         this.query = query;
         this.name = name;
         this.eventIds = eventIds;
-        this.caseSensitive = caseSensitive;
     }
 
     public void test() throws Exception {
-        assertResponse(runQuery(index, query, caseSensitive));
+        assertResponse(runQuery(index, query));
     }
 
     protected void assertResponse(EqlSearchResponse response) {
@@ -111,18 +109,35 @@ public abstract class BaseEqlSpecTestCase extends ESRestTestCase {
         }
     }
 
-    protected EqlSearchResponse runQuery(String index, String query, boolean isCaseSensitive) throws Exception {
+    protected EqlSearchResponse runQuery(String index, String query) throws Exception {
         EqlSearchRequest request = new EqlSearchRequest(index, query);
-        request.isCaseSensitive(isCaseSensitive);
-        request.tiebreakerField("event.sequence");
-        // some queries return more than 10 results
-        request.size(50);
-        request.fetchSize(randomIntBetween(2, 50));
+
+        request.eventCategoryField(eventCategory());
+        request.timestampField(timestamp());
+        String tiebreaker = tiebreaker();
+        if (tiebreaker != null) {
+            request.tiebreakerField(tiebreaker());
+        }
+        request.size(requestSize());
+        request.fetchSize(requestFetchSize());
+        request.resultPosition(requestResultPosition());
         return runRequest(eqlClient(), request);
     }
 
     protected  EqlSearchResponse runRequest(EqlClient eqlClient, EqlSearchRequest request) throws IOException {
-        return eqlClient.search(request, RequestOptions.DEFAULT);
+        int timeout = Math.toIntExact(timeout().millis());
+
+        RequestConfig config = RequestConfig.copy(RequestConfig.DEFAULT)
+            .setConnectionRequestTimeout(timeout)
+            .setConnectTimeout(timeout)
+            .setSocketTimeout(timeout)
+            .build();
+        RequestOptions.Builder optionsBuilder = RequestOptions.DEFAULT.toBuilder();
+        Boolean ccsMinimizeRoundtrips = ccsMinimizeRoundtrips();
+        if (ccsMinimizeRoundtrips != null) {
+            optionsBuilder.addParameter("ccs_minimize_roundtrips", ccsMinimizeRoundtrips.toString());
+        }
+        return eqlClient.search(request, optionsBuilder.setRequestConfig(config).build());
     }
 
     protected EqlClient eqlClient() {
@@ -131,19 +146,19 @@ public abstract class BaseEqlSpecTestCase extends ESRestTestCase {
 
     private RestHighLevelClient highLevelClient() {
         if (highLevelClient == null) {
-            highLevelClient = new RestHighLevelClient(
-                    client(),
-                    ignore -> {
-                    },
-                    Collections.emptyList()) {
-            };
+            highLevelClient = highLevelClient(client());
         }
         return highLevelClient;
     }
 
     protected void assertEvents(List<Event> events) {
         assertNotNull(events);
-        logger.info("Events {}", events);
+        logger.debug("Events {}", new Object() {
+            public String toString() {
+                return eventsToString(events);
+            }
+        });
+
         long[] expected = eventIds;
         long[] actual = extractIds(events);
         assertArrayEquals(LoggerMessageFormat.format(null, "unexpected result for spec[{}] [{}] -> {} vs {}", name, query, Arrays.toString(
@@ -151,12 +166,21 @@ public abstract class BaseEqlSpecTestCase extends ESRestTestCase {
                 expected, actual);
     }
 
-    @SuppressWarnings("unchecked")
+    private String eventsToString(List<Event> events) {
+        StringJoiner sj = new StringJoiner(",", "[", "]");
+        for (Event event : events) {
+            sj.add(event.id() + "|" + event.index());
+            sj.add(event.sourceAsMap().toString());
+            sj.add("\n");
+        }
+        return sj.toString();
+    }
+
     private long[] extractIds(List<Event> events) {
         final int len = events.size();
         final long[] ids = new long[len];
         for (int i = 0; i < len; i++) {
-            Object field = events.get(i).sourceAsMap().get(sequenceField());
+            Object field = events.get(i).sourceAsMap().get(tiebreaker());
             ids[i] = ((Number) field).longValue();
         }
         return ids;
@@ -175,5 +199,37 @@ public abstract class BaseEqlSpecTestCase extends ESRestTestCase {
         return true;
     }
 
-    protected abstract String sequenceField();
+    @Override
+    protected RestClient buildClient(Settings settings, HttpHost[] hosts) throws IOException {
+        return clientBuilder(settings, hosts);
+    }
+
+    protected String timestamp() {
+        return "@timestamp";
+    }
+
+    protected String eventCategory() {
+        return "event.category";
+    }
+
+    protected abstract String tiebreaker();
+
+    protected int requestSize() {
+        // some queries return more than 10 results
+        return 50;
+    }
+
+    protected int requestFetchSize() {
+        return randomIntBetween(2, requestSize());
+    }
+
+    protected String requestResultPosition() {
+        return randomBoolean() ? "head" : "tail";
+    }
+
+    // strip any qualification from the received index string
+    private String unqualifiedIndexName() {
+        int offset = index.indexOf(':');
+        return offset >= 0 ? index.substring(offset + 1) : index;
+    }
 }

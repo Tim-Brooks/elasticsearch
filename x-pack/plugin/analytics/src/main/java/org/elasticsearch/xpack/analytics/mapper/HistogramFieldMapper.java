@@ -1,13 +1,15 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.analytics.mapper;
 
 
 import com.carrotsearch.hppc.DoubleArrayList;
 import com.carrotsearch.hppc.IntArrayList;
+
 import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.index.BinaryDocValues;
@@ -19,8 +21,8 @@ import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.Explicit;
-import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.util.BigArrays;
+import org.elasticsearch.common.xcontent.ParseField;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentSubParser;
 import org.elasticsearch.index.fielddata.HistogramValue;
@@ -31,17 +33,15 @@ import org.elasticsearch.index.fielddata.IndexHistogramFieldData;
 import org.elasticsearch.index.fielddata.LeafHistogramFieldData;
 import org.elasticsearch.index.fielddata.ScriptDocValues;
 import org.elasticsearch.index.fielddata.SortedBinaryDocValues;
+import org.elasticsearch.index.mapper.ContentPath;
+import org.elasticsearch.index.mapper.DocumentParserContext;
 import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.MapperParsingException;
-import org.elasticsearch.index.mapper.MapperService;
-import org.elasticsearch.index.mapper.ParametrizedFieldMapper;
-import org.elasticsearch.index.mapper.ParseContext;
 import org.elasticsearch.index.mapper.SourceValueFetcher;
 import org.elasticsearch.index.mapper.TextSearchInfo;
 import org.elasticsearch.index.mapper.ValueFetcher;
-import org.elasticsearch.index.query.QueryShardContext;
-import org.elasticsearch.index.query.QueryShardException;
+import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.MultiValueMode;
 import org.elasticsearch.search.lookup.SearchLookup;
@@ -59,7 +59,7 @@ import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpect
 /**
  * Field Mapper for pre-aggregated histograms.
  */
-public class HistogramFieldMapper extends ParametrizedFieldMapper {
+public class HistogramFieldMapper extends FieldMapper {
     public static final String CONTENT_TYPE = "histogram";
 
     public static final ParseField COUNTS_FIELD = new ParseField("counts");
@@ -69,7 +69,7 @@ public class HistogramFieldMapper extends ParametrizedFieldMapper {
         return (HistogramFieldMapper) in;
     }
 
-    public static class Builder extends ParametrizedFieldMapper.Builder {
+    public static class Builder extends FieldMapper.Builder {
 
         private final Parameter<Map<String, String>> meta = Parameter.metaParam();
         private final Parameter<Explicit<Boolean>> ignoreMalformed;
@@ -86,14 +86,14 @@ public class HistogramFieldMapper extends ParametrizedFieldMapper {
         }
 
         @Override
-        public HistogramFieldMapper build(BuilderContext context) {
-            return new HistogramFieldMapper(name, new HistogramFieldType(buildFullName(context), meta.getValue()),
-                multiFieldsBuilder.build(this, context), copyTo.build(), this);
+        public HistogramFieldMapper build(ContentPath contentPath) {
+            return new HistogramFieldMapper(name, new HistogramFieldType(buildFullName(contentPath), meta.getValue()),
+                multiFieldsBuilder.build(this, contentPath), copyTo.build(), this);
         }
     }
 
     public static final TypeParser PARSER
-        = new TypeParser((n, c) -> new Builder(n, IGNORE_MALFORMED_SETTING.get(c.getSettings())));
+        = new TypeParser((n, c) -> new Builder(n, IGNORE_MALFORMED_SETTING.get(c.getSettings())), notInMultiFields(CONTENT_TYPE));
 
     private final Explicit<Boolean> ignoreMalformed;
     private final boolean ignoreMalformedByDefault;
@@ -115,32 +115,19 @@ public class HistogramFieldMapper extends ParametrizedFieldMapper {
     }
 
     @Override
-    public ParametrizedFieldMapper.Builder getMergeBuilder() {
+    public FieldMapper.Builder getMergeBuilder() {
         return new Builder(simpleName(), ignoreMalformedByDefault).init(this);
     }
 
     @Override
-    protected void parseCreateField(ParseContext context) {
+    protected void parseCreateField(DocumentParserContext context) {
         throw new UnsupportedOperationException("Parsing is implemented in parse(), this method should NEVER be called");
-    }
-
-    @Override
-    public ValueFetcher valueFetcher(MapperService mapperService, SearchLookup searchLookup, String format) {
-        if (format != null) {
-            throw new IllegalArgumentException("Field [" + name() + "] of type [" + typeName() + "] doesn't support formats.");
-        }
-        return new SourceValueFetcher(name(), mapperService, parsesArrayValue()) {
-            @Override
-            protected Object parseSourceValue(Object value) {
-                return value;
-            }
-        };
     }
 
     public static class HistogramFieldType extends MappedFieldType {
 
         public HistogramFieldType(String name, Map<String, String> meta) {
-            super(name, false, false, true, TextSearchInfo.SIMPLE_MATCH_ONLY, meta);
+            super(name, false, false, true, TextSearchInfo.NONE, meta);
         }
 
         @Override
@@ -149,9 +136,14 @@ public class HistogramFieldMapper extends ParametrizedFieldMapper {
         }
 
         @Override
+        public ValueFetcher valueFetcher(SearchExecutionContext context, String format) {
+            return SourceValueFetcher.identity(name(), context, format);
+        }
+
+        @Override
         public IndexFieldData.Builder fielddataBuilder(String fullyQualifiedIndexName, Supplier<SearchLookup> searchLookup) {
             failIfNoDocValues();
-            return (cache, breakerService, mapperService) -> new IndexHistogramFieldData(name(), AnalyticsValuesSourceType.HISTOGRAM) {
+            return (cache, breakerService) -> new IndexHistogramFieldData(name(), AnalyticsValuesSourceType.HISTOGRAM) {
 
                 @Override
                 public LeafHistogramFieldData load(LeafReaderContext context) {
@@ -227,18 +219,14 @@ public class HistogramFieldMapper extends ParametrizedFieldMapper {
         }
 
         @Override
-        public Query termQuery(Object value, QueryShardContext context) {
-            throw new QueryShardException(context, "[" + CONTENT_TYPE + "] field do not support searching, " +
-                "use dedicated aggregations instead: ["
-                + name() + "]");
+        public Query termQuery(Object value, SearchExecutionContext context) {
+            throw new IllegalArgumentException("[" + CONTENT_TYPE + "] field do not support searching, " +
+                "use dedicated aggregations instead: [" + name() + "]");
         }
     }
 
     @Override
-    public void parse(ParseContext context) throws IOException {
-        if (context.externalValueSet()) {
-            throw new IllegalArgumentException("Field [" + name() + "] of type [" + typeName() + "] can't be used in multi-fields");
-        }
+    public void parse(DocumentParserContext context) throws IOException {
         context.path().add(simpleName());
         XContentParser.Token token;
         XContentSubParser subParser = null;
@@ -272,7 +260,7 @@ public class HistogramFieldMapper extends ParametrizedFieldMapper {
                         if (val < previousVal) {
                             // values must be in increasing order
                             throw new MapperParsingException("error parsing field ["
-                                + name() + "], ["+ COUNTS_FIELD + "] values must be in increasing order, got [" + val +
+                                + name() + "], ["+ VALUES_FIELD + "] values must be in increasing order, got [" + val +
                                 "] but previous value was [" + previousVal +"]");
                         }
                         values.add(val);

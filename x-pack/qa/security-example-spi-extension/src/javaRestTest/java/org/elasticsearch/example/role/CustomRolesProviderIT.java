@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.example.role;
 
@@ -17,6 +18,7 @@ import org.elasticsearch.common.settings.SecureString;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.example.realm.CustomRealm;
+import org.elasticsearch.example.realm.CustomRealmIT;
 import org.elasticsearch.test.rest.ESRestTestCase;
 import org.elasticsearch.xpack.core.security.authc.support.UsernamePasswordToken;
 
@@ -34,7 +36,7 @@ import static org.hamcrest.Matchers.is;
  */
 public class CustomRolesProviderIT extends ESRestTestCase {
     private static final String TEST_USER = "test_user";
-    private static final String TEST_PWD = "change_me";
+    private static final String TEST_PWD = "test-user-password";
 
     private static final RequestOptions AUTH_OPTIONS;
     static {
@@ -47,8 +49,8 @@ public class CustomRolesProviderIT extends ESRestTestCase {
     @Override
     protected Settings restClientSettings() {
         return Settings.builder()
-            .put(ThreadContext.PREFIX + "." + CustomRealm.USER_HEADER, CustomRealm.KNOWN_USER)
-            .put(ThreadContext.PREFIX + "." + CustomRealm.PW_HEADER, CustomRealm.KNOWN_PW.toString())
+            .put(ThreadContext.PREFIX + "." + CustomRealm.USER_HEADER, CustomRealmIT.USERNAME)
+            .put(ThreadContext.PREFIX + "." + CustomRealm.PW_HEADER, CustomRealmIT.PASSWORD)
             .build();
     }
 

@@ -1,25 +1,14 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 package org.elasticsearch.search.aggregations.bucket.terms;
 
 import org.elasticsearch.Version;
-import org.elasticsearch.common.ParseField;
+import org.elasticsearch.common.xcontent.ParseField;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.xcontent.ObjectParser;
@@ -27,13 +16,13 @@ import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryRewriteContext;
-import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.search.aggregations.AggregationBuilder;
 import org.elasticsearch.search.aggregations.AggregatorFactories;
 import org.elasticsearch.search.aggregations.AggregatorFactory;
 import org.elasticsearch.search.aggregations.bucket.terms.TermsAggregator.BucketCountThresholds;
 import org.elasticsearch.search.aggregations.bucket.terms.heuristic.JLHScore;
 import org.elasticsearch.search.aggregations.bucket.terms.heuristic.SignificanceHeuristic;
+import org.elasticsearch.search.aggregations.support.AggregationContext;
 import org.elasticsearch.search.aggregations.support.CoreValuesSourceType;
 import org.elasticsearch.search.aggregations.support.ValuesSourceAggregationBuilder;
 import org.elasticsearch.search.aggregations.support.ValuesSourceAggregatorFactory;
@@ -53,7 +42,6 @@ public class SignificantTermsAggregationBuilder extends ValuesSourceAggregationB
         new ValuesSourceRegistry.RegistryKey<>(NAME, SignificantTermsAggregatorSupplier.class);
 
     static final ParseField BACKGROUND_FILTER = new ParseField("background_filter");
-    static final ParseField HEURISTIC = new ParseField("significance_heuristic");
 
     static final TermsAggregator.BucketCountThresholds DEFAULT_BUCKET_COUNT_THRESHOLDS = new TermsAggregator.BucketCountThresholds(
             3, 0, 10, -1);
@@ -129,7 +117,7 @@ public class SignificantTermsAggregationBuilder extends ValuesSourceAggregationB
 
     @Override
     protected ValuesSourceType defaultValueSourceType() {
-        return CoreValuesSourceType.BYTES;
+        return CoreValuesSourceType.KEYWORD;
     }
 
     @Override
@@ -137,16 +125,16 @@ public class SignificantTermsAggregationBuilder extends ValuesSourceAggregationB
         return new SignificantTermsAggregationBuilder(this, factoriesBuilder, metadata);
     }
 
-    protected AggregationBuilder doRewrite(QueryRewriteContext queryShardContext) throws IOException {
+    protected AggregationBuilder doRewrite(QueryRewriteContext queryRewriteContext) throws IOException {
         if (filterBuilder != null) {
-            QueryBuilder rewrittenFilter = filterBuilder.rewrite(queryShardContext);
+            QueryBuilder rewrittenFilter = filterBuilder.rewrite(queryRewriteContext);
             if (rewrittenFilter != filterBuilder) {
                 SignificantTermsAggregationBuilder rewritten = shallowCopy(factoriesBuilder, metadata);
                 rewritten.backgroundFilter(rewrittenFilter);
                 return rewritten;
             }
         }
-        return super.doRewrite(queryShardContext);
+        return super.doRewrite(queryRewriteContext);
     }
 
     @Override
@@ -163,7 +151,7 @@ public class SignificantTermsAggregationBuilder extends ValuesSourceAggregationB
         return true;
     }
 
-    protected TermsAggregator.BucketCountThresholds getBucketCountThresholds() {
+    public TermsAggregator.BucketCountThresholds getBucketCountThresholds() {
         return new TermsAggregator.BucketCountThresholds(bucketCountThresholds);
     }
 
@@ -292,13 +280,16 @@ public class SignificantTermsAggregationBuilder extends ValuesSourceAggregationB
     }
 
     @Override
-    protected ValuesSourceAggregatorFactory innerBuild(QueryShardContext queryShardContext,
+    protected ValuesSourceAggregatorFactory innerBuild(AggregationContext context,
                                                        ValuesSourceConfig config,
                                                        AggregatorFactory parent,
                                                        AggregatorFactories.Builder subFactoriesBuilder) throws IOException {
-        SignificanceHeuristic executionHeuristic = this.significanceHeuristic.rewrite(queryShardContext);
+        SignificanceHeuristic executionHeuristic = significanceHeuristic.rewrite(context);
+
+        SignificantTermsAggregatorSupplier aggregatorSupplier =
+            context.getValuesSourceRegistry().getAggregator(REGISTRY_KEY, config);
         return new SignificantTermsAggregatorFactory(name, config, includeExclude, executionHint, filterBuilder,
-                bucketCountThresholds, executionHeuristic, queryShardContext, parent, subFactoriesBuilder, metadata);
+                bucketCountThresholds, executionHeuristic, context, parent, subFactoriesBuilder, metadata, aggregatorSupplier);
     }
 
     @Override

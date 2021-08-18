@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 
 package org.elasticsearch.xpack.transform.transforms;
@@ -10,7 +11,7 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.client.Client;
-import org.elasticsearch.common.collect.Tuple;
+import org.elasticsearch.core.Tuple;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.xpack.core.transform.transforms.SourceConfig;
@@ -66,9 +67,9 @@ public interface Function {
          * TODO: replace the boolean with a more descriptive enum.
          *
          * @param searchResponse the response after querying for changes
-         * @return true in case of no more changed buckets, false in case changes buckets have been collected
+         * @return the position of the change collector, null in case the collector is exhausted
          */
-        boolean processSearchResponse(SearchResponse searchResponse);
+        Map<String, Object> processSearchResponse(SearchResponse searchResponse);
 
         /**
          * Build the filter query to narrow the result set given the previously collected changes.
@@ -76,10 +77,10 @@ public interface Function {
          * TODO: it might be useful to have the full checkpoint data.
          *
          * @param lastCheckpointTimestamp the timestamp of the last checkpoint
-         * @param nextcheckpointTimestamp the timestamp of the next (in progress) checkpoint
+         * @param nextCheckpointTimestamp the timestamp of the next (in progress) checkpoint
          * @return a filter query, null in case of no filter
          */
-        QueryBuilder buildFilterQuery(long lastCheckpointTimestamp, long nextcheckpointTimestamp);
+        QueryBuilder buildFilterQuery(long lastCheckpointTimestamp, long nextCheckpointTimestamp);
 
         /**
          * Clear the internal state to free up memory.
@@ -87,18 +88,18 @@ public interface Function {
         void clear();
 
         /**
-         * Get the bucket position of the changes collector.
-         *
-         * @return the position, null in case the collector is exhausted
-         */
-        Map<String, Object> getBucketPosition();
-
-        /**
          * Whether the collector optimizes change detection by narrowing the required query.
          *
          * @return true if the collector optimizes change detection
          */
         boolean isOptimized();
+
+        /**
+         * Whether the collector requires an extra query to identify the changes.
+         *
+         * @return true if collector requires an extra query for identifying changes
+         */
+        boolean queryForChanges();
     }
 
     /**
@@ -153,6 +154,14 @@ public interface Function {
     void validateConfig(ActionListener<Boolean> listener);
 
     /**
+     * Returns names of fields that are critical to achieve good transform performance.
+     * Such fields should ideally be indexed, not runtime or script fields.
+     *
+     * @return list of fields names
+     */
+    List<String> getPerformanceCriticalFields();
+
+    /**
      * Runtime validation by querying the source and checking if source and config fit.
      *
      * @param client a client instance for querying the source
@@ -183,17 +192,6 @@ public interface Function {
     int getInitialPageSize();
 
     /**
-     * Whether this function - given its configuration - supports incremental bucket update used in continuous mode.
-     *
-     * If so, the indexer uses the change collector to update the continuous transform.
-     *
-     * TODO: simplify and remove this method if possible
-     *
-     * @return true if incremental bucket update is supported
-     */
-    boolean supportsIncrementalBucketUpdate();
-
-    /**
      * Build the query for the next iteration
      *
      * @param searchSourceBuilder a searchsource builder instance
@@ -211,6 +209,7 @@ public interface Function {
      * @param destinationPipeline the destination pipeline
      * @param fieldMappings field mappings for the destination
      * @param stats a stats object to record/collect stats
+     * @param progress a progress object to record/collect progress information
      * @return a tuple with the stream of index requests and the cursor
      */
     Tuple<Stream<IndexRequest>, Map<String, Object>> processSearchResponse(
@@ -218,6 +217,7 @@ public interface Function {
         String destinationIndex,
         String destinationPipeline,
         Map<String, String> fieldMappings,
-        TransformIndexerStats stats
+        TransformIndexerStats stats,
+        TransformProgress progress
     );
 }
