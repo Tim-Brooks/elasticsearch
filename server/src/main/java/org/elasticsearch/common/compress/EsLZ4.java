@@ -8,15 +8,12 @@
 
 package org.elasticsearch.common.compress;
 
-import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.util.FutureArrays;
 import org.apache.lucene.util.FutureObjects;
-import org.apache.lucene.util.compress.LZ4;
 import org.apache.lucene.util.packed.PackedInts;
 
 import java.io.IOException;
-import java.util.Arrays;
 
 public class EsLZ4 {
 
