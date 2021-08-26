@@ -8,7 +8,6 @@
 
 package org.elasticsearch.common.compress;
 
-import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.util.FutureArrays;
 import org.apache.lucene.util.FutureObjects;
 import org.apache.lucene.util.packed.PackedInts;
@@ -23,16 +22,10 @@ public class EsLZ4 {
     static final int MIN_MATCH = 4; // minimum length of a match
     static final int MAX_DISTANCE = 1 << 16; // maximum distance of a reference
     static final int LAST_LITERALS = 5; // the last 5 bytes must be encoded as literals
-    static final int HASH_LOG_HC = 15; // log size of the dictionary for compressHC
-    static final int HASH_TABLE_SIZE_HC = 1 << HASH_LOG_HC;
 
 
     private static int hash(int i, int hashBits) {
         return (i * -1640531535) >>> (32 - hashBits);
-    }
-
-    private static int hashHC(int i) {
-        return hash(i, HASH_LOG_HC);
     }
 
     private static int readInt(byte[] buf, int i) {
@@ -110,62 +103,58 @@ public class EsLZ4 {
         return dOff;
     }
 
-    private static int encodeLen(int l, DataOutput out) throws IOException {
-        int written = 0;
+    private static int encodeLen(int l, byte[] out, int cOff) {
+        int initialCOff = cOff;
         while (l >= 0xFF) {
-            written++;
-            out.writeByte((byte) 0xFF);
+            out[cOff++] = (byte) 0xFF;
             l -= 0xFF;
         }
-        written++;
-        out.writeByte((byte) l);
-        return written;
+        out[cOff++] = (byte) l;
+        return cOff - initialCOff;
     }
 
-    private static int encodeLiterals(byte[] bytes, int token, int anchor, int literalLen, DataOutput out, int cOff) throws IOException {
-        out.writeByte((byte) token);
-        int written = 1;
+    private static int encodeLiterals(byte[] bytes, int token, int anchor, int literalLen, byte[] out, int cOff) {
+        int initialCOff = cOff;
+        out[cOff++] = (byte) token;
 
         // encode literal length
         if (literalLen >= 0x0F) {
-            written += encodeLen(literalLen - 0x0F, out);
+            cOff += encodeLen(literalLen - 0x0F, out, cOff);
         }
 
         // encode literals
-        out.writeBytes(bytes, anchor, literalLen);
-        written += literalLen;
+        System.arraycopy(bytes, anchor, out, cOff, literalLen);
+        cOff += literalLen;
 
-        return written;
+        return cOff - initialCOff;
     }
 
-    private static void encodeLastLiterals(byte[] bytes, int anchor, int literalLen, DataOutput out, int cOff) throws IOException {
+    private static void encodeLastLiterals(byte[] bytes, int anchor, int literalLen, byte[] out, int cOff) {
         final int token = Math.min(literalLen, 0x0F) << 4;
         encodeLiterals(bytes, token, anchor, literalLen, out, cOff);
     }
 
-    private static int encodeSequence(byte[] bytes, int anchor, int matchRef, int matchOff, int matchLen, DataOutput out, int cOff)
-        throws IOException {
-        int cWritten = 0;
+    private static int encodeSequence(byte[] bytes, int anchor, int matchRef, int matchOff, int matchLen, byte[] out, int cOff) {
+        int initialCOff = cOff;
 
         final int literalLen = matchOff - anchor;
         assert matchLen >= 4;
         // encode token
         final int token = (Math.min(literalLen, 0x0F) << 4) | Math.min(matchLen - 4, 0x0F);
-        cWritten += encodeLiterals(bytes, token, anchor, literalLen, out, cOff);
+        cOff += encodeLiterals(bytes, token, anchor, literalLen, out, cOff);
 
         // encode match dec
         final int matchDec = matchOff - matchRef;
         assert matchDec > 0 && matchDec < 1 << 16;
-        out.writeByte((byte) matchDec);
-        out.writeByte((byte) (matchDec >>> 8));
-        cWritten += 2;
+        out[cOff++] = (byte) matchDec;
+        out[cOff++] = (byte) (matchDec >>> 8);
 
         // encode match len
         if (matchLen >= MIN_MATCH + 0x0F) {
-            cWritten += encodeLen(matchLen - 0x0F - MIN_MATCH, out);
+            cOff += encodeLen(matchLen - 0x0F - MIN_MATCH, out, cOff);
         }
 
-        return cWritten;
+        return cOff - initialCOff;
     }
 
     /**
@@ -277,7 +266,7 @@ public class EsLZ4 {
      * memory. {@code ht} shouldn't be shared across threads but can safely be
      * reused.
      */
-    public static void compress(byte[] bytes, int off, int len, byte[] out, EsLZ4.HashTable ht) throws IOException {
+    public static void compress(byte[] bytes, int off, int len, byte[] out, EsLZ4.HashTable ht) {
         compressWithDictionary(bytes, off, 0, len, out, ht);
     }
 
@@ -289,7 +278,7 @@ public class EsLZ4 {
      *
      * {@code ht} shouldn't be shared across threads but can safely be reused.
      */
-    public static void compressWithDictionary(byte[] bytes, int dictOff, int dictLen, int len, byte[] out, EsLZ4.HashTable ht) throws IOException {
+    public static void compressWithDictionary(byte[] bytes, int dictOff, int dictLen, int len, byte[] out, EsLZ4.HashTable ht) {
         FutureObjects.checkFromIndexSize(dictOff, dictLen, bytes.length);
         FutureObjects.checkFromIndexSize(dictOff + dictLen, len, bytes.length);
         if (dictLen > MAX_DISTANCE) {
@@ -339,8 +328,7 @@ public class EsLZ4 {
                     }
                 }
 
-                // TODO
-//                encodeSequence(bytes, anchor, ref, off, matchLen, out, cOff);
+                cOff += encodeSequence(bytes, anchor, ref, off, matchLen, out, cOff);
                 off += matchLen;
                 anchor = off;
             }
@@ -349,7 +337,6 @@ public class EsLZ4 {
         // last literals
         final int literalLen = end - anchor;
         assert literalLen >= LAST_LITERALS || literalLen == len;
-        // TODO
-//        encodeLastLiterals(bytes, anchor, end - anchor, out, cOff);
+        encodeLastLiterals(bytes, anchor, end - anchor, out, cOff);
     }
 }
