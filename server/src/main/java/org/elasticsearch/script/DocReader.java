@@ -9,6 +9,7 @@
 package org.elasticsearch.script;
 
 import org.elasticsearch.index.fielddata.ScriptDocValues;
+import org.elasticsearch.script.field.Field;
 
 import java.util.Map;
 import java.util.stream.Stream;
@@ -21,10 +22,10 @@ import java.util.stream.Stream;
  */
 public interface DocReader {
     /** New-style field access */
-    Field<?> field(String fieldName);
+    Field field(String fieldName);
 
     /** New-style field iterator */
-    Stream<Field<?>> fields(String fieldGlob);
+    Stream<Field> fields(String fieldGlob);
 
     /** Set the underlying docId */
     void setDocument(int docID);

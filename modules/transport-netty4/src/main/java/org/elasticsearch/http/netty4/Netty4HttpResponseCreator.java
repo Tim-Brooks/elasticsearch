@@ -16,14 +16,15 @@ import io.netty.handler.codec.compression.JdkZlibEncoder;
 import io.netty.handler.codec.http.DefaultHttpContent;
 import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.DefaultLastHttpContent;
+
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.core.Booleans;
 import org.elasticsearch.core.Tuple;
 import org.elasticsearch.http.HttpPipeline;
 import org.elasticsearch.http.HttpPipelinedResponse;
 import org.elasticsearch.http.HttpResponse;
-import org.elasticsearch.core.Booleans;
-import org.elasticsearch.transport.NettyAllocator;
 import org.elasticsearch.transport.netty4.Netty4TcpChannel;
+import org.elasticsearch.transport.netty4.NettyAllocator;
 
 /**
  * Split up large responses to prevent batch compression {@link JdkZlibEncoder} down the pipeline.

@@ -9,6 +9,8 @@
 package org.elasticsearch.script;
 
 import org.elasticsearch.index.fielddata.ScriptDocValues;
+import org.elasticsearch.script.field.EmptyField;
+import org.elasticsearch.script.field.Field;
 
 import java.util.Collections;
 import java.util.Map;
@@ -21,14 +23,14 @@ public abstract class DocBasedScript {
         this.docReader = docReader;
     }
 
-    public Field<?> field(String fieldName) {
+    public Field field(String fieldName) {
         if (docReader == null) {
-            return new EmptyField<>(fieldName);
+            return new EmptyField(fieldName);
         }
         return docReader.field(fieldName);
     }
 
-    public Stream<Field<?>> fields(String fieldGlob) {
+    public Stream<Field> fields(String fieldGlob) {
         if (docReader == null) {
             return Stream.empty();
         }

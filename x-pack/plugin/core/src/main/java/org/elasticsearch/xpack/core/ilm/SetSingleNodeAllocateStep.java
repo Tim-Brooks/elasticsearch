@@ -22,8 +22,10 @@ import org.elasticsearch.cluster.routing.allocation.RoutingAllocation;
 import org.elasticsearch.cluster.routing.allocation.decider.AllocationDeciders;
 import org.elasticsearch.cluster.routing.allocation.decider.Decision;
 import org.elasticsearch.cluster.routing.allocation.decider.FilterAllocationDecider;
+import org.elasticsearch.cluster.routing.allocation.decider.NodeReplacementAllocationDecider;
 import org.elasticsearch.cluster.routing.allocation.decider.NodeShutdownAllocationDecider;
 import org.elasticsearch.cluster.routing.allocation.decider.NodeVersionAllocationDecider;
+import org.elasticsearch.cluster.routing.allocation.decider.ShardsLimitAllocationDecider;
 import org.elasticsearch.common.Randomness;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
@@ -67,7 +69,8 @@ public class SetSingleNodeAllocateStep extends AsyncActionStep {
                 new ClusterSettings(Settings.EMPTY, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS)),
             new DataTierAllocationDecider(),
             new NodeVersionAllocationDecider(),
-            new NodeShutdownAllocationDecider()
+            new NodeShutdownAllocationDecider(),
+            new NodeReplacementAllocationDecider()
         ));
         final RoutingNodes routingNodes = clusterState.getRoutingNodes();
         RoutingAllocation allocation = new RoutingAllocation(allocationDeciders, routingNodes, clusterState, null,
@@ -95,7 +98,8 @@ public class SetSingleNodeAllocateStep extends AsyncActionStep {
 
             if (nodeId.isPresent()) {
                 Settings settings = Settings.builder()
-                        .put(IndexMetadata.INDEX_ROUTING_REQUIRE_GROUP_SETTING.getKey() + "_id", nodeId.get()).build();
+                        .put(IndexMetadata.INDEX_ROUTING_REQUIRE_GROUP_SETTING.getKey() + "_id", nodeId.get())
+                        .putNull(ShardsLimitAllocationDecider.INDEX_TOTAL_SHARDS_PER_NODE_SETTING.getKey()).build();
                 UpdateSettingsRequest updateSettingsRequest = new UpdateSettingsRequest(indexName)
                         .masterNodeTimeout(TimeValue.MAX_VALUE)
                         .settings(settings);
