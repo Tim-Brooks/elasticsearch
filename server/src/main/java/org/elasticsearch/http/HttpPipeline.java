@@ -41,8 +41,11 @@ public class HttpPipeline implements Releasable {
     private final CorsHandler corsHandler;
     private final BiConsumer<HttpRequest, HttpChannel> requestHandler;
 
-    public HttpPipeline(HttpPipeliningAggregator<ActionListener<Void>> aggregator, CorsHandler corsHandler,
-                        BiConsumer<HttpRequest, HttpChannel> requestHandler) {
+    public HttpPipeline(
+        HttpPipeliningAggregator<ActionListener<Void>> aggregator,
+        CorsHandler corsHandler,
+        BiConsumer<HttpRequest, HttpChannel> requestHandler
+    ) {
         this.aggregator = aggregator;
         this.corsHandler = corsHandler;
         this.requestHandler = requestHandler;
@@ -71,7 +74,7 @@ public class HttpPipeline implements Releasable {
 
     public void sendHttpResponse(final HttpResponse response, final ActionListener<Void> listener) {
         HttpPipelinedResponse pipelinedResponse = (HttpPipelinedResponse) response;
-//        responseSender.accept(new HttpResponseContext(pipelinedResponse, listener));
+        // responseSender.accept(new HttpResponseContext(pipelinedResponse, listener));
     }
 
     @Override
@@ -97,8 +100,10 @@ public class HttpPipeline implements Releasable {
         }
     }
 
-    public List<Tuple<HttpResponse, ActionListener<Void>>> handleOutboundRequest(final HttpPipelinedResponse response,
-                                                                                 final ActionListener<Void> listener) {
+    public List<Tuple<HttpResponse, ActionListener<Void>>> handleOutboundRequest(
+        final HttpPipelinedResponse response,
+        final ActionListener<Void> listener
+    ) {
         Transports.assertTransportThread();
         try {
             return aggregator.write(response, listener);
@@ -121,12 +126,12 @@ public class HttpPipeline implements Releasable {
         @Override
         public List<Tuple<HttpResponse, ActionListener<Void>>> get() {
             return null;
-//            try {
-//                return aggregator.write(pipelinedResponse, listener);
-//            } catch (IllegalStateException e) {
-//                listener.onFailure(e);
-//                throw e;
-//            }
+            // try {
+            // return aggregator.write(pipelinedResponse, listener);
+            // } catch (IllegalStateException e) {
+            // listener.onFailure(e);
+            // throw e;
+            // }
         }
     }
 }

@@ -62,8 +62,10 @@ class Netty4HttpResponseCreator extends ChannelOutboundHandlerAdapter {
                 while (content.readableBytes() > SPLIT_THRESHOLD) {
                     ctx.write(new DefaultHttpContent(content.readRetainedSlice(SPLIT_THRESHOLD)));
                 }
-                ctx.write(new DefaultLastHttpContent(content.readRetainedSlice(content.readableBytes())),
-                    Netty4TcpChannel.addPromise(readyResponse.v2(), ctx.channel()));
+                ctx.write(
+                    new DefaultLastHttpContent(content.readRetainedSlice(content.readableBytes())),
+                    Netty4TcpChannel.addPromise(readyResponse.v2(), ctx.channel())
+                );
             }
         }
     }
