@@ -12,6 +12,7 @@ import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.bytes.CompositeBytesReference;
+import org.elasticsearch.common.bytes.ReleasableBytesReference;
 import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
@@ -22,6 +23,9 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * A @link {@link StreamOutput} that uses {@link Recycler.V<BytesRef>} to acquire pages of bytes, which
@@ -193,6 +197,37 @@ public class RecyclerBytesStreamOutput extends BytesStream implements Releasable
                 BytesRef last = this.pages.get(pageCount - 1).v();
                 references[pageCount - 1] = new BytesArray(last.bytes, last.offset, bytesInLastPage);
                 return CompositeBytesReference.of(references);
+            }
+        }
+    }
+
+    public List<ReleasableBytesReference> retainAndGetPages() {
+        int position = (int) position();
+        if (position == 0) {
+            return Collections.emptyList();
+        } else {
+            final int adjustment;
+            final int bytesInLastPage;
+            final int remainder = position % pageSize;
+            if (remainder != 0) {
+                adjustment = 1;
+                bytesInLastPage = remainder;
+            } else {
+                adjustment = 0;
+                bytesInLastPage = pageSize;
+            }
+            final int pageCount = (position / pageSize) + adjustment;
+            if (pageCount == 1) {
+                BytesRef page = pages.get(0).v();
+                return Collections.singletonList(ReleasableBytesReference.wrap(new BytesArray(page.bytes, page.offset, bytesInLastPage)));
+            } else {
+                ReleasableBytesReference[] references = new ReleasableBytesReference[pageCount];
+                for (int i = 0; i < pageCount - 1; ++i) {
+                    references[i] = ReleasableBytesReference.wrap(new BytesArray(this.pages.get(i).v()));
+                }
+                BytesRef last = this.pages.get(pageCount - 1).v();
+                references[pageCount - 1] = ReleasableBytesReference.wrap(new BytesArray(last.bytes, last.offset, bytesInLastPage));
+                return Arrays.asList(references);
             }
         }
     }
