@@ -854,6 +854,10 @@ public abstract class TcpTransport extends AbstractLifecycleComponent implements
             return 0;
         }
 
+        if (messageLength == TcpHeader.CHUNKED_CONTENT_LENGTH) {
+            return messageLength;
+        }
+
         if (messageLength <= 0) {
             throw new StreamCorruptedException("invalid data length: " + messageLength);
         }

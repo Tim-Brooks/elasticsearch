@@ -280,6 +280,15 @@ public class TcpTransportTests extends ESTestCase {
         assertEquals(0, TcpTransport.readMessageLength(streamOutput.bytes()));
     }
 
+    public void testReadChunkedContentMessageLength() throws IOException {
+        BytesStreamOutput streamOutput = new BytesStreamOutput(1 << 14);
+        streamOutput.write('E');
+        streamOutput.write('S');
+        streamOutput.writeInt(Integer.MIN_VALUE);
+
+        assertEquals(TcpHeader.CHUNKED_CONTENT_LENGTH, TcpTransport.readMessageLength(streamOutput.bytes()));
+    }
+
     public void testReadPingMessageLengthWithStartOfSecondMessage() throws IOException {
         BytesStreamOutput streamOutput = new BytesStreamOutput(1 << 14);
         streamOutput.write('E');

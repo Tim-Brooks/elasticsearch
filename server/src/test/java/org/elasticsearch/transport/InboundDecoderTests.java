@@ -114,7 +114,86 @@ public class InboundDecoderTests extends ESTestCase {
             assertTrue(releasable2.decRef());
             assertEquals(InboundDecoder.END_CONTENT, endMarker);
         }
+    }
 
+    public void testChunkedContentDecode() throws IOException {
+        boolean isRequest = randomBoolean();
+        String action = "test-request";
+        long requestId = randomNonNegativeLong();
+        final String headerKey = randomAlphaOfLength(10);
+        final String headerValue = randomAlphaOfLength(20);
+        if (isRequest) {
+            threadContext.putHeader(headerKey, headerValue);
+        } else {
+            threadContext.addResponseHeader(headerKey, headerValue);
+        }
+        OutboundMessage message;
+        String contentLength = randomUnicodeOfLengthBetween(2 ^ 14, 2 ^ 17);
+        if (isRequest) {
+            message = new OutboundMessage.Request(
+                threadContext,
+                new TestRequest(contentLength),
+                Version.CURRENT,
+                action,
+                requestId,
+                false,
+                null
+            );
+        } else {
+            message = new OutboundMessage.Response(
+                threadContext,
+                new TestResponse(contentLength),
+                Version.CURRENT,
+                requestId,
+                false,
+                null
+            );
+        }
+
+        try (RecyclerBytesStreamOutput os = new RecyclerBytesStreamOutput(recycler)) {
+            final BytesReference totalBytes = message.serialize(os);
+            int totalHeaderSize = TcpHeader.headerSize(Version.CURRENT) + totalBytes.getInt(TcpHeader.VARIABLE_HEADER_SIZE_POSITION);
+            final BytesReference messageBytes = totalBytes.slice(totalHeaderSize, totalBytes.length() - totalHeaderSize);
+
+            InboundDecoder decoder = new InboundDecoder(Version.CURRENT, recycler);
+            final ArrayList<Object> fragments = new ArrayList<>();
+            final ReleasableBytesReference releasable1 = ReleasableBytesReference.wrap(totalBytes);
+            int bytesConsumed = decoder.decode(releasable1, fragments::add);
+            assertEquals(totalHeaderSize, bytesConsumed);
+            assertTrue(releasable1.hasReferences());
+
+            final Header header = (Header) fragments.get(0);
+            assertEquals(requestId, header.getRequestId());
+            assertEquals(Version.CURRENT, header.getVersion());
+            assertFalse(header.isCompressed());
+            assertFalse(header.isHandshake());
+            if (isRequest) {
+                assertEquals(action, header.getActionName());
+                assertTrue(header.isRequest());
+                assertEquals(header.getHeaders().v1().get(headerKey), headerValue);
+            } else {
+                assertTrue(header.isResponse());
+                assertThat(header.getHeaders().v2().get(headerKey), hasItems(headerValue));
+            }
+            assertFalse(header.needsToReadVariableHeader());
+            fragments.clear();
+
+            final BytesReference bytes2 = totalBytes.slice(bytesConsumed, totalBytes.length() - bytesConsumed);
+            final ReleasableBytesReference releasable2 = ReleasableBytesReference.wrap(bytes2);
+            int bytesConsumed2 = decoder.decode(releasable2, fragments::add);
+            assertEquals(totalBytes.length() - totalHeaderSize, bytesConsumed2);
+
+            final Object content = fragments.get(0);
+            final Object endMarker = fragments.get(1);
+
+            assertEquals(messageBytes, content);
+            // Ref count is incremented since the bytes are forwarded as a fragment
+            assertTrue(releasable2.hasReferences());
+            releasable2.decRef();
+            assertTrue(releasable2.hasReferences());
+            assertTrue(releasable2.decRef());
+            assertEquals(InboundDecoder.END_CONTENT, endMarker);
+        }
     }
 
     public void testDecodePreHeaderSizeVariableInt() throws IOException {

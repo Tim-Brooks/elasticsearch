@@ -68,6 +68,9 @@ public class InboundDecoder implements Releasable {
                     if (header.isCompressed()) {
                         isCompressed = true;
                     }
+                    if (totalNetworkSize == TcpHeader.CHUNKED_CONTENT_LENGTH && header.needsToReadVariableHeader()) {
+                        throw new IllegalStateException("Cannot read chunked content encoding with a variable header size.");
+                    }
                     fragmentConsumer.accept(header);
 
                     if (isDone()) {

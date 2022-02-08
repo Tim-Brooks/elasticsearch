@@ -197,16 +197,7 @@ final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
         }
     }
 
-    private static final class WriteOperation {
-
-        private final ByteBuf buf;
-
-        private final ChannelPromise promise;
-
-        WriteOperation(ByteBuf buf, ChannelPromise promise) {
-            this.buf = buf;
-            this.promise = promise;
-        }
+    private record WriteOperation(ByteBuf buf, ChannelPromise promise) {
 
         void failAsClosedChannel() {
             promise.tryFailure(new ClosedChannelException());
@@ -214,13 +205,7 @@ final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
         }
     }
 
-    private static final class ByteBufRefCounted implements RefCounted {
-
-        private final ByteBuf buffer;
-
-        ByteBufRefCounted(ByteBuf buffer) {
-            this.buffer = buffer;
-        }
+    private record ByteBufRefCounted(ByteBuf buffer) implements RefCounted {
 
         @Override
         public void incRef() {
