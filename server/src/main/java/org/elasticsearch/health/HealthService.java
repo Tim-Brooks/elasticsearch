@@ -8,7 +8,18 @@
 
 package org.elasticsearch.health;
 
+import joptsimple.internal.Strings;
+
+import org.elasticsearch.ResourceNotFoundException;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 
 import static java.util.stream.Collectors.collectingAndThen;
@@ -21,14 +32,45 @@ import static java.util.stream.Collectors.toList;
 public class HealthService {
 
     private final List<HealthIndicatorService> healthIndicatorServices;
+    private final Map<String, Set<String>> componentToIndicators;
 
     public HealthService(List<HealthIndicatorService> healthIndicatorServices) {
         this.healthIndicatorServices = healthIndicatorServices;
+        HashMap<String, Set<String>> componentToIndicators = new HashMap<>();
+        for (HealthIndicatorService service : healthIndicatorServices) {
+            componentToIndicators.compute(service.component(), (ignored, value) -> {
+                final Set<String> newIndicators;
+                newIndicators = Objects.requireNonNullElseGet(value, HashSet::new);
+                newIndicators.add(service.name());
+                return newIndicators;
+            });
+        }
+        this.componentToIndicators = Collections.unmodifiableMap(componentToIndicators);
     }
 
-    public List<HealthComponentResult> getHealth() {
+    public void validate(String component, List<String> indicators) throws ResourceNotFoundException {
+        if (component == null) {
+            return;
+        }
+        Set<String> knownIndicators = componentToIndicators.get(component);
+        if (knownIndicators == null) {
+            throw new ResourceNotFoundException("Health component [" + component + "] not found.");
+        }
+        if (knownIndicators.containsAll(indicators) == false) {
+            ArrayList<String> unknown = new ArrayList<>(indicators);
+            unknown.removeIf(knownIndicators::contains);
+            throw new ResourceNotFoundException(
+                "Health indicators [" + Strings.join(unknown, ",") + "] not found for health component [" + component + "]."
+            );
+        }
+    }
+
+    public List<HealthComponentResult> getHealth(String component, List<String> indicators) {
+        HashSet<String> setOfIndicators = new HashSet<>(indicators);
         return List.copyOf(
             healthIndicatorServices.stream()
+                .filter(s -> component == null || s.component().equals(component))
+                .filter(s -> setOfIndicators.isEmpty() || setOfIndicators.contains(s.name()))
                 .map(HealthIndicatorService::calculate)
                 .collect(
                     groupingBy(

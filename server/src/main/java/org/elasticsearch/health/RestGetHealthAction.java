@@ -9,6 +9,7 @@
 package org.elasticsearch.health;
 
 import org.elasticsearch.client.internal.node.NodeClient;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.action.RestToXContentListener;
@@ -28,12 +29,18 @@ public class RestGetHealthAction extends BaseRestHandler {
 
     @Override
     public List<Route> routes() {
-        return List.of(new Route(GET, "/_internal/_health"));
+        return List.of(
+            new Route(GET, "/_internal/_health"),
+            new Route(GET, "/_internal/_health/{component}"),
+            new Route(GET, "/_internal/_health/{component}/{indicators}")
+        );
     }
 
     @Override
     protected RestChannelConsumer prepareRequest(RestRequest request, NodeClient client) throws IOException {
-        GetHealthAction.Request getHealthRequest = new GetHealthAction.Request();
+        String component = request.param("component");
+        String[] indicators = request.paramAsStringArray("indicators", Strings.EMPTY_ARRAY);
+        GetHealthAction.Request getHealthRequest = new GetHealthAction.Request(component, indicators);
         return channel -> client.execute(GetHealthAction.INSTANCE, getHealthRequest, new RestToXContentListener<>(channel));
     }
 }

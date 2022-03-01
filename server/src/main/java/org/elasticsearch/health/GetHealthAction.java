@@ -26,6 +26,7 @@ import org.elasticsearch.xcontent.ToXContentObject;
 import org.elasticsearch.xcontent.XContentBuilder;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -118,6 +119,14 @@ public class GetHealthAction extends ActionType<GetHealthAction.Response> {
 
     public static class Request extends ActionRequest {
 
+        private final String component;
+        private final String[] indicators;
+
+        public Request(String component, String[] indicators) {
+            this.component = component;
+            this.indicators = indicators;
+        }
+
         @Override
         public ActionRequestValidationException validate() {
             return null;
@@ -143,7 +152,10 @@ public class GetHealthAction extends ActionType<GetHealthAction.Response> {
 
         @Override
         protected void doExecute(Task task, Request request, ActionListener<Response> listener) {
-            listener.onResponse(new Response(clusterService.getClusterName(), healthService.getHealth()));
+            String component = request.component;
+            List<String> indicators = Arrays.asList(request.indicators);
+            healthService.validate(component, indicators);
+            listener.onResponse(new Response(clusterService.getClusterName(), healthService.getHealth(component, indicators)));
         }
     }
 }
