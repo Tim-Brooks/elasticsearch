@@ -16,3 +16,30 @@
   - is_true: components.cluster_coordination.indicators.instance_has_master.details.coordinating_node.name
   - is_true: components.cluster_coordination.indicators.instance_has_master.details.master_node.node_id
   - is_true: components.cluster_coordination.indicators.instance_has_master.details.master_node.name
+
+---
+"drilldown to component":
+  - skip:
+      version: "- 8.1.99"
+      reason: "health was only added in 8.2.0"
+
+  - do:
+      _internal.health:
+        component: snapshot
+
+  - is_true: cluster_name
+  - is_true: components.snapshot
+  - is_false: components.cluster_coordination
+  - is_true: components.snapshot.indicators.slm
+  - is_true: components.snapshot.indicators.repository_integrity
+
+  - do:
+      _internal.health:
+        component: snapshot
+        indicator: slm
+
+  - is_true: cluster_name
+  - is_true: components.snapshot
+  - is_false: components.cluster_coordination
+  - is_true: components.snapshot.indicators.slm
+  - is_false: components.snapshot.indicators.repository_integrity

@@ -8,11 +8,8 @@
 
 package org.elasticsearch.health;
 
-import joptsimple.internal.Strings;
-
 import org.elasticsearch.ResourceNotFoundException;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -48,7 +45,7 @@ public class HealthService {
         this.componentToIndicators = Collections.unmodifiableMap(componentToIndicators);
     }
 
-    public void validate(String component, List<String> indicators) throws ResourceNotFoundException {
+    public void validate(String component, String indicator) throws ResourceNotFoundException {
         if (component == null) {
             return;
         }
@@ -56,21 +53,21 @@ public class HealthService {
         if (knownIndicators == null) {
             throw new ResourceNotFoundException("Health component [" + component + "] not found.");
         }
-        if (knownIndicators.containsAll(indicators) == false) {
-            ArrayList<String> unknown = new ArrayList<>(indicators);
-            unknown.removeIf(knownIndicators::contains);
+        if (indicator == null) {
+            return;
+        }
+        if (knownIndicators.contains(indicator) == false) {
             throw new ResourceNotFoundException(
-                "Health indicators [" + Strings.join(unknown, ",") + "] not found for health component [" + component + "]."
+                "Health indicator [" + indicator + "] not found for health component [" + component + "]."
             );
         }
     }
 
-    public List<HealthComponentResult> getHealth(String component, List<String> indicators) {
-        HashSet<String> setOfIndicators = new HashSet<>(indicators);
+    public List<HealthComponentResult> getHealth(String component, String indicator) {
         return List.copyOf(
             healthIndicatorServices.stream()
                 .filter(s -> component == null || s.component().equals(component))
-                .filter(s -> setOfIndicators.isEmpty() || setOfIndicators.contains(s.name()))
+                .filter(s -> indicator == null || s.name().equals(indicator))
                 .map(HealthIndicatorService::calculate)
                 .collect(
                     groupingBy(

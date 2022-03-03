@@ -19,6 +19,7 @@ import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.xcontent.ToXContent;
@@ -119,11 +120,15 @@ public class GetHealthAction extends ActionType<GetHealthAction.Response> {
     public static class Request extends ActionRequest {
 
         private final String component;
-        private final String[] indicators;
+        private final String indicator;
 
-        public Request(String component, String[] indicators) {
+        public Request() {
+            this(null, null);
+        }
+
+        public Request(@Nullable String component, @Nullable String indicator) {
             this.component = component;
-            this.indicators = indicators;
+            this.indicator = indicator;
         }
 
         @Override
@@ -152,9 +157,9 @@ public class GetHealthAction extends ActionType<GetHealthAction.Response> {
         @Override
         protected void doExecute(Task task, Request request, ActionListener<Response> listener) {
             String component = request.component;
-            List<String> indicators = Arrays.asList(request.indicators);
-            healthService.validate(component, indicators);
-            listener.onResponse(new Response(clusterService.getClusterName(), healthService.getHealth(component, indicators)));
+            String indicator = request.indicator;
+            healthService.validate(component, request.indicator);
+            listener.onResponse(new Response(clusterService.getClusterName(), healthService.getHealth(component, indicator)));
         }
     }
 }

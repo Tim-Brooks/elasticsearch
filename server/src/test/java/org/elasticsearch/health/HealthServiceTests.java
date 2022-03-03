@@ -11,7 +11,6 @@ package org.elasticsearch.health;
 import org.elasticsearch.ResourceNotFoundException;
 import org.elasticsearch.test.ESTestCase;
 
-import java.util.Collections;
 import java.util.List;
 
 import static org.elasticsearch.health.HealthStatus.GREEN;
@@ -39,7 +38,7 @@ public class HealthServiceTests extends ESTestCase {
         );
 
         assertThat(
-            service.getHealth(null, Collections.emptyList()),
+            service.getHealth(null, null),
             anyOf(
                 hasItems(
                     new HealthComponentResult("component1", YELLOW, List.of(indicator2, indicator1)),
@@ -48,6 +47,42 @@ public class HealthServiceTests extends ESTestCase {
                 hasItems(
                     new HealthComponentResult("component1", YELLOW, List.of(indicator1, indicator2)),
                     new HealthComponentResult("component2", GREEN, List.of(indicator3))
+                )
+            )
+        );
+    }
+
+    public void testShouldReturnRequestedIndicators() {
+
+        var indicator1 = new HealthIndicatorResult("indicator1", "component1", GREEN, null, null);
+        var indicator2 = new HealthIndicatorResult("indicator2", "component1", YELLOW, null, null);
+        var indicator3 = new HealthIndicatorResult("indicator3", "component2", GREEN, null, null);
+
+        var service = new HealthService(
+            List.of(
+                createMockHealthIndicatorService(indicator1),
+                createMockHealthIndicatorService(indicator2),
+                createMockHealthIndicatorService(indicator3)
+            )
+        );
+
+        assertThat(
+            service.getHealth("component1", null),
+            anyOf(
+                hasItems(
+                    new HealthComponentResult("component1", YELLOW, List.of(indicator2, indicator1))
+                ),
+                hasItems(
+                    new HealthComponentResult("component1", YELLOW, List.of(indicator1, indicator2))
+                )
+            )
+        );
+
+        assertThat(
+            service.getHealth("component1", "indicator1"),
+            anyOf(
+                hasItems(
+                    new HealthComponentResult("component1", YELLOW, List.of(indicator1))
                 )
             )
         );
@@ -67,19 +102,20 @@ public class HealthServiceTests extends ESTestCase {
         );
 
         // Should not throw
-        service.validate("component1", List.of("indicator1", "indicator2"));
+        service.validate("component1", "indicator1");
+        service.validate("component1", "indicator2");
 
         ResourceNotFoundException rnfe = expectThrows(
             ResourceNotFoundException.class,
-            () -> service.validate("unknown_component", List.of("indicator1", "indicator2"))
+            () -> service.validate("unknown_component", "indicator1")
         );
         assertThat(rnfe.getMessage(), equalTo("Health component [unknown_component] not found."));
 
         ResourceNotFoundException rnfe2 = expectThrows(
             ResourceNotFoundException.class,
-            () -> service.validate("component1", List.of("indicator1", "indicator3", "indicator4"))
+            () -> service.validate("component1", "indicator3")
         );
-        assertThat(rnfe2.getMessage(), equalTo("Health indicators [indicator3,indicator4] not found for health component [component1]."));
+        assertThat(rnfe2.getMessage(), equalTo("Health indicator [indicator3] not found for health component [component1]."));
 
     }
 
