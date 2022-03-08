@@ -10,7 +10,7 @@ package org.elasticsearch.snapshots;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.apache.lucene.util.LuceneTestCase;
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ShardOperationFailedException;
@@ -86,7 +86,7 @@ public class SnapshotStressTestsIT extends AbstractSnapshotIntegTestCase {
     }
 
     private static Set<String> nodeNames(ImmutableOpenMap<String, DiscoveryNode> nodesMap) {
-        return nodesMap.stream().map(c -> c.getValue().getName()).collect(Collectors.toSet());
+        return nodesMap.values().stream().map(DiscoveryNode::getName).collect(Collectors.toSet());
     }
 
     /**
@@ -210,7 +210,7 @@ public class SnapshotStressTestsIT extends AbstractSnapshotIntegTestCase {
         private final ThreadPool threadPool = new TestThreadPool(
             "TrackedCluster",
             // a single thread for "client" activities, to limit the number of activities all starting at once
-            new ScalingExecutorBuilder(CLIENT, 1, 1, TimeValue.ZERO, CLIENT)
+            new ScalingExecutorBuilder(CLIENT, 1, 1, TimeValue.ZERO, true, CLIENT)
         );
 
         private final AtomicBoolean shouldStop = new AtomicBoolean();
