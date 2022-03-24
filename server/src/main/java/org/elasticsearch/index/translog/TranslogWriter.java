@@ -673,7 +673,7 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
                 + maxBytes.get()
                 + ", total_ops_synced="
                 + ops.sum()
-                + ", ops_per_sync="
+                + ", avg_ops_per_sync="
                 + ops.mean()
                 + "]"
         );
