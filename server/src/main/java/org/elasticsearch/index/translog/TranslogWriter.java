@@ -95,6 +95,7 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
     private final AtomicLong bytesWrittenSinceLastFsync = new AtomicLong(0);
 
     private static final AtomicReference<MeanMetric> bytesPerFsync = new AtomicReference<>(new MeanMetric());
+    private static final AtomicReference<AtomicLong> maxBytesPerFsync = new AtomicReference<>(new AtomicLong());
     private static final AtomicReference<MeanMetric> opsPerFsync = new AtomicReference<>(new MeanMetric());
 
     private TranslogWriter(
@@ -503,6 +504,7 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
                             long bytesForced = bytesWrittenSinceLastFsync.getAndSet(0);
                             opsPerFsync.get().inc(opsForced);
                             bytesPerFsync.get().inc(bytesForced);
+                            maxBytesPerFsync.get().getAndUpdate(existing -> Math.max(existing, bytesForced));
                             channel.force(false);
                         }
                         writeCheckpoint(checkpointChannel, checkpointPath, checkpointToSync);
@@ -659,6 +661,21 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
     public static void logFsyncStats() {
         MeanMetric bytes = bytesPerFsync.getAndSet(new MeanMetric());
         MeanMetric ops = opsPerFsync.getAndSet(new MeanMetric());
-        logger.info("[fsyncs=" + bytes.count() + ", bytes_per_sync=" + bytes.mean() + ", ops_per_sync=" + ops.mean() + "]");
+        AtomicLong maxBytes = maxBytesPerFsync.getAndSet(new AtomicLong());
+        logger.info(
+            "[fsyncs="
+                + bytes.count()
+                + ", total_bytes_synced="
+                + bytes.sum()
+                + ", avg_bytes_per_sync="
+                + bytes.mean()
+                + ", max_bytes_per_sync="
+                + maxBytes.get()
+                + ", total_ops_synced="
+                + ops.sum()
+                + ", ops_per_sync="
+                + ops.mean()
+                + "]"
+        );
     }
 }
