@@ -12,6 +12,8 @@ import org.elasticsearch.common.ssl.SslConfiguration;
 
 import javax.net.ssl.SSLEngine;
 import java.net.InetSocketAddress;
+import java.util.HashMap;
+import java.util.Map;
 
 public record TLSConfig(SslConfiguration sslConfiguration, EngineProvider engineProvider) {
 
@@ -41,6 +43,14 @@ public record TLSConfig(SslConfiguration sslConfiguration, EngineProvider engine
 
     public static TLSConfig noTLS() {
         return new TLSConfig(null, null);
+    }
+
+    public static Map<String, TLSConfig> tlsConfigs(Map<String, SslConfiguration> sslConfigurationMap, EngineProvider engineProvider) {
+        HashMap<String, TLSConfig> tlsConfigs = new HashMap<>(sslConfigurationMap.size());
+        for (Map.Entry<String, SslConfiguration> config : sslConfigurationMap.entrySet()) {
+            tlsConfigs.put(config.getKey(), new TLSConfig(config.getValue(), engineProvider));
+        }
+        return tlsConfigs;
     }
 
     @FunctionalInterface
