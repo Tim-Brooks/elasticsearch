@@ -1559,8 +1559,16 @@ public class Security extends Plugin
         final IPFilter ipFilter = this.ipFilter.get();
         final AcceptChannelHandler.AcceptPredicate acceptPredicate = new AcceptChannelHandler.AcceptPredicate() {
             @Override
-            public void setBoundAddress(BoundTransportAddress boundHttpTransportAddress) {
+            public void setHttpBoundAddress(BoundTransportAddress boundHttpTransportAddress) {
                 ipFilter.setBoundHttpTransportAddress(boundHttpTransportAddress);
+            }
+
+            @Override
+            public void setBoundTransportAddress(
+                BoundTransportAddress boundTransportAddress,
+                Map<String, BoundTransportAddress> profileBoundAddress
+            ) {
+                ipFilter.setBoundTransportAddress(boundTransportAddress, profileBoundAddress);
             }
 
             @Override

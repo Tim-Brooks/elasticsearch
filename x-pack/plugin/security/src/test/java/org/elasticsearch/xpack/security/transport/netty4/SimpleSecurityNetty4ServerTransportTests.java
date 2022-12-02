@@ -85,6 +85,7 @@ public class SimpleSecurityNetty4ServerTransportTests extends AbstractSimpleTran
         NamedWriteableRegistry namedWriteableRegistry = new NamedWriteableRegistry(Collections.emptyList());
         NetworkService networkService = new NetworkService(Collections.emptyList());
         Settings settings1 = Settings.builder().put(settings).put("xpack.security.transport.ssl.enabled", true).build();
+        SSLService sslService = createSSLService(settings1);
         return new SecurityNetty4ServerTransport(
             settings1,
             version,
@@ -94,7 +95,7 @@ public class SimpleSecurityNetty4ServerTransportTests extends AbstractSimpleTran
             namedWriteableRegistry,
             new NoneCircuitBreakerService(),
             null,
-            createSSLService(settings1),
+            sslService,
             new SharedGroupFactory(settings1)
         ) {
 

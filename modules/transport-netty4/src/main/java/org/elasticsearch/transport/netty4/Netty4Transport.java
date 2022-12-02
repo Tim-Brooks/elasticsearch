@@ -17,9 +17,12 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.FixedRecvByteBufAllocator;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.socket.nio.NioChannelOption;
+import io.netty.handler.ssl.SslHandler;
 import io.netty.util.AttributeKey;
 
 import org.apache.logging.log4j.LogManager;
@@ -29,6 +32,7 @@ import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.Version;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
+import org.elasticsearch.common.network.CloseableChannel;
 import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.common.settings.Setting;
@@ -38,16 +42,25 @@ import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasables;
 import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.transport.ConnectTransportException;
+import org.elasticsearch.transport.TcpChannel;
 import org.elasticsearch.transport.TcpTransport;
 import org.elasticsearch.transport.TransportSettings;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.util.Collections;
 import java.util.Map;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
 
 import static org.elasticsearch.common.settings.Setting.byteSizeSetting;
 import static org.elasticsearch.common.settings.Setting.intSetting;
@@ -93,6 +106,8 @@ public class Netty4Transport extends TcpTransport {
     private final ByteSizeValue receivePredictorMin;
     private final ByteSizeValue receivePredictorMax;
     private final Map<String, ServerBootstrap> serverBootstraps = newConcurrentMap();
+    private final TLSConfig tlsConfig;
+    private final AcceptChannelHandler.AcceptPredicate acceptChannelPredicate;
     private volatile Bootstrap clientBootstrap;
     private volatile SharedGroupFactory.SharedGroup sharedGroup;
 
@@ -106,10 +121,38 @@ public class Netty4Transport extends TcpTransport {
         CircuitBreakerService circuitBreakerService,
         SharedGroupFactory sharedGroupFactory
     ) {
+        this(
+            settings,
+            version,
+            threadPool,
+            networkService,
+            pageCacheRecycler,
+            namedWriteableRegistry,
+            circuitBreakerService,
+            sharedGroupFactory,
+            TLSConfig.noTLS(),
+            null
+        );
+    }
+
+    public Netty4Transport(
+        Settings settings,
+        Version version,
+        ThreadPool threadPool,
+        NetworkService networkService,
+        PageCacheRecycler pageCacheRecycler,
+        NamedWriteableRegistry namedWriteableRegistry,
+        CircuitBreakerService circuitBreakerService,
+        SharedGroupFactory sharedGroupFactory,
+        TLSConfig tlsConfig,
+        @Nullable AcceptChannelHandler.AcceptPredicate acceptChannelPredicate
+    ) {
         super(settings, version, threadPool, pageCacheRecycler, circuitBreakerService, namedWriteableRegistry, networkService);
         Netty4Utils.setAvailableProcessors(EsExecutors.allocatedProcessors(settings));
         NettyAllocator.logAllocatorDescriptionIfNeeded();
         this.sharedGroupFactory = sharedGroupFactory;
+        this.tlsConfig = tlsConfig;
+        this.acceptChannelPredicate = acceptChannelPredicate;
 
         // See AdaptiveReceiveBufferSizePredictor#DEFAULT_XXX for default values in netty..., we can use higher ones for us, even fixed one
         this.receivePredictorMin = NETTY_RECEIVE_PREDICTOR_MIN.get(settings);
@@ -142,12 +185,20 @@ public class Netty4Transport extends TcpTransport {
                     bindServer(profileSettings);
                 }
             }
+            if (acceptChannelPredicate != null) {
+                acceptChannelPredicate.setBoundTransportAddress(boundAddress(), profileBoundAddresses());
+            }
             success = true;
         } finally {
             if (success == false) {
                 doStop();
             }
         }
+    }
+
+    @Override
+    public boolean isSecure() {
+        return tlsConfig.isTLSEnabled();
     }
 
     private Bootstrap createClientBootstrap(SharedGroupFactory.SharedGroup sharedGroupForBootstrap) {
@@ -268,7 +319,7 @@ public class Netty4Transport extends TcpTransport {
     }
 
     protected ChannelHandler getClientChannelInitializer(DiscoveryNode node) {
-        return new ClientChannelInitializer();
+        return new ClientChannelInitializer(tlsConfig, node);
     }
 
     static final AttributeKey<Netty4TcpChannel> CHANNEL_KEY = AttributeKey.newInstance("es-channel");
@@ -312,13 +363,51 @@ public class Netty4Transport extends TcpTransport {
         }, serverBootstraps::clear, () -> clientBootstrap = null);
     }
 
+    @Override
+    public void onException(TcpChannel channel, Exception e) {
+        if (lifecycle.started() == false) {
+            return;
+        } else if (SSLExceptionHelper.isNotSslRecordException(e)) {
+            logger.warn("received plaintext traffic on an encrypted channel, closing connection {}", channel);
+            CloseableChannel.closeChannel(channel);
+        } else if (SSLExceptionHelper.isCloseDuringHandshakeException(e)) {
+            logger.debug("connection {} closed during handshake", channel);
+            CloseableChannel.closeChannel(channel);
+        } else if (SSLExceptionHelper.isInsufficientBufferRemainingException(e)) {
+            logger.debug("connection {} closed abruptly", channel);
+            CloseableChannel.closeChannel(channel);
+        } else if (SSLExceptionHelper.isReceivedCertificateUnknownException(e)) {
+            logger.warn("client did not trust this server's certificate, closing connection {}", channel);
+            CloseableChannel.closeChannel(channel);
+        } else {
+            super.onException(channel, e);
+        }
+
+    }
+
     protected class ClientChannelInitializer extends ChannelInitializer<Channel> {
+
+        private final TLSConfig tlsConfig;
+        private final DiscoveryNode node;
+
+        protected ClientChannelInitializer() {
+            this(TLSConfig.noTLS(), null);
+        }
+
+        private ClientChannelInitializer(final TLSConfig tlsConfig, final DiscoveryNode node) {
+            this.tlsConfig = tlsConfig;
+            this.node = node;
+        }
 
         @Override
         protected void initChannel(Channel ch) throws Exception {
             addClosedExceptionLogger(ch);
             assert ch instanceof Netty4NioSocketChannel;
             NetUtils.tryEnsureReasonableKeepAliveConfig(((Netty4NioSocketChannel) ch).javaChannel());
+
+            if (tlsConfig.isTLSEnabled()) {
+                ch.pipeline().addFirst(new ClientSslHandlerInitializer(tlsConfig, node));
+            }
             setupPipeline(ch);
         }
 
@@ -329,9 +418,44 @@ public class Netty4Transport extends TcpTransport {
         }
     }
 
+    private static class ClientSslHandlerInitializer extends ChannelOutboundHandlerAdapter {
+
+        private final TLSConfig tlsConfig;
+        private final SNIServerName serverName;
+
+        private ClientSslHandlerInitializer(TLSConfig tlsConfig, DiscoveryNode node) {
+            assert tlsConfig.isTLSEnabled();
+            this.tlsConfig = tlsConfig;
+            final String configuredServerName = node.getAttributes().get("server_name");
+            if (configuredServerName != null) {
+                try {
+                    serverName = new SNIHostName(configuredServerName);
+                } catch (IllegalArgumentException e) {
+                    throw new ConnectTransportException(node, "invalid DiscoveryNode server_name [" + configuredServerName + "]", e);
+                }
+            } else {
+                serverName = null;
+            }
+        }
+
+        @Override
+        public void connect(ChannelHandlerContext ctx, SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise)
+            throws Exception {
+            final SSLEngine sslEngine = tlsConfig.createClientSSLEngine((InetSocketAddress) remoteAddress);
+            if (serverName != null) {
+                SSLParameters sslParameters = sslEngine.getSSLParameters();
+                sslParameters.setServerNames(Collections.singletonList(serverName));
+                sslEngine.setSSLParameters(sslParameters);
+            }
+            ctx.pipeline().replace(this, "ssl", new SslHandler(sslEngine));
+            super.connect(ctx, remoteAddress, localAddress, promise);
+        }
+    }
+
     protected class ServerChannelInitializer extends ChannelInitializer<Channel> {
 
         protected final String name;
+        private final TLSConfig tlsConfig = TLSConfig.noTLS();
 
         protected ServerChannelInitializer(String name) {
             this.name = name;
@@ -344,6 +468,12 @@ public class Netty4Transport extends TcpTransport {
             NetUtils.tryEnsureReasonableKeepAliveConfig(((Netty4NioSocketChannel) ch).javaChannel());
             Netty4TcpChannel nettyTcpChannel = new Netty4TcpChannel(ch, true, name, rstOnClose, ch.newSucceededFuture());
             ch.attr(CHANNEL_KEY).set(nettyTcpChannel);
+            if (acceptChannelPredicate != null) {
+                ch.pipeline().addLast("accept_channel_handler", new AcceptChannelHandler(acceptChannelPredicate, name));
+            }
+            if (tlsConfig.isTLSEnabled()) {
+                ch.pipeline().addLast("sslhandler", new SslHandler(tlsConfig.createServerSSLEngine()));
+            }
             setupPipeline(ch);
             serverAcceptedChannel(nettyTcpChannel);
         }

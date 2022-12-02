@@ -270,7 +270,7 @@ public class Netty4HttpServerTransport extends AbstractHttpServerTransport {
 
             bindServer();
             if (acceptChannelPredicate != null) {
-                acceptChannelPredicate.setBoundAddress(boundAddress());
+                acceptChannelPredicate.setHttpBoundAddress(boundAddress());
             }
             success = true;
         } finally {

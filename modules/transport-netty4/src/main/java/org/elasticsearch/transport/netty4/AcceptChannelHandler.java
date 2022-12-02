@@ -15,6 +15,7 @@ import io.netty.handler.ipfilter.AbstractRemoteAddressFilter;
 import org.elasticsearch.common.transport.BoundTransportAddress;
 
 import java.net.InetSocketAddress;
+import java.util.Map;
 import java.util.function.BiPredicate;
 
 @ChannelHandler.Sharable
@@ -35,6 +36,8 @@ public class AcceptChannelHandler extends AbstractRemoteAddressFilter<InetSocket
 
     public interface AcceptPredicate extends BiPredicate<String, InetSocketAddress> {
 
-        void setBoundAddress(BoundTransportAddress boundHttpTransportAddress);
+        void setHttpBoundAddress(BoundTransportAddress boundHttpTransportAddress);
+
+        void setBoundTransportAddress(BoundTransportAddress boundTransportAddress, Map<String, BoundTransportAddress> profileBoundAddress);
     }
 }
