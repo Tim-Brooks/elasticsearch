@@ -530,6 +530,7 @@ public class AllocationService {
         while (primaryIterator.hasNext()) {
             final ShardRouting shardRouting = primaryIterator.next();
             if (shardRouting.primary()) {
+                System.err.println("ALLOCATE PRIMARY");
                 getAllocatorForShard(shardRouting, allocation).allocateUnassigned(shardRouting, allocation, primaryIterator);
             }
         }
@@ -581,6 +582,7 @@ public class AllocationService {
                     Collections.emptySet(),
                     shardRouting.currentNodeId()
                 );
+                System.err.println(unassignedInfo);
                 allocation.routingNodes().failShard(logger, shardRouting, unassignedInfo, indexMetadata, allocation.changes());
             }
             // its a dead node, remove it, note, its important to remove it *after* we apply failed shard

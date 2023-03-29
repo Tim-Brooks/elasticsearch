@@ -136,6 +136,7 @@ public class SearchableSnapshotAllocator implements ExistingShardsAllocator {
         RoutingAllocation allocation,
         UnassignedAllocationHandler unassignedAllocationHandler
     ) {
+        System.err.println("SEARCHABLE SNAPSHOT");
         // TODO: cancel and jump to better available allocations?
         if (shardRouting.primary()) {
             final String recoveryUuid = getRecoverySourceRestoreUuid(shardRouting, allocation);
@@ -197,6 +198,7 @@ public class SearchableSnapshotAllocator implements ExistingShardsAllocator {
         final AllocateUnassignedDecision allocateUnassignedDecision = decideAllocation(allocation, shardRouting);
 
         if (allocateUnassignedDecision.isDecisionTaken()) {
+            System.err.println("ALLOCATE SEARCH: " + allocateUnassignedDecision.getAllocationDecision());
             if (allocateUnassignedDecision.getAllocationDecision() == AllocationDecision.YES) {
                 unassignedAllocationHandler.initialize(
                     allocateUnassignedDecision.getTargetNode().getId(),

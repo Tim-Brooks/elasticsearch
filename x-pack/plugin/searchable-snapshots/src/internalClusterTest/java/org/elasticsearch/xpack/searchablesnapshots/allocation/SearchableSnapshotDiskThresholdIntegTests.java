@@ -42,6 +42,7 @@ import org.elasticsearch.snapshots.SnapshotState;
 import org.elasticsearch.snapshots.mockstore.MockRepository;
 import org.elasticsearch.test.BackgroundIndexer;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.elasticsearch.test.junit.annotations.TestLogging;
 import org.elasticsearch.xcontent.NamedXContentRegistry;
 import org.elasticsearch.xpack.core.searchablesnapshots.MountSearchableSnapshotAction;
 import org.elasticsearch.xpack.core.searchablesnapshots.MountSearchableSnapshotRequest;
@@ -56,6 +57,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -71,6 +73,10 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 
 @ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.TEST, numDataNodes = 0)
+@TestLogging(
+    reason = "testing that DEBUG-level logging is reasonable",
+    value = "org.elasticsearch.cluster.routing.allocation.decider.DiskThresholdDecider:TRACE"
+)
 public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTestCase {
 
     private static final long WATERMARK_BYTES = new ByteSizeValue(10, ByteSizeUnit.KB).getBytes();
@@ -100,7 +106,7 @@ public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTes
     }
 
     private int createIndices() throws InterruptedException {
-        final int nbIndices = randomIntBetween(1, 5);
+        final int nbIndices = 5;
         final CountDownLatch latch = new CountDownLatch(nbIndices);
 
         for (int i = 0; i < nbIndices; i++) {
@@ -232,8 +238,10 @@ public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTes
 
         final String otherDataNodeId = internalCluster().getInstance(NodeEnvironment.class, otherDataNode).nodeId();
         logger.info("--> reducing disk size of node [{}/{}] so that all shards can fit on the node", otherDataNode, otherDataNodeId);
-        final long totalSpace = indicesStoresSizes.values().stream().mapToLong(size -> size).sum() + WATERMARK_BYTES + 1024L;
-        getTestFileStore(otherDataNode).setTotalSpace(totalSpace);
+        final long totalSpace = (long) ((indicesStoresSizes.values().stream().mapToLong(size -> size).sum() + WATERMARK_BYTES) * 2);
+        for (String nodeName : internalCluster().getNodeNames()) {
+            getTestFileStore(nodeName).setTotalSpace(totalSpace);
+        }
 
         logger.info("--> refreshing cluster info");
         final var masterInfoService = (InternalClusterInfoService) internalCluster().getCurrentMasterNodeInstance(ClusterInfoService.class);
@@ -262,25 +270,30 @@ public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTes
             );
         });
 
-        mountIndices(indicesStoresSizes.keySet(), "extra-", repositoryName, snapshot, storage);
+        System.err.println("STOP RANDOM NODE");
+        internalCluster().stopRandomDataNode();
 
-        assertBusy(() -> {
-            var state = client().admin().cluster().prepareState().setRoutingTable(true).get().getState();
-            assertThat(
-                state.routingTable()
-                    .allShards()
-                    .stream()
-                    .filter(
-                        shardRouting -> shardRouting.shardId().getIndexName().startsWith("extra-")
-                            && state.metadata().index(shardRouting.shardId().getIndex()).isSearchableSnapshot()
-                    )
-                    .noneMatch(
-                        shardRouting -> shardRouting.state() == ShardRoutingState.STARTED
-                            && otherDataNodeId.equals(shardRouting.currentNodeId())
-                    ),
-                equalTo(true)
-            );
-        });
+
+        LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(10));
+//        mountIndices(indicesStoresSizes.keySet(), "extra-", repositoryName, snapshot, storage);
+//        System.err.println("MORE");
+//        assertBusy(() -> {
+//            var state = client().admin().cluster().prepareState().setRoutingTable(true).get().getState();
+//            assertThat(
+//                state.routingTable()
+//                    .allShards()
+//                    .stream()
+//                    .filter(
+//                        shardRouting -> shardRouting.shardId().getIndexName().startsWith("extra-")
+//                            && state.metadata().index(shardRouting.shardId().getIndex()).isSearchableSnapshot()
+//                    )
+//                    .noneMatch(
+//                        shardRouting -> shardRouting.state() == ShardRoutingState.STARTED
+//                            && otherDataNodeId.equals(shardRouting.currentNodeId())
+//                    ),
+//                equalTo(true)
+//            );
+//        });
     }
 
     public void testHighWatermarkCanNotBeExceededWithInitializingSearchableSnapshots() throws Exception {

@@ -53,7 +53,7 @@ public final class UnassignedInfo implements ToXContentFragment, Writeable {
 
     public static final Setting<TimeValue> INDEX_DELAYED_NODE_LEFT_TIMEOUT_SETTING = Setting.positiveTimeSetting(
         "index.unassigned.node_left.delayed_timeout",
-        TimeValue.timeValueMinutes(1),
+        TimeValue.timeValueSeconds(0),
         Property.Dynamic,
         Property.IndexScope
     );

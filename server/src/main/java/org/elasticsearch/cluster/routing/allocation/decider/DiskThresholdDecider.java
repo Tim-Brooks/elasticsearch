@@ -185,6 +185,7 @@ public class DiskThresholdDecider extends AllocationDecider {
     @Override
     public Decision canAllocate(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
         Map<String, DiskUsage> usages = allocation.clusterInfo().getNodeMostAvailableDiskUsages();
+        System.err.println("CAN ALLOCATE " + node.node().getName());
         final Decision decision = earlyTerminate(usages);
         if (decision != null) {
             return decision;
@@ -199,6 +200,7 @@ public class DiskThresholdDecider extends AllocationDecider {
         final DiskUsageWithRelocations usage = getDiskUsage(node, allocation, usages, false);
         // Cache the used disk percentage for displaying disk percentages consistent with documentation
         double usedDiskPercentage = usage.getUsedDiskAsPercentage();
+        System.err.println("USED PERCENT " + usedDiskPercentage);
         long freeBytes = usage.getFreeBytes();
         final ByteSizeValue total = ByteSizeValue.ofBytes(usage.getTotalBytes());
         if (freeBytes < 0L) {
@@ -328,6 +330,8 @@ public class DiskThresholdDecider extends AllocationDecider {
             );
         }
 
+        System.err.println("DECIDE YES");
+
         assert freeBytesAfterShard >= 0 : freeBytesAfterShard;
         return allocation.decision(
             Decision.YES,
@@ -342,6 +346,7 @@ public class DiskThresholdDecider extends AllocationDecider {
 
     @Override
     public Decision canForceAllocateDuringReplace(ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
+        System.err.println("CAN FORCE");
         Map<String, DiskUsage> usages = allocation.clusterInfo().getNodeMostAvailableDiskUsages();
         final Decision decision = earlyTerminate(usages);
         if (decision != null) {
@@ -378,6 +383,7 @@ public class DiskThresholdDecider extends AllocationDecider {
 
     @Override
     public Decision canRemain(IndexMetadata indexMetadata, ShardRouting shardRouting, RoutingNode node, RoutingAllocation allocation) {
+//        System.err.println("CAN REMAIN " + node.node().getName());
         if (shardRouting.currentNodeId().equals(node.nodeId()) == false) {
             throw new IllegalArgumentException("Shard [" + shardRouting + "] is not allocated on node: [" + node.nodeId() + "]");
         }
@@ -485,6 +491,7 @@ public class DiskThresholdDecider extends AllocationDecider {
             );
         }
 
+        System.err.println("Unaccounted: " + allocation.unaccountedSearchableSnapshotSize(node));
         final DiskUsageWithRelocations diskUsageWithRelocations = new DiskUsageWithRelocations(
             usage,
             sizeOfUnaccountedShards(

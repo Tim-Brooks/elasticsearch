@@ -48,11 +48,13 @@ public abstract class BaseGatewayShardAllocator {
         ExistingShardsAllocator.UnassignedAllocationHandler unassignedAllocationHandler
     ) {
         final AllocateUnassignedDecision allocateUnassignedDecision = makeAllocationDecision(shardRouting, allocation, logger);
+        System.err.println("FUCK " + allocateUnassignedDecision.isDecisionTaken());
 
         if (allocateUnassignedDecision.isDecisionTaken() == false) {
             // no decision was taken by this allocator
             return;
         }
+        System.err.println("FUCK2 " + allocateUnassignedDecision.getAllocationDecision());
 
         if (allocateUnassignedDecision.getAllocationDecision() == AllocationDecision.YES) {
             unassignedAllocationHandler.initialize(
