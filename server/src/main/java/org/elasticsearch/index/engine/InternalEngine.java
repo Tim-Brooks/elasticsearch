@@ -601,7 +601,7 @@ public class InternalEngine extends Engine {
     private AsyncIOProcessor<Translog.Location> createTranslogSyncProcessor(Logger logger, ThreadContext threadContext) {
         return new AsyncIOProcessor<>(logger, 1024, threadContext) {
             @Override
-            protected void write(List<Tuple<Translog.Location, Consumer<Exception>>> candidates) throws IOException {
+            protected void write(List<Tuple<Translog.Location, ActionListener<Void>>> candidates) throws IOException {
                 try {
                     final boolean synced = translog.ensureSynced(candidates.stream().map(Tuple::v1));
                     if (synced) {

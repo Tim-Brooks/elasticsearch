@@ -68,7 +68,7 @@ public abstract class MultiChunkTransfer<Source, Request extends MultiChunkTrans
         this.listener = listener;
         this.processor = new AsyncIOProcessor<>(logger, maxConcurrentChunks, threadContext) {
             @Override
-            protected void write(List<Tuple<FileChunkResponseItem<Source>, Consumer<Exception>>> items) {
+            protected void write(List<Tuple<FileChunkResponseItem<Source>, ActionListener<Void>>> items) {
                 handleItems(items);
             }
         };
@@ -80,10 +80,19 @@ public abstract class MultiChunkTransfer<Source, Request extends MultiChunkTrans
     }
 
     private void addItem(long requestSeqId, Source resource, Exception failure) {
-        processor.put(new FileChunkResponseItem<>(requestSeqId, resource, failure), e -> { assert e == null : e; });
+        processor.put(new FileChunkResponseItem<>(requestSeqId, resource, failure), new ActionListener<>() {
+            @Override
+            public void onResponse(Void unused) {
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                assert false : e;
+            }
+        });
     }
 
-    private void handleItems(List<Tuple<FileChunkResponseItem<Source>, Consumer<Exception>>> items) {
+    private void handleItems(List<Tuple<FileChunkResponseItem<Source>, ActionListener<Void>>> items) {
         if (status != Status.PROCESSING) {
             assert status == Status.FAILED : "must not receive any response after the transfer was completed";
             // These exceptions will be ignored as we record only the first failure, log them for debugging purpose.
@@ -93,7 +102,7 @@ public abstract class MultiChunkTransfer<Source, Request extends MultiChunkTrans
             return;
         }
         try {
-            for (Tuple<FileChunkResponseItem<Source>, Consumer<Exception>> item : items) {
+            for (Tuple<FileChunkResponseItem<Source>, ActionListener<Void>> item : items) {
                 final FileChunkResponseItem<Source> resp = item.v1();
                 if (resp.requestSeqId == UNASSIGNED_SEQ_NO) {
                     continue; // not an actual item

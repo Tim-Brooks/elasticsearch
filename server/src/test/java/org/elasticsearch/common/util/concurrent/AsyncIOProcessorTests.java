@@ -7,6 +7,7 @@
  */
 package org.elasticsearch.common.util.concurrent;
 
+import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.Tuple;
 import org.elasticsearch.test.ESTestCase;
@@ -22,7 +23,6 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 import java.util.stream.IntStream;
 
 public class AsyncIOProcessorTests extends ESTestCase {
@@ -39,7 +39,7 @@ public class AsyncIOProcessorTests extends ESTestCase {
         AtomicInteger received = new AtomicInteger(0);
         AsyncIOProcessor<Object> processor = new AsyncIOProcessor<Object>(logger, scaledRandomIntBetween(1, 2024), threadContext) {
             @Override
-            protected void write(List<Tuple<Object, Consumer<Exception>>> candidates) throws IOException {
+            protected void write(List<Tuple<Object, ActionListener<Void>>> candidates) throws IOException {
                 if (blockInternal) {
                     synchronized (this) {
                         // TODO: check why we need a loop, can't we just use received.addAndGet(candidates.size())
@@ -65,7 +65,7 @@ public class AsyncIOProcessorTests extends ESTestCase {
                         latch.await();
                         for (int i = 0; i < count; i++) {
                             semaphore.acquire();
-                            processor.put(new Object(), (ex) -> semaphore.release());
+                            processor.put(new Object(), ActionListener.releaseAfter(ActionListener.noop(), semaphore::release));
                         }
                     } catch (Exception ex) {
                         throw new RuntimeException(ex);
@@ -88,7 +88,7 @@ public class AsyncIOProcessorTests extends ESTestCase {
         AtomicInteger actualFailed = new AtomicInteger(0);
         AsyncIOProcessor<Object> processor = new AsyncIOProcessor<Object>(logger, scaledRandomIntBetween(1, 2024), threadContext) {
             @Override
-            protected void write(List<Tuple<Object, Consumer<Exception>>> candidates) throws IOException {
+            protected void write(List<Tuple<Object, ActionListener<Void>>> candidates) throws IOException {
                 received.addAndGet(candidates.size());
                 if (randomBoolean()) {
                     failed.addAndGet(candidates.size());
@@ -142,7 +142,7 @@ public class AsyncIOProcessorTests extends ESTestCase {
 
         AsyncIOProcessor<Object> processor = new AsyncIOProcessor<Object>(logger, scaledRandomIntBetween(1, 2024), threadContext) {
             @Override
-            protected void write(List<Tuple<Object, Consumer<Exception>>> candidates) throws IOException {
+            protected void write(List<Tuple<Object, ActionListener<Void>>> candidates) throws IOException {
                 received.addAndGet(candidates.size());
             }
         };
@@ -161,7 +161,7 @@ public class AsyncIOProcessorTests extends ESTestCase {
     public void testNullArguments() {
         AsyncIOProcessor<Object> processor = new AsyncIOProcessor<Object>(logger, scaledRandomIntBetween(1, 2024), threadContext) {
             @Override
-            protected void write(List<Tuple<Object, Consumer<Exception>>> candidates) throws IOException {}
+            protected void write(List<Tuple<Object, ActionListener<Void>>> candidates) throws IOException {}
         };
 
         expectThrows(NullPointerException.class, () -> processor.put(null, (e) -> {}));
@@ -182,7 +182,7 @@ public class AsyncIOProcessorTests extends ESTestCase {
             threadContext
         ) {
             @Override
-            protected void write(List<Tuple<Object, Consumer<Exception>>> candidates) throws IOException {
+            protected void write(List<Tuple<Object, ActionListener<Void>>> candidates) throws IOException {
                 try {
                     assertTrue(writeDelay.await(10, TimeUnit.SECONDS));
                 } catch (InterruptedException e) {
@@ -232,7 +232,7 @@ public class AsyncIOProcessorTests extends ESTestCase {
 
         AsyncIOProcessor<Object> processor = new AsyncIOProcessor<Object>(logger, scaledRandomIntBetween(1, 2024), threadContext) {
             @Override
-            protected void write(List<Tuple<Object, Consumer<Exception>>> candidates) throws IOException {
+            protected void write(List<Tuple<Object, ActionListener<Void>>> candidates) throws IOException {
                 received.addAndGet(candidates.size());
             }
         };
