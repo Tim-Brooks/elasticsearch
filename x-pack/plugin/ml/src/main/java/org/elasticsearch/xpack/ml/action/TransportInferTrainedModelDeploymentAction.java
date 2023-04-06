@@ -23,6 +23,11 @@ import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.xpack.core.ml.action.InferTrainedModelDeploymentAction;
 import org.elasticsearch.xpack.core.ml.inference.results.InferenceResults;
+<<<<<<< HEAD
+=======
+import org.elasticsearch.xpack.core.ml.utils.ExceptionsHelper;
+import org.elasticsearch.xpack.ml.inference.deployment.NlpInferenceInput;
+>>>>>>> upstream/main
 import org.elasticsearch.xpack.ml.inference.deployment.TrainedModelDeploymentTask;
 
 import java.util.ArrayList;
@@ -61,9 +66,9 @@ public class TransportInferTrainedModelDeploymentAction extends TransportTasksAc
         List<FailedNodeException> failedNodeExceptions
     ) {
         if (taskOperationFailures.isEmpty() == false) {
-            throw org.elasticsearch.ExceptionsHelper.convertToElastic(taskOperationFailures.get(0).getCause());
+            throw ExceptionsHelper.taskOperationFailureToStatusException(taskOperationFailures.get(0));
         } else if (failedNodeExceptions.isEmpty() == false) {
-            throw org.elasticsearch.ExceptionsHelper.convertToElastic(failedNodeExceptions.get(0));
+            throw failedNodeExceptions.get(0);
         } else if (tasks.isEmpty()) {
             throw new ElasticsearchStatusException(
                 "Unable to find deployment task for model [{}] please stop and start the deployment or try again momentarily",
@@ -85,6 +90,7 @@ public class TransportInferTrainedModelDeploymentAction extends TransportTasksAc
     ) {
         assert actionTask instanceof CancellableTask : "task [" + actionTask + "] not cancellable";
 
+<<<<<<< HEAD
         // Multiple documents to infer on, wait for all results
         ActionListener<Collection<InferenceResults>> collectingListener = ActionListener.wrap(
             pyTorchResults -> { listener.onResponse(new InferTrainedModelDeploymentAction.Response(new ArrayList<>(pyTorchResults))); },
@@ -94,6 +100,27 @@ public class TransportInferTrainedModelDeploymentAction extends TransportTasksAc
         GroupedActionListener<InferenceResults> groupedListener = new GroupedActionListener<>(collectingListener, request.getDocs().size());
         for (var doc : request.getDocs()) {
             task.infer(doc, request.getUpdate(), request.isSkipQueue(), request.getInferenceTimeout(), actionTask, groupedListener);
+=======
+        var nlpInputs = new ArrayList<NlpInferenceInput>();
+        if (request.getTextInput() != null) {
+            for (var text : request.getTextInput()) {
+                nlpInputs.add(NlpInferenceInput.fromText(text));
+            }
+        } else {
+            for (var doc : request.getDocs()) {
+                nlpInputs.add(NlpInferenceInput.fromDoc(doc));
+            }
+        }
+
+        // Multiple documents to infer on, wait for all results
+        ActionListener<Collection<InferenceResults>> collectingListener = ActionListener.wrap(pyTorchResults -> {
+            listener.onResponse(new InferTrainedModelDeploymentAction.Response(new ArrayList<>(pyTorchResults)));
+        }, listener::onFailure);
+
+        GroupedActionListener<InferenceResults> groupedListener = new GroupedActionListener<>(nlpInputs.size(), collectingListener);
+        for (var input : nlpInputs) {
+            task.infer(input, request.getUpdate(), request.isHighPriority(), request.getInferenceTimeout(), actionTask, groupedListener);
+>>>>>>> upstream/main
         }
     }
 }

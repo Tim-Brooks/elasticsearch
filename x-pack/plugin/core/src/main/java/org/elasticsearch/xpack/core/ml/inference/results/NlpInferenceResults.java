@@ -34,6 +34,10 @@ abstract class NlpInferenceResults implements InferenceResults {
 
     abstract void addMapFields(Map<String, Object> map);
 
+    public boolean isTruncated() {
+        return isTruncated;
+    }
+
     @Override
     public final void writeTo(StreamOutput out) throws IOException {
         out.writeBoolean(isTruncated);

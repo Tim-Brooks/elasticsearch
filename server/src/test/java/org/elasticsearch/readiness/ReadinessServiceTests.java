@@ -239,7 +239,11 @@ public class ReadinessServiceTests extends ESTestCase implements ReadinessClient
             .build();
         ClusterChangedEvent event = new ClusterChangedEvent("test", newState, previousState);
         readinessService.clusterChanged(event);
+<<<<<<< HEAD
         readinessService.settingsChanged();
+=======
+        readinessService.watchedFileChanged();
+>>>>>>> upstream/main
 
         // sending a cluster state with active master should bring up the service
         assertTrue(readinessService.ready());

@@ -11,10 +11,18 @@ package org.elasticsearch.test.cluster.local;
 import org.elasticsearch.test.cluster.EnvironmentProvider;
 import org.elasticsearch.test.cluster.FeatureFlag;
 import org.elasticsearch.test.cluster.SettingsProvider;
+<<<<<<< HEAD
+=======
+import org.elasticsearch.test.cluster.local.LocalClusterSpec.LocalNodeSpec;
+>>>>>>> upstream/main
 import org.elasticsearch.test.cluster.local.distribution.DistributionType;
 import org.elasticsearch.test.cluster.util.Version;
 import org.elasticsearch.test.cluster.util.resource.Resource;
 
+<<<<<<< HEAD
+=======
+import java.util.function.Predicate;
+>>>>>>> upstream/main
 import java.util.function.Supplier;
 
 interface LocalSpecBuilder<T extends LocalSpecBuilder<?>> {
@@ -34,6 +42,14 @@ interface LocalSpecBuilder<T extends LocalSpecBuilder<?>> {
     T setting(String setting, Supplier<String> value);
 
     /**
+<<<<<<< HEAD
+=======
+     * Add a new node setting computed by the given supplier when the given predicate evaluates to {@code true}.
+     */
+    T setting(String setting, Supplier<String> value, Predicate<LocalNodeSpec> predicate);
+
+    /**
+>>>>>>> upstream/main
      * Register a {@link EnvironmentProvider}.
      */
     T environment(EnvironmentProvider environmentProvider);
@@ -75,6 +91,19 @@ interface LocalSpecBuilder<T extends LocalSpecBuilder<?>> {
     T keystore(String key, Resource file);
 
     /**
+<<<<<<< HEAD
+=======
+     * Add a secure setting computed by the given supplier.
+     */
+    T keystore(String key, Supplier<String> supplier);
+
+    /**
+     * Add a secure setting computed by the given supplier when the given predicate evaluates to {@code true}.
+     */
+    T keystore(String key, Supplier<String> supplier, Predicate<LocalNodeSpec> predicate);
+
+    /**
+>>>>>>> upstream/main
      * Sets the security setting keystore password.
      */
     T keystorePassword(String password);
@@ -85,6 +114,15 @@ interface LocalSpecBuilder<T extends LocalSpecBuilder<?>> {
     T configFile(String fileName, Resource configFile);
 
     /**
+<<<<<<< HEAD
+=======
+     * Adds a secret to the local secure settings file. This should be used instead of {@link #keystore(String, String)} when file-based
+     * secure settings are enabled.
+     */
+    T secret(String key, String value);
+
+    /**
+>>>>>>> upstream/main
      * Sets the version of Elasticsearch. Defaults to {@link Version#CURRENT}.
      */
     T version(Version version);

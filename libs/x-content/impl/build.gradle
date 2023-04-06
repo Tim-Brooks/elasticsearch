@@ -10,7 +10,11 @@ apply plugin: 'elasticsearch.java'
 
 archivesBaseName = "x-content-impl"
 
+<<<<<<< HEAD
 String jacksonVersion = "2.14.1"
+=======
+String jacksonVersion = "2.14.2"
+>>>>>>> upstream/main
 
 dependencies {
   compileOnly project(':libs:elasticsearch-core')

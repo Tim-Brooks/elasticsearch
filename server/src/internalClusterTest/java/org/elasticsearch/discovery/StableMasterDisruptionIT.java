@@ -135,7 +135,8 @@ public class StableMasterDisruptionIT extends ESIntegTestCase {
 
     private void assertMasterStability(Client client, HealthStatus expectedStatus, Matcher<String> expectedMatcher) throws Exception {
         assertBusy(() -> {
-            GetHealthAction.Response healthResponse = client.execute(GetHealthAction.INSTANCE, new GetHealthAction.Request(true)).get();
+            GetHealthAction.Response healthResponse = client.execute(GetHealthAction.INSTANCE, new GetHealthAction.Request(true, 1000))
+                .get();
             String debugInformation = xContentToString(healthResponse);
             assertThat(debugInformation, healthResponse.findIndicator("master_is_stable").status(), equalTo(expectedStatus));
             assertThat(debugInformation, healthResponse.findIndicator("master_is_stable").symptom(), expectedMatcher);
@@ -144,7 +145,7 @@ public class StableMasterDisruptionIT extends ESIntegTestCase {
 
     private String xContentToString(ChunkedToXContent xContent) throws IOException {
         XContentBuilder builder = JsonXContent.contentBuilder();
-        xContent.toXContentChunked().forEachRemaining(xcontent -> {
+        xContent.toXContentChunked(ToXContent.EMPTY_PARAMS).forEachRemaining(xcontent -> {
             try {
                 xcontent.toXContent(builder, ToXContent.EMPTY_PARAMS);
             } catch (IOException e) {
@@ -225,6 +226,7 @@ public class StableMasterDisruptionIT extends ESIntegTestCase {
      * following another elected master node. These nodes should reject this cluster state and prevent them from following the stale master.
      */
     public void testStaleMasterNotHijackingMajority() throws Exception {
+        assumeFalse("jdk20 removed thread suspend/resume", Runtime.version().feature() >= 20);
         final List<String> nodes = internalCluster().startNodes(
             3,
             Settings.builder()
@@ -332,6 +334,7 @@ public class StableMasterDisruptionIT extends ESIntegTestCase {
      * @throws Exception
      */
     public void testRepeatedMasterChanges(String expectedMasterStabilitySymptomSubstring) throws Exception {
+        assumeFalse("jdk20 removed thread suspend/resume", Runtime.version().feature() >= 20);
         final List<String> nodes = internalCluster().startNodes(
             3,
             Settings.builder()
@@ -421,6 +424,7 @@ public class StableMasterDisruptionIT extends ESIntegTestCase {
     }
 
     public void testRepeatedNullMasterRecognizedAsGreenIfMasterDoesNotKnowItIsUnstable() throws Exception {
+        assumeFalse("jdk20 removed thread suspend/resume", Runtime.version().feature() >= 20);
         /*
          * In this test we have a single master-eligible node. We pause it repeatedly (simulating a long GC pause for example) so that
          * other nodes decide it is no longer the master. However since there is no other master-eligible node, another node is never

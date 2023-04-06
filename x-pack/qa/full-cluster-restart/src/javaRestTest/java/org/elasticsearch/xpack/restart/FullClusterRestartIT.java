@@ -44,7 +44,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -209,6 +208,7 @@ public class FullClusterRestartIT extends AbstractXpackFullClusterRestartTestCas
     }
 
     @SuppressWarnings("unchecked")
+    @AwaitsFix(bugUrl = "https://github.com/elastic/elasticsearch/issues/84700")
     public void testWatcherWithApiKey() throws Exception {
         final Request getWatchStatusRequest = new Request("GET", "/_watcher/watch/watch_with_api_key");
 
@@ -434,7 +434,7 @@ public class FullClusterRestartIT extends AbstractXpackFullClusterRestartTestCas
             final StringBuilder bulk = new StringBuilder();
             for (int i = 0; i < numDocs; i++) {
                 bulk.append("{\"index\":{\"_index\":\"rollup-docs\"}}\n");
-                String date = String.format(Locale.ROOT, "%04d-01-01T00:%02d:00Z", year, i);
+                String date = Strings.format("%04d-01-01T00:%02d:00Z", year, i);
                 bulk.append("{\"timestamp\":\"").append(date).append("\",\"value\":").append(i).append("}\n");
             }
             bulk.append("\r\n");
@@ -453,7 +453,7 @@ public class FullClusterRestartIT extends AbstractXpackFullClusterRestartTestCas
                 intervalType = "interval";
             }
 
-            createRollupJobRequest.setJsonEntity(formatted("""
+            createRollupJobRequest.setJsonEntity(Strings.format("""
                 {
                   "index_pattern": "rollup-*",
                   "rollup_index": "results-rollup",
@@ -798,7 +798,7 @@ public class FullClusterRestartIT extends AbstractXpackFullClusterRestartTestCas
     private void createUser(final boolean oldCluster) throws Exception {
         final String id = oldCluster ? "preupgrade_user" : "postupgrade_user";
         Request request = new Request("PUT", "/_security/user/" + id);
-        request.setJsonEntity(formatted("""
+        request.setJsonEntity(Strings.format("""
             {
                "password" : "l0ng-r4nd0m-p@ssw0rd",
                "roles" : [ "admin", "other_role1" ],
@@ -973,7 +973,7 @@ public class FullClusterRestartIT extends AbstractXpackFullClusterRestartTestCas
     }
 
     private static void createComposableTemplate(RestClient client, String templateName, String indexPattern) throws IOException {
-        StringEntity templateJSON = new StringEntity(formatted("""
+        StringEntity templateJSON = new StringEntity(Strings.format("""
             {
               "index_patterns": "%s",
               "data_stream": {}

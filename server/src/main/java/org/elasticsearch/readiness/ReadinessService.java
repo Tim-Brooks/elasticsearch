@@ -20,7 +20,11 @@ import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.transport.BoundTransportAddress;
 import org.elasticsearch.common.transport.TransportAddress;
 import org.elasticsearch.env.Environment;
+<<<<<<< HEAD
 import org.elasticsearch.reservedstate.service.FileSettingsChangedListener;
+=======
+import org.elasticsearch.reservedstate.service.FileChangedListener;
+>>>>>>> upstream/main
 import org.elasticsearch.shutdown.PluginShutdownService;
 import org.elasticsearch.transport.BindTransportException;
 
@@ -37,7 +41,11 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
+<<<<<<< HEAD
 public class ReadinessService extends AbstractLifecycleComponent implements ClusterStateListener, FileSettingsChangedListener {
+=======
+public class ReadinessService extends AbstractLifecycleComponent implements ClusterStateListener, FileChangedListener {
+>>>>>>> upstream/main
     private static final Logger logger = LogManager.getLogger(ReadinessService.class);
 
     private final Environment environment;
@@ -106,18 +114,26 @@ public class ReadinessService extends AbstractLifecycleComponent implements Clus
 
     // package private for testing
     ServerSocketChannel setupSocket() {
-        InetAddress localhost = InetAddress.getLoopbackAddress();
-        int portNumber = PORT.get(environment.settings());
+        var settings = environment.settings();
+        int portNumber = PORT.get(settings);
         assert portNumber >= 0;
+
+        var socketAddress = AccessController.doPrivileged((PrivilegedAction<InetSocketAddress>) () -> {
+            try {
+                return socketAddress(InetAddress.getByName("0"), portNumber);
+            } catch (IOException e) {
+                throw new IllegalArgumentException("Failed to resolve readiness host address", e);
+            }
+        });
 
         try {
             serverChannel = ServerSocketChannel.open();
 
             AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
                 try {
-                    serverChannel.bind(socketAddress(localhost, portNumber));
+                    serverChannel.bind(socketAddress);
                 } catch (IOException e) {
-                    throw new BindTransportException("Failed to bind to " + NetworkAddress.format(localhost, portNumber), e);
+                    throw new BindTransportException("Failed to bind to " + NetworkAddress.format(socketAddress), e);
                 }
                 return null;
             });
@@ -133,7 +149,7 @@ public class ReadinessService extends AbstractLifecycleComponent implements Clus
                 }
             }
         } catch (Exception e) {
-            throw new BindTransportException("Failed to open socket channel " + NetworkAddress.format(localhost, portNumber), e);
+            throw new BindTransportException("Failed to open socket channel " + NetworkAddress.format(socketAddress), e);
         }
 
         return serverChannel;
@@ -186,6 +202,13 @@ public class ReadinessService extends AbstractLifecycleComponent implements Clus
     // package private for testing
     synchronized void stopListener() {
         assert enabled(environment);
+
+        // Avoid unnecessary logging if stop is repeatedly called.
+        // This can happen because we call stop listener on cluster state updates.
+        if (ready() == false) {
+            return;
+        }
+
         try {
             logger.info(
                 "stopping readiness service on channel {}",
@@ -238,12 +261,21 @@ public class ReadinessService extends AbstractLifecycleComponent implements Clus
      * Add a listener for bound readiness service address.
      * @param listener
      */
-    public void addBoundAddressListener(BoundAddressListener listener) {
+    public synchronized void addBoundAddressListener(BoundAddressListener listener) {
+        // this expects that setupSocket is called within a synchronized method
+        var b = boundAddress();
+        if (b != null) {
+            listener.addressBound(b);
+        }
         boundAddressListeners.add(listener);
     }
 
     @Override
+<<<<<<< HEAD
     public void settingsChanged() {
+=======
+    public void watchedFileChanged() {
+>>>>>>> upstream/main
         fileSettingsApplied = true;
         setReady(masterElected && (shuttingDown == false));
     }

@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.searchablesnapshots.allocation;
 
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.blobcache.shared.SharedBlobCacheService;
 import org.elasticsearch.cluster.ClusterInfoService;
 import org.elasticsearch.cluster.ClusterInfoServiceUtils;
 import org.elasticsearch.cluster.DiskUsageIntegTestCase;
@@ -48,7 +49,6 @@ import org.elasticsearch.xpack.core.searchablesnapshots.MountSearchableSnapshotA
 import org.elasticsearch.xpack.core.searchablesnapshots.MountSearchableSnapshotRequest;
 import org.elasticsearch.xpack.core.searchablesnapshots.MountSearchableSnapshotRequest.Storage;
 import org.elasticsearch.xpack.searchablesnapshots.LocalStateSearchableSnapshots;
-import org.elasticsearch.xpack.searchablesnapshots.cache.shared.FrozenCacheService;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -64,7 +64,7 @@ import java.util.stream.Stream;
 import static org.elasticsearch.cluster.node.DiscoveryNodeRole.DATA_HOT_NODE_ROLE;
 import static org.elasticsearch.index.IndexSettings.INDEX_SOFT_DELETES_SETTING;
 import static org.elasticsearch.index.store.Store.INDEX_STORE_STATS_REFRESH_INTERVAL_SETTING;
-import static org.elasticsearch.license.LicenseService.SELF_GENERATED_LICENSE_TYPE;
+import static org.elasticsearch.license.LicenseSettings.SELF_GENERATED_LICENSE_TYPE;
 import static org.elasticsearch.test.NodeRoles.onlyRole;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertNoFailures;
@@ -229,7 +229,7 @@ public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTes
         } else {
             otherDataNodeSettings.put(NodeRoleSettings.NODE_ROLES_SETTING.getKey(), DiscoveryNodeRole.DATA_FROZEN_NODE_ROLE.roleName())
                 .put(
-                    FrozenCacheService.SHARED_CACHE_SIZE_SETTING.getKey(),
+                    SharedBlobCacheService.SHARED_CACHE_SIZE_SETTING.getKey(),
                     ByteSizeValue.ofBytes(Math.min(indicesStoresSizes.values().stream().mapToLong(value -> value).sum(), 5 * 1024L * 1024L))
                 );
         }
@@ -260,7 +260,6 @@ public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTes
             assertThat(
                 state.routingTable()
                     .allShards()
-                    .stream()
                     .filter(shardRouting -> state.metadata().index(shardRouting.shardId().getIndex()).isSearchableSnapshot())
                     .allMatch(
                         shardRouting -> shardRouting.state() == ShardRoutingState.STARTED
@@ -273,6 +272,7 @@ public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTes
         System.err.println("STOP RANDOM NODE");
         internalCluster().stopRandomDataNode();
 
+<<<<<<< HEAD
 
         LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(10));
 //        mountIndices(indicesStoresSizes.keySet(), "extra-", repositoryName, snapshot, storage);
@@ -294,6 +294,24 @@ public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTes
 //                equalTo(true)
 //            );
 //        });
+=======
+        assertBusy(() -> {
+            var state = client().admin().cluster().prepareState().setRoutingTable(true).get().getState();
+            assertThat(
+                state.routingTable()
+                    .allShards()
+                    .filter(
+                        shardRouting -> shardRouting.shardId().getIndexName().startsWith("extra-")
+                            && state.metadata().index(shardRouting.shardId().getIndex()).isSearchableSnapshot()
+                    )
+                    .noneMatch(
+                        shardRouting -> shardRouting.state() == ShardRoutingState.STARTED
+                            && otherDataNodeId.equals(shardRouting.currentNodeId())
+                    ),
+                equalTo(true)
+            );
+        });
+>>>>>>> upstream/main
     }
 
     public void testHighWatermarkCanNotBeExceededWithInitializingSearchableSnapshots() throws Exception {
@@ -344,7 +362,6 @@ public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTes
             assertThat(
                 state.routingTable()
                     .allShards()
-                    .stream()
                     .filter(s -> indicesToBeMounted.containsKey(s.shardId().getIndexName().replace(prefix, "")))
                     .filter(s -> state.metadata().index(s.shardId().getIndex()).isSearchableSnapshot())
                     .filter(s -> coldNodeId.equals(s.currentNodeId()))
@@ -373,7 +390,6 @@ public class SearchableSnapshotDiskThresholdIntegTests extends DiskUsageIntegTes
             assertThat(
                 state.routingTable()
                     .allShards()
-                    .stream()
                     .filter(s -> indicesToBeMounted.containsKey(s.shardId().getIndexName().replace(prefix, "")))
                     .filter(s -> state.metadata().index(s.shardId().getIndex()).isSearchableSnapshot())
                     .filter(s -> coldNodeId.equals(s.currentNodeId()))

@@ -57,6 +57,19 @@ public class SpatialPluginTests extends ESTestCase {
                 fail("Unexpected exception: " + e.getMessage());
             }
         }, "geohex_grid", "geo_point");
+<<<<<<< HEAD
+=======
+    }
+
+    public void testGeoShapeHexLicenseCheck() {
+        checkLicenseRequired(GeoShapeValuesSourceType.instance(), GeoHexGridAggregationBuilder.REGISTRY_KEY, (agg) -> {
+            try {
+                agg.build(null, AggregatorFactories.EMPTY, null, 0, null, 0, 0, null, null, CardinalityUpperBound.NONE, null);
+            } catch (IOException e) {
+                fail("Unexpected exception: " + e.getMessage());
+            }
+        }, "geohex_grid", "geo_shape");
+>>>>>>> upstream/main
     }
 
     public void testGeoGridLicenseCheck() {
@@ -66,7 +79,11 @@ public class SpatialPluginTests extends ESTestCase {
         )) {
             checkLicenseRequired(GeoShapeValuesSourceType.instance(), registryKey, (agg) -> {
                 try {
+<<<<<<< HEAD
                     agg.build(null, null, null, 0, null, 0, 0, null, null, CardinalityUpperBound.NONE, null);
+=======
+                    agg.build(null, AggregatorFactories.EMPTY, null, 0, null, 0, 0, null, null, CardinalityUpperBound.NONE, null);
+>>>>>>> upstream/main
                 } catch (IOException e) {
                     fail("Unexpected exception: " + e.getMessage());
                 }

@@ -15,7 +15,6 @@ import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
-import org.elasticsearch.cluster.metadata.DataStream;
 import org.elasticsearch.cluster.metadata.Template;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.compress.CompressedXContent;
@@ -66,11 +65,6 @@ import static org.hamcrest.Matchers.startsWith;
 
 public class SnapshotLifecycleRestIT extends ESRestTestCase {
     private static final String NEVER_EXECUTE_CRON_SCHEDULE = "* * * 31 FEB ? *";
-
-    @Override
-    protected boolean waitForAllSnapshotsWiped() {
-        return true;
-    }
 
     // as we are testing the SLM history entries we'll preserve the "slm-history-ilm-policy" policy as it'll be associated with the
     // .slm-history-* indices and we won't be able to delete it when we wipe out the cluster
@@ -365,9 +359,7 @@ public class SnapshotLifecycleRestIT extends ESRestTestCase {
 
             assertBusy(() -> {
                 try {
-                    Map<String, List<Map<?, ?>>> snaps = wipeSnapshots();
-                    logger.info("--> checking for wiped snapshots: {}", snaps);
-                    assertThat(snaps.size(), equalTo(0));
+                    wipeSnapshots();
                 } catch (ResponseException e) {
                     logger.error("got exception wiping snapshots", e);
                     fail("got exception: " + EntityUtils.toString(e.getResponse().getEntity()));
@@ -491,6 +483,7 @@ public class SnapshotLifecycleRestIT extends ESRestTestCase {
         }
     }
 
+    @SuppressWarnings("unchecked")
     public void testDataStreams() throws Exception {
         String dataStreamName = "ds-test";
         String repoId = "ds-repo";
@@ -508,6 +501,21 @@ public class SnapshotLifecycleRestIT extends ESRestTestCase {
         createComposableTemplate(client(), "ds-template", dataStreamName, template);
 
         client().performRequest(new Request("PUT", "_data_stream/" + dataStreamName));
+        /*
+         * We make the following request just to get the backing index name (we can't assume we know what it is based on the date because
+         * this test could run across midnight on two days.
+         */
+        Response dataStreamResponse = client().performRequest(new Request("GET", "_data_stream/" + dataStreamName));
+        final String dataStreamIndexName;
+        try (InputStream is = dataStreamResponse.getEntity().getContent()) {
+            Map<String, Object> dataStreamResponseMap = XContentHelper.convertToMap(XContentType.JSON.xContent(), is, true);
+            List<Map<String, Object>> dataStreams = (List<Map<String, Object>>) dataStreamResponseMap.get("data_streams");
+            assertThat(dataStreams.size(), equalTo(1));
+            List<Map<String, String>> indices = (List<Map<String, String>>) dataStreams.get(0).get("indices");
+            assertThat(indices.size(), equalTo(1));
+            dataStreamIndexName = indices.get(0).get("index_name");
+            assertNotNull(dataStreamIndexName);
+        }
 
         // Create a snapshot repo
         initializeRepo(repoId);
@@ -527,7 +535,7 @@ public class SnapshotLifecycleRestIT extends ESRestTestCase {
                 assertThat(snapshotResponseMap.size(), greaterThan(0));
                 final Map<String, Object> snapshot = extractSnapshot(snapshotResponseMap, snapshotName);
                 assertEquals(Collections.singletonList(dataStreamName), snapshot.get("data_streams"));
-                assertEquals(Collections.singletonList(DataStream.getDefaultBackingIndexName(dataStreamName, 1)), snapshot.get("indices"));
+                assertEquals(Collections.singletonList(dataStreamIndexName), snapshot.get("indices"));
             } catch (ResponseException e) {
                 fail("expected snapshot to exist but it does not: " + EntityUtils.toString(e.getResponse().getEntity()));
             }
@@ -733,7 +741,7 @@ public class SnapshotLifecycleRestIT extends ESRestTestCase {
     @SuppressWarnings("unchecked")
     private void assertHistoryIsPresent(String policyName, boolean success, String repository, String operation) throws IOException {
         final Request historySearchRequest = new Request("GET", ".slm-history*/_search");
-        historySearchRequest.setJsonEntity(formatted("""
+        historySearchRequest.setJsonEntity(Strings.format("""
             {
               "query": {
                 "bool": {

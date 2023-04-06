@@ -12,11 +12,19 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.util.SetOnce;
 import org.elasticsearch.Version;
+<<<<<<< HEAD
+=======
+import org.elasticsearch.action.ActionListener;
+>>>>>>> upstream/main
 import org.elasticsearch.cluster.ClusterInfo;
 import org.elasticsearch.cluster.ClusterInfoService;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.DiskUsage;
 import org.elasticsearch.cluster.ESAllocationTestCase;
+<<<<<<< HEAD
+=======
+import org.elasticsearch.cluster.TestShardRoutingRoleStrategies;
+>>>>>>> upstream/main
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.Metadata;
 import org.elasticsearch.cluster.node.DiscoveryNode;
@@ -27,6 +35,10 @@ import org.elasticsearch.cluster.routing.RoutingTable;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.routing.allocation.AllocationService;
 import org.elasticsearch.cluster.routing.allocation.DataTier;
+<<<<<<< HEAD
+=======
+import org.elasticsearch.cluster.routing.allocation.RoutingAllocation;
+>>>>>>> upstream/main
 import org.elasticsearch.cluster.service.ClusterApplierService;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.cluster.service.MasterService;
@@ -36,7 +48,13 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.unit.RatioValue;
 import org.elasticsearch.common.util.concurrent.DeterministicTaskQueue;
+<<<<<<< HEAD
 import org.elasticsearch.common.util.concurrent.PrioritizedEsThreadPoolExecutor;
+=======
+import org.elasticsearch.common.util.concurrent.EsExecutors;
+import org.elasticsearch.common.util.concurrent.PrioritizedEsThreadPoolExecutor;
+import org.elasticsearch.common.util.concurrent.StoppableExecutorServiceWrapper;
+>>>>>>> upstream/main
 import org.elasticsearch.core.Strings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.snapshots.SnapshotShardSizeInfo;
@@ -53,6 +71,10 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
+<<<<<<< HEAD
+=======
+import java.util.concurrent.ExecutorService;
+>>>>>>> upstream/main
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -62,6 +84,10 @@ import static org.elasticsearch.cluster.node.DiscoveryNodeRole.DATA_COLD_NODE_RO
 import static org.elasticsearch.cluster.node.DiscoveryNodeRole.DATA_HOT_NODE_ROLE;
 import static org.elasticsearch.cluster.node.DiscoveryNodeRole.DATA_WARM_NODE_ROLE;
 import static org.elasticsearch.cluster.node.DiscoveryNodeRole.MASTER_ROLE;
+<<<<<<< HEAD
+=======
+import static org.elasticsearch.common.settings.ClusterSettings.createBuiltInClusterSettings;
+>>>>>>> upstream/main
 
 public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
 
@@ -129,7 +155,11 @@ public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
         }
         final var metadata = metadataBuilder.build();
 
+<<<<<<< HEAD
         final var routingTableBuilder = RoutingTable.builder();
+=======
+        final var routingTableBuilder = RoutingTable.builder(TestShardRoutingRoleStrategies.DEFAULT_ROLE_ONLY);
+>>>>>>> upstream/main
         for (final var indexMetadata : metadata) {
             routingTableBuilder.addAsNew(indexMetadata);
         }
@@ -214,6 +244,7 @@ public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
         final var settings = Settings.EMPTY;
         final var clusterSettings = new ClusterSettings(settings, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS);
 
+<<<<<<< HEAD
         final var directExecutor = new PrioritizedEsThreadPoolExecutor(
             "master-service",
             1,
@@ -237,6 +268,8 @@ public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
             }
         };
 
+=======
+>>>>>>> upstream/main
         final var masterService = new MasterService(
             settings,
             clusterSettings,
@@ -244,12 +277,44 @@ public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
             new TaskManager(settings, threadPool, Set.of())
         ) {
             @Override
+<<<<<<< HEAD
             protected PrioritizedEsThreadPoolExecutor createThreadPoolExecutor() {
                 return directExecutor;
+=======
+            protected ExecutorService createThreadPoolExecutor() {
+                return new StoppableExecutorServiceWrapper(EsExecutors.DIRECT_EXECUTOR_SERVICE);
+>>>>>>> upstream/main
             }
         };
 
         final var applierService = new ClusterApplierService("master", settings, clusterSettings, threadPool) {
+<<<<<<< HEAD
+=======
+            private final PrioritizedEsThreadPoolExecutor directExecutor = new PrioritizedEsThreadPoolExecutor(
+                "master-service",
+                1,
+                1,
+                1,
+                TimeUnit.SECONDS,
+                r -> {
+                    throw new AssertionError("should not create new threads");
+                },
+                null,
+                null
+            ) {
+
+                @Override
+                public void execute(Runnable command, final TimeValue timeout, final Runnable timeoutCallback) {
+                    execute(command);
+                }
+
+                @Override
+                public void execute(Runnable command) {
+                    command.run();
+                }
+            };
+
+>>>>>>> upstream/main
             @Override
             protected PrioritizedEsThreadPoolExecutor createThreadPoolExecutor() {
                 return directExecutor;
@@ -266,6 +331,10 @@ public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
         applierService.setInitialState(unassignedClusterState);
 
         final var clusterService = new ClusterService(settings, clusterSettings, masterService, applierService);
+<<<<<<< HEAD
+=======
+        clusterService.start();
+>>>>>>> upstream/main
 
         final var clusterInfoService = new TestClusterInfoService(clusterService);
 
@@ -284,7 +353,11 @@ public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
             clusterInfoService.addIndex(shardSizeByIndex.getKey(), shardSizeByIndex.getValue());
         }
 
+<<<<<<< HEAD
         final var tuple = createNewAllocationService(threadPool, clusterService, clusterInfoService);
+=======
+        final var tuple = createNewAllocationService(threadPool, deterministicTaskQueue::runAllTasks, clusterService, clusterInfoService);
+>>>>>>> upstream/main
         final var allocationService = tuple.getKey();
 
         final var initializingPrimaries = allocationService.executeWithRoutingAllocation(
@@ -467,13 +540,22 @@ public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
 
     private Map.Entry<MockAllocationService, ShardsAllocator> createNewAllocationService(
         ThreadPool threadPool,
+<<<<<<< HEAD
+=======
+        Runnable runAllTasks,
+>>>>>>> upstream/main
         ClusterService clusterService,
         ClusterInfoService clusterInfoService
     ) {
         var strategyRef = new SetOnce<AllocationService>();
         var desiredBalanceShardsAllocator = new DesiredBalanceShardsAllocator(
+<<<<<<< HEAD
             new BalancedShardsAllocator(
                 Settings.EMPTY,
+=======
+            createBuiltInClusterSettings(),
+            new BalancedShardsAllocator(
+>>>>>>> upstream/main
                 new ClusterSettings(Settings.EMPTY, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS),
                 TEST_WRITE_LOAD_FORECASTER
             ),
@@ -481,6 +563,7 @@ public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
             clusterService,
             (clusterState, routingAllocationAction) -> strategyRef.get()
                 .executeWithRoutingAllocation(clusterState, "reconcile-desired-balance", routingAllocationAction)
+<<<<<<< HEAD
         );
         var strategy = new MockAllocationService(
             randomAllocationDeciders(
@@ -488,6 +571,17 @@ public class ClusterAllocationSimulationTests extends ESAllocationTestCase {
                 new ClusterSettings(Settings.EMPTY, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS),
                 random()
             ),
+=======
+        ) {
+            @Override
+            public void allocate(RoutingAllocation allocation, ActionListener<Void> listener) {
+                super.allocate(allocation, listener);
+                runAllTasks.run();
+            }
+        };
+        var strategy = new MockAllocationService(
+            randomAllocationDeciders(Settings.EMPTY, new ClusterSettings(Settings.EMPTY, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS)),
+>>>>>>> upstream/main
             new TestGatewayAllocator(),
             desiredBalanceShardsAllocator,
             clusterInfoService,

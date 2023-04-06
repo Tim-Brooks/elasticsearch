@@ -21,6 +21,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+<<<<<<< HEAD
+=======
+import java.util.function.Predicate;
+>>>>>>> upstream/main
 import java.util.function.Supplier;
 
 public abstract class AbstractLocalSpecBuilder<T extends LocalSpecBuilder<?>> implements LocalSpecBuilder<T> {
@@ -32,10 +36,18 @@ public abstract class AbstractLocalSpecBuilder<T extends LocalSpecBuilder<?>> im
     private final Set<String> modules = new HashSet<>();
     private final Set<String> plugins = new HashSet<>();
     private final Set<FeatureFlag> features = new HashSet<>();
+<<<<<<< HEAD
+=======
+    private final List<SettingsProvider> keystoreProviders = new ArrayList<>();
+>>>>>>> upstream/main
     private final Map<String, String> keystoreSettings = new HashMap<>();
     private final Map<String, Resource> keystoreFiles = new HashMap<>();
     private final Map<String, Resource> extraConfigFiles = new HashMap<>();
     private final Map<String, String> systemProperties = new HashMap<>();
+<<<<<<< HEAD
+=======
+    private final Map<String, String> secrets = new HashMap<>();
+>>>>>>> upstream/main
     private DistributionType distributionType;
     private Version version;
     private String keystorePassword;
@@ -66,6 +78,15 @@ public abstract class AbstractLocalSpecBuilder<T extends LocalSpecBuilder<?>> im
         return cast(this);
     }
 
+<<<<<<< HEAD
+=======
+    @Override
+    public T setting(String setting, Supplier<String> value, Predicate<LocalClusterSpec.LocalNodeSpec> predicate) {
+        this.settingsProviders.add(s -> predicate.test(s) ? Map.of(setting, value.get()) : Map.of());
+        return cast(this);
+    }
+
+>>>>>>> upstream/main
     Map<String, String> getSettings() {
         return inherit(() -> parent.getSettings(), settings);
     }
@@ -152,6 +173,35 @@ public abstract class AbstractLocalSpecBuilder<T extends LocalSpecBuilder<?>> im
     }
 
     @Override
+<<<<<<< HEAD
+=======
+    public T keystore(String key, Supplier<String> supplier) {
+        this.keystoreProviders.add(s -> Map.of(key, supplier.get()));
+        return cast(this);
+    }
+
+    @Override
+    public T keystore(String key, Supplier<String> supplier, Predicate<LocalClusterSpec.LocalNodeSpec> predicate) {
+        this.keystoreProviders.add(s -> predicate.test(s) ? Map.of(key, supplier.get()) : Map.of());
+        return cast(this);
+    }
+
+    public List<SettingsProvider> getKeystoreProviders() {
+        return inherit(() -> parent.getKeystoreProviders(), keystoreProviders);
+    }
+
+    @Override
+    public T secret(String key, String value) {
+        this.secrets.put(key, value);
+        return cast(this);
+    }
+
+    public Map<String, String> getSecrets() {
+        return inherit(() -> parent.getSecrets(), secrets);
+    }
+
+    @Override
+>>>>>>> upstream/main
     public T configFile(String fileName, Resource configFile) {
         this.extraConfigFiles.put(fileName, configFile);
         return cast(this);

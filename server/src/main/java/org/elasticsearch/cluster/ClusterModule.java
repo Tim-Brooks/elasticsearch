@@ -8,6 +8,7 @@
 
 package org.elasticsearch.cluster;
 
+import org.elasticsearch.Version;
 import org.elasticsearch.cluster.action.index.MappingUpdatedAction;
 import org.elasticsearch.cluster.action.shard.ShardStateAction;
 import org.elasticsearch.cluster.metadata.ComponentTemplateMetadata;
@@ -25,7 +26,8 @@ import org.elasticsearch.cluster.metadata.MetadataMappingService;
 import org.elasticsearch.cluster.metadata.NodesShutdownMetadata;
 import org.elasticsearch.cluster.metadata.RepositoriesMetadata;
 import org.elasticsearch.cluster.routing.DelayedAllocationService;
-import org.elasticsearch.cluster.routing.RerouteService;
+import org.elasticsearch.cluster.routing.ShardRouting;
+import org.elasticsearch.cluster.routing.ShardRoutingRoleStrategy;
 import org.elasticsearch.cluster.routing.allocation.AllocationService;
 import org.elasticsearch.cluster.routing.allocation.ExistingShardsAllocator;
 import org.elasticsearch.cluster.routing.allocation.RoutingAllocation;
@@ -102,7 +104,8 @@ public class ClusterModule extends AbstractModule {
         "cluster.routing.allocation.type",
         DESIRED_BALANCE_ALLOCATOR,
         Function.identity(),
-        Property.NodeScope
+        Property.NodeScope,
+        Property.Deprecated
     );
 
     private final ClusterService clusterService;
@@ -114,6 +117,7 @@ public class ClusterModule extends AbstractModule {
     // pkg private for tests
     final Collection<AllocationDecider> deciderList;
     final ShardsAllocator shardsAllocator;
+    private final ShardRoutingRoleStrategy shardRoutingRoleStrategy;
 
     public ClusterModule(
         Settings settings,
@@ -123,7 +127,6 @@ public class ClusterModule extends AbstractModule {
         SnapshotsInfoService snapshotsInfoService,
         ThreadPool threadPool,
         SystemIndices systemIndices,
-        Supplier<RerouteService> rerouteServiceSupplier,
         WriteLoadForecaster writeLoadForecaster
     ) {
         this.clusterPlugins = clusterPlugins;
@@ -136,13 +139,42 @@ public class ClusterModule extends AbstractModule {
             clusterPlugins,
             clusterService,
             this::reconcile,
-            writeLoadForecaster,
-            clusterInfoService
+            writeLoadForecaster
         );
         this.clusterService = clusterService;
         this.indexNameExpressionResolver = new IndexNameExpressionResolver(threadPool.getThreadContext(), systemIndices);
-        this.allocationService = new AllocationService(allocationDeciders, shardsAllocator, clusterInfoService, snapshotsInfoService);
+        this.shardRoutingRoleStrategy = getShardRoutingRoleStrategy(clusterPlugins);
+        this.allocationService = new AllocationService(
+            allocationDeciders,
+            shardsAllocator,
+            clusterInfoService,
+            snapshotsInfoService,
+            shardRoutingRoleStrategy
+        );
         this.metadataDeleteIndexService = new MetadataDeleteIndexService(settings, clusterService, allocationService);
+    }
+
+    static ShardRoutingRoleStrategy getShardRoutingRoleStrategy(List<ClusterPlugin> clusterPlugins) {
+        final var strategies = clusterPlugins.stream().map(ClusterPlugin::getShardRoutingRoleStrategy).filter(Objects::nonNull).toList();
+        return switch (strategies.size()) {
+            case 0 -> new ShardRoutingRoleStrategy() {
+
+                // NOTE: this is deliberately an anonymous class to avoid any possibility of using this DEFAULT-only strategy when a plugin
+                // has injected a different strategy.
+
+                @Override
+                public ShardRouting.Role newReplicaRole() {
+                    return ShardRouting.Role.DEFAULT;
+                }
+
+                @Override
+                public ShardRouting.Role newEmptyRole(int copyIndex) {
+                    return ShardRouting.Role.DEFAULT;
+                }
+            };
+            case 1 -> strategies.get(0);
+            default -> throw new IllegalArgumentException("multiple plugins define shard role strategies, which is not permitted");
+        };
     }
 
     private ClusterState reconcile(ClusterState clusterState, Consumer<RoutingAllocation> routingAllocationConsumer) {
@@ -313,19 +345,19 @@ public class ClusterModule extends AbstractModule {
         addAllocationDecider(deciders, new ResizeAllocationDecider());
         addAllocationDecider(deciders, new ReplicaAfterPrimaryActiveAllocationDecider());
         addAllocationDecider(deciders, new RebalanceOnlyWhenActiveAllocationDecider());
-        addAllocationDecider(deciders, new ClusterRebalanceAllocationDecider(settings, clusterSettings));
-        addAllocationDecider(deciders, new ConcurrentRebalanceAllocationDecider(settings, clusterSettings));
-        addAllocationDecider(deciders, new EnableAllocationDecider(settings, clusterSettings));
+        addAllocationDecider(deciders, new ClusterRebalanceAllocationDecider(clusterSettings));
+        addAllocationDecider(deciders, new ConcurrentRebalanceAllocationDecider(clusterSettings));
+        addAllocationDecider(deciders, new EnableAllocationDecider(clusterSettings));
         addAllocationDecider(deciders, new NodeVersionAllocationDecider());
         addAllocationDecider(deciders, new SnapshotInProgressAllocationDecider());
         addAllocationDecider(deciders, new RestoreInProgressAllocationDecider());
         addAllocationDecider(deciders, new NodeShutdownAllocationDecider());
         addAllocationDecider(deciders, new NodeReplacementAllocationDecider());
         addAllocationDecider(deciders, new FilterAllocationDecider(settings, clusterSettings));
-        addAllocationDecider(deciders, new SameShardAllocationDecider(settings, clusterSettings));
+        addAllocationDecider(deciders, new SameShardAllocationDecider(clusterSettings));
         addAllocationDecider(deciders, new DiskThresholdDecider(settings, clusterSettings));
-        addAllocationDecider(deciders, new ThrottlingAllocationDecider(settings, clusterSettings));
-        addAllocationDecider(deciders, new ShardsLimitAllocationDecider(settings, clusterSettings));
+        addAllocationDecider(deciders, new ThrottlingAllocationDecider(clusterSettings));
+        addAllocationDecider(deciders, new ShardsLimitAllocationDecider(clusterSettings));
         addAllocationDecider(deciders, new AwarenessAllocationDecider(settings, clusterSettings));
 
         clusterPlugins.stream()
@@ -349,15 +381,23 @@ public class ClusterModule extends AbstractModule {
         List<ClusterPlugin> clusterPlugins,
         ClusterService clusterService,
         DesiredBalanceReconcilerAction reconciler,
-        WriteLoadForecaster writeLoadForecaster,
-        ClusterInfoService clusterInfoService
+        WriteLoadForecaster writeLoadForecaster
     ) {
         Map<String, Supplier<ShardsAllocator>> allocators = new HashMap<>();
+<<<<<<< HEAD
         allocators.put(BALANCED_ALLOCATOR, () -> new BalancedShardsAllocator(settings, clusterSettings, writeLoadForecaster));
         allocators.put(
             DESIRED_BALANCE_ALLOCATOR,
             () -> new DesiredBalanceShardsAllocator(
                 new BalancedShardsAllocator(settings, clusterSettings, writeLoadForecaster),
+=======
+        allocators.put(BALANCED_ALLOCATOR, () -> new BalancedShardsAllocator(clusterSettings, writeLoadForecaster));
+        allocators.put(
+            DESIRED_BALANCE_ALLOCATOR,
+            () -> new DesiredBalanceShardsAllocator(
+                clusterSettings,
+                new BalancedShardsAllocator(clusterSettings, writeLoadForecaster),
+>>>>>>> upstream/main
                 threadPool,
                 clusterService,
                 reconciler
@@ -365,6 +405,7 @@ public class ClusterModule extends AbstractModule {
         );
 
         for (ClusterPlugin plugin : clusterPlugins) {
+            // noinspection removal
             plugin.getShardsAllocators(settings, clusterSettings).forEach((k, v) -> {
                 if (allocators.put(k, v) != null) {
                     throw new IllegalArgumentException("ShardsAllocator [" + k + "] already defined");
@@ -372,6 +413,7 @@ public class ClusterModule extends AbstractModule {
             });
         }
         String allocatorName = SHARDS_ALLOCATOR_TYPE_SETTING.get(settings);
+        assert Version.CURRENT.major == Version.V_7_17_0.major + 1; // in v9 there is only one allocator
         Supplier<ShardsAllocator> allocatorSupplier = allocators.get(allocatorName);
         if (allocatorSupplier == null) {
             throw new IllegalArgumentException("Unknown ShardsAllocator [" + allocatorName + "]");
@@ -405,6 +447,7 @@ public class ClusterModule extends AbstractModule {
         bind(TaskResultsService.class).asEagerSingleton();
         bind(AllocationDeciders.class).toInstance(allocationDeciders);
         bind(ShardsAllocator.class).toInstance(shardsAllocator);
+        bind(ShardRoutingRoleStrategy.class).toInstance(shardRoutingRoleStrategy);
     }
 
     public void setExistingShardsAllocators(GatewayAllocator gatewayAllocator) {

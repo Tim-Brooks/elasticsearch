@@ -41,7 +41,11 @@ public class DesiredBalanceShutdownIT extends ESIntegTestCase {
         createIndex(
             INDEX,
             Settings.builder()
+<<<<<<< HEAD
                 .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+=======
+                .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, between(1, 5))
+>>>>>>> upstream/main
                 .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
                 .put(IndexMetadata.INDEX_ROUTING_REQUIRE_GROUP_PREFIX + "._name", oldNodeName)
                 .build()
@@ -89,7 +93,12 @@ public class DesiredBalanceShutdownIT extends ESIntegTestCase {
                     .stream()
                     .allMatch(s -> s.overallStatus() == SingleNodeShutdownMetadata.Status.COMPLETE)
             );
+<<<<<<< HEAD
         });
     }
 
+=======
+        }, 120, TimeUnit.SECONDS);
+    }
+>>>>>>> upstream/main
 }

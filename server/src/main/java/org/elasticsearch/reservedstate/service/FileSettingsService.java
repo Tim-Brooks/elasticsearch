@@ -11,22 +11,22 @@ package org.elasticsearch.reservedstate.service;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.support.PlainActionFuture;
+<<<<<<< HEAD
 import org.elasticsearch.cluster.ClusterChangedEvent;
+=======
+>>>>>>> upstream/main
 import org.elasticsearch.cluster.ClusterState;
-import org.elasticsearch.cluster.ClusterStateListener;
 import org.elasticsearch.cluster.metadata.Metadata;
 import org.elasticsearch.cluster.metadata.ReservedStateMetadata;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.service.ClusterService;
-import org.elasticsearch.common.Randomness;
-import org.elasticsearch.common.component.AbstractLifecycleComponent;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 
 import java.io.BufferedInputStream;
 import java.io.IOException;
-import java.nio.file.ClosedWatchServiceException;
 import java.nio.file.Files;
+<<<<<<< HEAD
 import java.nio.file.Path;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchKey;
@@ -36,6 +36,8 @@ import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+=======
+>>>>>>> upstream/main
 import java.util.concurrent.ExecutionException;
 
 import static org.elasticsearch.xcontent.XContentType.JSON;
@@ -51,11 +53,13 @@ import static org.elasticsearch.xcontent.XContentType.JSON;
  * the service as a listener to cluster state changes, so that we can enable the file watcher thread when this
  * node becomes a master node.
  */
-public class FileSettingsService extends AbstractLifecycleComponent implements ClusterStateListener {
+public class FileSettingsService extends AbstractFileWatchingService {
+
     private static final Logger logger = LogManager.getLogger(FileSettingsService.class);
 
     public static final String SETTINGS_FILE_NAME = "settings.json";
     public static final String NAMESPACE = "file_settings";
+<<<<<<< HEAD
     private static final int REGISTER_RETRY_COUNT = 5;
 
     private final ClusterService clusterService;
@@ -73,6 +77,10 @@ public class FileSettingsService extends AbstractLifecycleComponent implements C
     public static final String OPERATOR_DIRECTORY = "operator";
 
     private final List<FileSettingsChangedListener> eventListeners;
+=======
+    public static final String OPERATOR_DIRECTORY = "operator";
+    private final ReservedClusterStateService stateService;
+>>>>>>> upstream/main
 
     /**
      * Constructs the {@link FileSettingsService}
@@ -82,6 +90,7 @@ public class FileSettingsService extends AbstractLifecycleComponent implements C
      * @param environment we need the environment to pull the location of the config and operator directories
      */
     public FileSettingsService(ClusterService clusterService, ReservedClusterStateService stateService, Environment environment) {
+<<<<<<< HEAD
         this.clusterService = clusterService;
         this.stateService = stateService;
         this.operatorSettingsDir = environment.configFile().toAbsolutePath().resolve(OPERATOR_DIRECTORY);
@@ -152,6 +161,10 @@ public class FileSettingsService extends AbstractLifecycleComponent implements C
         } else {
             stopWatcher();
         }
+=======
+        super(clusterService, environment.configFile().toAbsolutePath().resolve(OPERATOR_DIRECTORY).resolve(SETTINGS_FILE_NAME));
+        this.stateService = stateService;
+>>>>>>> upstream/main
     }
 
     /**
@@ -175,7 +188,7 @@ public class FileSettingsService extends AbstractLifecycleComponent implements C
         // since we don't know the current operator configuration, e.g. file settings could be disabled
         // on the target cluster. If file settings exist and the cluster state has lost it's reserved
         // state for the "file_settings" namespace, we touch our file settings file to cause it to re-process the file.
-        if (watching() && Files.exists(operatorSettingsFile())) {
+        if (watching() && Files.exists(watchedFile())) {
             if (fileSettingsMetadata != null) {
                 ReservedStateMetadata withResetVersion = new ReservedStateMetadata.Builder(fileSettingsMetadata).version(0L).build();
                 mdBuilder.put(withResetVersion);
@@ -186,30 +199,20 @@ public class FileSettingsService extends AbstractLifecycleComponent implements C
     }
 
     /**
-     * 'Touches' the settings file so the file watcher will re-processes it.
-     * <p>
-     * The file processing is asynchronous, the cluster state or the file must be already updated such that
-     * the version information in the file is newer than what's already saved as processed in the
-     * cluster state.
-     *
-     * For snapshot restores we first must restore the snapshot and then force a refresh, since the cluster state
-     * metadata version must be reset to 0 and saved in the cluster state.
+     * If the file settings metadata version is set to zero, then we have restored from
+     * a snapshot and must reprocess the file.
+     * @param clusterState State of the cluster
+     * @return true if file settings metadata version is exactly 0, false otherwise.
      */
-    private void refreshExistingFileStateIfNeeded(ClusterState clusterState) {
-        if (watching()) {
-            ReservedStateMetadata fileSettingsMetadata = clusterState.metadata().reservedStateMetadata().get(NAMESPACE);
-            // We check if the version was reset to 0, and force an update if a file exists. This can happen in situations
-            // like snapshot restores.
-            if (fileSettingsMetadata != null && fileSettingsMetadata.version() == 0L && Files.exists(operatorSettingsFile())) {
-                try {
-                    Files.setLastModifiedTime(operatorSettingsFile(), FileTime.from(Instant.now()));
-                } catch (IOException e) {
-                    logger.warn("encountered I/O error trying to update file settings timestamp", e);
-                }
-            }
-        }
+    @Override
+    protected boolean shouldRefreshFileState(ClusterState clusterState) {
+        // We check if the version was reset to 0, and force an update if a file exists. This can happen in situations
+        // like snapshot restores.
+        ReservedStateMetadata fileSettingsMetadata = clusterState.metadata().reservedStateMetadata().get(NAMESPACE);
+        return fileSettingsMetadata != null && fileSettingsMetadata.version() == 0L;
     }
 
+<<<<<<< HEAD
     public boolean watching() {
         return watcherThread != null;
     }
@@ -403,17 +406,32 @@ public class FileSettingsService extends AbstractLifecycleComponent implements C
     PlainActionFuture<Void> processFileSettings(Path path) {
         PlainActionFuture<Void> completion = PlainActionFuture.newFuture();
         logger.info("processing path [{}] for [{}]", path, NAMESPACE);
+=======
+    /**
+     * Read settings and pass them to {@link ReservedClusterStateService} for application
+     *
+     * @throws IOException if there is an error reading the file itself
+     * @throws ExecutionException if there is an issue while applying the changes from the file
+     * @throws InterruptedException if the file processing is interrupted by another thread.
+     */
+    @Override
+    void processFileChanges() throws ExecutionException, InterruptedException, IOException {
+        PlainActionFuture<Void> completion = PlainActionFuture.newFuture();
+        logger.info("processing path [{}] for [{}]", watchedFile(), NAMESPACE);
+>>>>>>> upstream/main
         try (
-            var fis = Files.newInputStream(path);
+            var fis = Files.newInputStream(watchedFile());
             var bis = new BufferedInputStream(fis);
             var parser = JSON.xContent().createParser(XContentParserConfiguration.EMPTY, bis)
         ) {
             stateService.process(NAMESPACE, parser, (e) -> completeProcessing(e, completion));
+<<<<<<< HEAD
         } catch (Exception e) {
             completion.onFailure(e);
+=======
+>>>>>>> upstream/main
         }
-
-        return completion;
+        completion.get();
     }
 
     private void completeProcessing(Exception e, PlainActionFuture<Void> completion) {
@@ -423,6 +441,7 @@ public class FileSettingsService extends AbstractLifecycleComponent implements C
             completion.onResponse(null);
         }
     }
+<<<<<<< HEAD
 
     /**
      * Holds information about the last known state of the file we watched. We use this
@@ -433,4 +452,6 @@ public class FileSettingsService extends AbstractLifecycleComponent implements C
     public void addFileSettingsChangedListener(FileSettingsChangedListener listener) {
         eventListeners.add(listener);
     }
+=======
+>>>>>>> upstream/main
 }

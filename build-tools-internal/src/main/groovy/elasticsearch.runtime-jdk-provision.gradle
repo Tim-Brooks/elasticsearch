@@ -10,6 +10,11 @@ import org.elasticsearch.gradle.Architecture
 import org.elasticsearch.gradle.OS
 import org.elasticsearch.gradle.VersionProperties
 import org.elasticsearch.gradle.internal.info.BuildParams
+<<<<<<< HEAD
+=======
+import org.elasticsearch.gradle.internal.precommit.ThirdPartyAuditPrecommitPlugin
+import org.elasticsearch.gradle.internal.precommit.ThirdPartyAuditTask
+>>>>>>> upstream/main
 import org.elasticsearch.gradle.internal.test.rest.RestTestBasePlugin
 import org.elasticsearch.gradle.testclusters.StandaloneRestIntegTestTask
 
@@ -30,7 +35,8 @@ configure(allprojects) {
     }
     project.tasks.withType(Test).configureEach { Test test ->
         if (BuildParams.getIsRuntimeJavaHomeSet()) {
-            test.executable = "${BuildParams.runtimeJavaHome}/bin/java"
+            test.executable = "${BuildParams.runtimeJavaHome}/bin/java" +
+                    (OS.current() == OS.WINDOWS ? '.exe' : '')
         } else {
             test.dependsOn(project.jdks.provisioned_runtime)
             test.executable = rootProject.jdks.provisioned_runtime.getBinJavaPath()
@@ -53,4 +59,16 @@ configure(allprojects) {
         }
       }
     }
+<<<<<<< HEAD
+=======
+
+    project.plugins.withType(ThirdPartyAuditPrecommitPlugin) {
+      project.getTasks().withType(ThirdPartyAuditTask.class).configureEach {
+        if (BuildParams.getIsRuntimeJavaHomeSet() == false) {
+          javaHome.set(providers.provider(() -> "${project.jdks.provisioned_runtime.javaHomePath}"))
+          targetCompatibility.set(providers.provider(() -> JavaVersion.toVersion(project.jdks.provisioned_runtime.major)))
+        }
+      }
+    }
+>>>>>>> upstream/main
 }

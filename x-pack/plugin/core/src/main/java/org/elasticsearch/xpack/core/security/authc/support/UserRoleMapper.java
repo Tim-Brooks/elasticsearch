@@ -281,7 +281,11 @@ public interface UserRoleMapper {
 
                 return false;
             }
+<<<<<<< HEAD
             if (fieldValue.getValue()instanceof final String testString) {
+=======
+            if (fieldValue.getValue() instanceof final String testString) {
+>>>>>>> upstream/main
                 if (testString.equalsIgnoreCase(string)) {
                     return true;
                 }

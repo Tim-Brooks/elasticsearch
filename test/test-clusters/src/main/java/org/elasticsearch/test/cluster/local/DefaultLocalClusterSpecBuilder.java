@@ -111,6 +111,7 @@ public class DefaultLocalClusterSpecBuilder extends AbstractLocalSpecBuilder<Loc
 
     @Override
     public ElasticsearchCluster build() {
+<<<<<<< HEAD
         List<User> clusterUsers = users.isEmpty() ? List.of(User.DEFAULT_USER) : users;
         LocalClusterSpec clusterSpec = new LocalClusterSpec(name, clusterUsers, roleFiles);
         List<LocalNodeSpec> nodeSpecs;
@@ -125,6 +126,8 @@ public class DefaultLocalClusterSpecBuilder extends AbstractLocalSpecBuilder<Loc
         clusterSpec.setNodes(nodeSpecs);
         clusterSpec.validate();
 
+=======
+>>>>>>> upstream/main
         return new LocalElasticsearchCluster(this);
     }
 
@@ -176,11 +179,20 @@ public class DefaultLocalClusterSpecBuilder extends AbstractLocalSpecBuilder<Loc
                 getPlugins(),
                 Optional.ofNullable(getDistributionType()).orElse(DistributionType.INTEG_TEST),
                 getFeatures(),
+<<<<<<< HEAD
+=======
+                getKeystoreProviders(),
+>>>>>>> upstream/main
                 getKeystoreSettings(),
                 getKeystoreFiles(),
                 getKeystorePassword(),
                 getExtraConfigFiles(),
+<<<<<<< HEAD
                 getSystemProperties()
+=======
+                getSystemProperties(),
+                getSecrets()
+>>>>>>> upstream/main
             );
         }
     }

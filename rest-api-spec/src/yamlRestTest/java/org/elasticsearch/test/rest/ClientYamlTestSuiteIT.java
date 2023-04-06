@@ -29,6 +29,10 @@ public class ClientYamlTestSuiteIT extends ESClientYamlSuiteTestCase {
     public static ElasticsearchCluster cluster = ElasticsearchCluster.local()
         .module("mapper-extras")
         .feature(FeatureFlag.TIME_SERIES_MODE)
+<<<<<<< HEAD
+=======
+        .feature(FeatureFlag.DLM_ENABLED)
+>>>>>>> upstream/main
         .build();
 
     public ClientYamlTestSuiteIT(@Name("yaml") ClientYamlTestCandidate testCandidate) {

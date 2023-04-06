@@ -11,27 +11,19 @@ import org.elasticsearch.gradle.VersionProperties
 import org.elasticsearch.gradle.internal.info.BuildParams
 import org.elasticsearch.gradle.testclusters.StandaloneRestIntegTestTask
 
-apply plugin: 'elasticsearch.internal-testclusters'
-apply plugin: 'elasticsearch.standalone-rest-test'
-apply plugin: 'elasticsearch.internal-test-artifact'
+apply plugin: 'elasticsearch.internal-java-rest-test'
 apply plugin: 'elasticsearch.bwc-test'
 
-def useFixture = providers.environmentVariable("geoip_use_service")
-  .map { s -> Boolean.parseBoolean(s) == false }
-  .getOrElse(true)
 
-def fixtureAddress = {
-  assert useFixture: 'closure should not be used without a fixture'
-  int ephemeralPort = tasks.getByPath(":test:fixtures:geoip-fixture:postProcessFixture").ext."test.fixtures.geoip-fixture-restart.tcp.80"
-  assert ephemeralPort > 0
-  return "http://127.0.0.1:${ephemeralPort}/"
+dependencies {
+  javaRestTestImplementation project(':test:fixtures:geoip-fixture')
+  javaRestTestImplementation(testArtifact(project(":qa:full-cluster-restart"), "javaRestTest"))
 }
 
-if (useFixture) {
-  apply plugin: 'elasticsearch.test.fixtures'
-  testFixtures.useFixture(':test:fixtures:geoip-fixture', 'geoip-fixture-restart')
-}
+assert Version.fromString(VersionProperties.getVersions().get("elasticsearch")).getMajor() == 8 :
+  "If we are targeting a branch other than 8, we should enable migration tests"
 
+<<<<<<< HEAD
 tasks.withType(Test).configureEach {
   if (useFixture) {
     nonInputProperties.systemProperty "geoip_endpoint", "${-> fixtureAddress()}"
@@ -96,5 +88,13 @@ BuildParams.bwcVersions.withWireCompatible(v -> v.before("7.0.0")) { bwcVersion,
 
   tasks.register(bwcTaskName(bwcVersion)) {
     dependsOn tasks.named("${baseName}#upgradedClusterTest")
+=======
+// once we are ready to test migrations from 8.x to 9.x, we can set the compatible version to 8.0.0
+// see https://github.com/elastic/elasticsearch/pull/93666
+BuildParams.bwcVersions.withWireCompatible(v -> v.before("7.0.0")) { bwcVersion, baseName ->
+  tasks.register(bwcTaskName(bwcVersion), StandaloneRestIntegTestTask) {
+    usesBwcDistribution(bwcVersion)
+    systemProperty("tests.old_cluster_version", bwcVersion)
+>>>>>>> upstream/main
   }
 }

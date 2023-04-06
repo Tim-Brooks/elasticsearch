@@ -77,15 +77,25 @@ public class FileSettingsRoleMappingsStartupIT extends SecurityIntegTestCase {
 
         FileSettingsService fileSettingsService = internalCluster().getInstance(FileSettingsService.class, node);
 
+<<<<<<< HEAD
         Files.deleteIfExists(fileSettingsService.operatorSettingsFile());
 
         Files.createDirectories(fileSettingsService.operatorSettingsDir());
+=======
+        Files.deleteIfExists(fileSettingsService.watchedFile());
+
+        Files.createDirectories(fileSettingsService.watchedFileDir());
+>>>>>>> upstream/main
         Path tempFilePath = createTempFile();
 
         logger.info("--> writing JSON config to node {} with path {}", node, tempFilePath);
         logger.info(Strings.format(json, version));
         Files.write(tempFilePath, Strings.format(json, version).getBytes(StandardCharsets.UTF_8));
+<<<<<<< HEAD
         Files.move(tempFilePath, fileSettingsService.operatorSettingsFile(), StandardCopyOption.ATOMIC_MOVE);
+=======
+        Files.move(tempFilePath, fileSettingsService.watchedFile(), StandardCopyOption.ATOMIC_MOVE);
+>>>>>>> upstream/main
     }
 
     private Tuple<CountDownLatch, AtomicLong> setupClusterStateListenerForError(String node) {

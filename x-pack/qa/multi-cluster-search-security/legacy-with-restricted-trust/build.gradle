@@ -22,7 +22,11 @@ tasks.register("copyCerts", Sync) {
 }
 
 // randomise between sniff and proxy modes
+<<<<<<< HEAD
 boolean proxyMode = (new Random(Long.parseUnsignedLong(BuildParams.testSeed.tokenize(':').get(0), 16))).nextBoolean()
+=======
+boolean proxyMode = BuildParams.random.nextBoolean()
+>>>>>>> upstream/main
 
 def fulfillingCluster = testClusters.register('fulfilling-cluster') {
   setting 'xpack.security.enabled', 'true'

@@ -18,6 +18,7 @@ import org.elasticsearch.cluster.InternalClusterInfoService;
 import org.elasticsearch.cluster.metadata.ReservedStateHandlerMetadata;
 import org.elasticsearch.cluster.metadata.ReservedStateMetadata;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.Randomness;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.Strings;
 import org.elasticsearch.core.TimeValue;
@@ -27,6 +28,7 @@ import org.elasticsearch.snapshots.AbstractSnapshotIntegTestCase;
 import org.elasticsearch.snapshots.SnapshotState;
 import org.junit.After;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,7 +38,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.elasticsearch.indices.recovery.RecoverySettings.INDICES_RECOVERY_MAX_BYTES_PER_SEC_SETTING;
-import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
 import static org.hamcrest.Matchers.equalTo;
 
 /**
@@ -76,16 +77,34 @@ public class SnapshotsAndFileSettingsIT extends AbstractSnapshotIntegTestCase {
         awaitNoMoreRunningOperations();
     }
 
+    private long retryDelay(int retryCount) {
+        return 100 * (1 << retryCount) + Randomness.get().nextInt(10);
+    }
+
     private void writeJSONFile(String node, String json) throws Exception {
         long version = versionCounter.incrementAndGet();
 
         FileSettingsService fileSettingsService = internalCluster().getInstance(FileSettingsService.class, node);
 
-        Files.createDirectories(fileSettingsService.operatorSettingsDir());
+        Files.createDirectories(fileSettingsService.watchedFileDir());
         Path tempFilePath = createTempFile();
 
         Files.write(tempFilePath, Strings.format(json, version).getBytes(StandardCharsets.UTF_8));
-        Files.move(tempFilePath, fileSettingsService.operatorSettingsFile(), StandardCopyOption.ATOMIC_MOVE);
+        int retryCount = 0;
+        do {
+            try {
+                // this can fail on Windows because of timing
+                Files.move(tempFilePath, fileSettingsService.watchedFile(), StandardCopyOption.ATOMIC_MOVE);
+                return;
+            } catch (IOException e) {
+                logger.info("--> retrying writing a settings file [" + retryCount + "]");
+                if (retryCount == 4) { // retry 5 times
+                    throw e;
+                }
+                Thread.sleep(retryDelay(retryCount));
+                retryCount++;
+            }
+        } while (true);
     }
 
     private Tuple<CountDownLatch, AtomicLong> setupClusterStateListener(String node) {
@@ -121,13 +140,9 @@ public class SnapshotsAndFileSettingsIT extends AbstractSnapshotIntegTestCase {
         createRepository("test-repo", "fs");
 
         logger.info("--> set some persistent cluster settings");
-        assertAcked(
-            clusterAdmin().prepareUpdateSettings()
-                .setPersistentSettings(
-                    Settings.builder()
-                        .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), TimeValue.timeValueSeconds(25))
-                        .build()
-                )
+        updateClusterSettings(
+            Settings.builder()
+                .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), TimeValue.timeValueSeconds(25))
         );
 
         ensureGreen();
@@ -149,17 +164,13 @@ public class SnapshotsAndFileSettingsIT extends AbstractSnapshotIntegTestCase {
         createFullSnapshot("test-repo", "test-snap");
         assertThat(getSnapshot("test-repo", "test-snap").state(), equalTo(SnapshotState.SUCCESS));
 
-        assertAcked(
-            clusterAdmin().prepareUpdateSettings()
-                .setPersistentSettings(
-                    Settings.builder()
-                        .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), TimeValue.timeValueSeconds(55))
-                        .build()
-                )
+        updateClusterSettings(
+            Settings.builder()
+                .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), TimeValue.timeValueSeconds(55))
         );
 
         logger.info("--> deleting operator file, no file based settings");
-        Files.delete(fs.operatorSettingsFile());
+        Files.delete(fs.watchedFile());
 
         logger.info("--> restore global state from the snapshot");
         clusterAdmin().prepareRestoreSnapshot("test-repo", "test-snap").setRestoreGlobalState(true).setWaitForCompletion(true).get();
@@ -183,14 +194,10 @@ public class SnapshotsAndFileSettingsIT extends AbstractSnapshotIntegTestCase {
         // We didn't remove the setting set by file settings, we simply removed the reserved (operator) section.
         assertThat(getSettingsResponse.persistentSettings().get("indices.recovery.max_bytes_per_sec"), equalTo("50mb"));
         // cleanup
-        assertAcked(
-            clusterAdmin().prepareUpdateSettings()
-                .setPersistentSettings(
-                    Settings.builder()
-                        .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), (String) null)
-                        .put("indices.recovery.max_bytes_per_sec", (String) null)
-                        .build()
-                )
+        updateClusterSettings(
+            Settings.builder()
+                .putNull(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey())
+                .putNull("indices.recovery.max_bytes_per_sec")
         );
     }
 
@@ -247,13 +254,9 @@ public class SnapshotsAndFileSettingsIT extends AbstractSnapshotIntegTestCase {
         createRepository("test-repo", "fs");
 
         logger.info("--> set some persistent cluster settings");
-        assertAcked(
-            clusterAdmin().prepareUpdateSettings()
-                .setPersistentSettings(
-                    Settings.builder()
-                        .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), TimeValue.timeValueSeconds(25))
-                        .build()
-                )
+        updateClusterSettings(
+            Settings.builder()
+                .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), TimeValue.timeValueSeconds(25))
         );
 
         ensureGreen();
@@ -274,13 +277,9 @@ public class SnapshotsAndFileSettingsIT extends AbstractSnapshotIntegTestCase {
         createFullSnapshot("test-repo", "test-snap");
         assertThat(getSnapshot("test-repo", "test-snap").state(), equalTo(SnapshotState.SUCCESS));
 
-        assertAcked(
-            clusterAdmin().prepareUpdateSettings()
-                .setPersistentSettings(
-                    Settings.builder()
-                        .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), TimeValue.timeValueSeconds(55))
-                        .build()
-                )
+        updateClusterSettings(
+            Settings.builder()
+                .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), TimeValue.timeValueSeconds(55))
         );
 
         logger.info("--> restore global state from the snapshot");
@@ -322,14 +321,10 @@ public class SnapshotsAndFileSettingsIT extends AbstractSnapshotIntegTestCase {
         writeJSONFile(masterNode, emptyFileSettingsJSON);
         assertClusterStateSaveOK(cleanupReservedState.v1(), cleanupReservedState.v2());
         // cleanup
-        assertAcked(
-            clusterAdmin().prepareUpdateSettings()
-                .setPersistentSettings(
-                    Settings.builder()
-                        .put(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(), (String) null)
-                        .put("indices.recovery.max_bytes_per_sec", (String) null)
-                        .build()
-                )
+        updateClusterSettings(
+            Settings.builder()
+                .putNull(InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey())
+                .putNull("indices.recovery.max_bytes_per_sec")
         );
     }
 }

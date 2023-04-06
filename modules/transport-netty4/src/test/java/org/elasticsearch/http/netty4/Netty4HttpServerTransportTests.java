@@ -66,6 +66,10 @@ import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.tracing.Tracer;
 import org.elasticsearch.transport.netty4.NettyAllocator;
 import org.elasticsearch.transport.netty4.SharedGroupFactory;
+<<<<<<< HEAD
+=======
+import org.elasticsearch.transport.netty4.TLSConfig;
+>>>>>>> upstream/main
 import org.elasticsearch.xcontent.ToXContent;
 import org.junit.After;
 import org.junit.Before;
@@ -174,7 +178,10 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
                 dispatcher,
                 clusterSettings,
                 new SharedGroupFactory(settings),
-                Tracer.NOOP
+                Tracer.NOOP,
+                TLSConfig.noTLS(),
+                null,
+                randomFrom(Netty4HttpHeaderValidator.NOOP_VALIDATOR, null)
             )
         ) {
             transport.start();
@@ -223,7 +230,10 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
                 new NullDispatcher(),
                 clusterSettings,
                 new SharedGroupFactory(Settings.EMPTY),
-                Tracer.NOOP
+                Tracer.NOOP,
+                TLSConfig.noTLS(),
+                null,
+                randomFrom(Netty4HttpHeaderValidator.NOOP_VALIDATOR, null)
             )
         ) {
             transport.start();
@@ -241,7 +251,10 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
                     new NullDispatcher(),
                     clusterSettings,
                     new SharedGroupFactory(settings),
-                    Tracer.NOOP
+                    Tracer.NOOP,
+                    TLSConfig.noTLS(),
+                    null,
+                    randomFrom(Netty4HttpHeaderValidator.NOOP_VALIDATOR, null)
                 )
             ) {
                 BindHttpException bindHttpException = expectThrows(BindHttpException.class, otherTransport::start);
@@ -293,7 +306,10 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
                 dispatcher,
                 clusterSettings,
                 new SharedGroupFactory(settings),
-                Tracer.NOOP
+                Tracer.NOOP,
+                TLSConfig.noTLS(),
+                null,
+                randomFrom(Netty4HttpHeaderValidator.NOOP_VALIDATOR, null)
             )
         ) {
             transport.start();
@@ -361,11 +377,20 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
                 dispatcher,
                 clusterSettings,
                 new SharedGroupFactory(Settings.EMPTY),
-                Tracer.NOOP
+                Tracer.NOOP,
+                TLSConfig.noTLS(),
+                null,
+                randomFrom(Netty4HttpHeaderValidator.NOOP_VALIDATOR, null)
             ) {
                 @Override
                 public ChannelHandler configureServerChannelHandler() {
-                    return new HttpChannelHandler(this, handlingSettings) {
+                    return new HttpChannelHandler(
+                        this,
+                        handlingSettings,
+                        TLSConfig.noTLS(),
+                        null,
+                        randomFrom(Netty4HttpHeaderValidator.NOOP_VALIDATOR, null)
+                    ) {
                         @Override
                         protected void initChannel(Channel ch) throws Exception {
                             super.initChannel(ch);
@@ -458,7 +483,10 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
                 dispatcher,
                 randomClusterSettings(),
                 new SharedGroupFactory(settings),
-                Tracer.NOOP
+                Tracer.NOOP,
+                TLSConfig.noTLS(),
+                null,
+                randomFrom(Netty4HttpHeaderValidator.NOOP_VALIDATOR, null)
             )
         ) {
             transport.start();
@@ -528,7 +556,10 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
                 dispatcher,
                 randomClusterSettings(),
                 new SharedGroupFactory(settings),
-                Tracer.NOOP
+                Tracer.NOOP,
+                TLSConfig.noTLS(),
+                null,
+                randomFrom(Netty4HttpHeaderValidator.NOOP_VALIDATOR, null)
             )
         ) {
             transport.start();
@@ -565,6 +596,7 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
             public void dispatchRequest(final RestRequest request, final RestChannel channel, final ThreadContext threadContext) {
                 try {
                     channel.sendResponse(
+<<<<<<< HEAD
                         new RestResponse(
                             OK,
                             ChunkedRestResponseBody.fromXContent(
@@ -575,6 +607,11 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
                                 channel
                             )
                         )
+=======
+                        new RestResponse(OK, ChunkedRestResponseBody.fromXContent(ignored -> Iterators.single((builder, params) -> {
+                            throw new AssertionError("should not be called for HEAD REQUEST");
+                        }), ToXContent.EMPTY_PARAMS, channel))
+>>>>>>> upstream/main
                     );
                 } catch (IOException e) {
                     throw new AssertionError(e);
@@ -598,7 +635,14 @@ public class Netty4HttpServerTransportTests extends AbstractHttpServerTransportT
                 dispatcher,
                 clusterSettings,
                 new SharedGroupFactory(settings),
+<<<<<<< HEAD
                 Tracer.NOOP
+=======
+                Tracer.NOOP,
+                TLSConfig.noTLS(),
+                null,
+                randomFrom(Netty4HttpHeaderValidator.NOOP_VALIDATOR, null)
+>>>>>>> upstream/main
             )
         ) {
             transport.start();

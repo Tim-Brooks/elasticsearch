@@ -14,6 +14,7 @@ import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.common.CheckedBiConsumer;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
+import org.elasticsearch.core.Strings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.xpack.core.ml.inference.assignment.AllocationStatus;
 import org.elasticsearch.xpack.core.ml.inference.assignment.AssignmentState;
@@ -349,7 +350,7 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
         createPassThroughModel(badModel);
         putVocabulary(List.of("once", "twice"), badModel);
         Request request = new Request("PUT", "_ml/trained_models/" + badModel + "/definition/0");
-        request.setJsonEntity(formatted("""
+        request.setJsonEntity(Strings.format("""
             {"total_definition_length":%s,"definition": "%s","total_parts": 1}""", length, poorlyFormattedModelBase64));
         client().performRequest(request);
         startDeployment(badModel, AllocationStatus.State.STARTING.toString());
@@ -466,11 +467,31 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
         // The test ensures the responses are returned in the same order
         // as the requests
         createTextEmbeddingModel(modelId);
+<<<<<<< HEAD
         putModelDefinition(modelId, BASE_64_ENCODED_TEXT_EMBEDDING_MODEL, RAW_TEXT_EMBEDDING_MODEL_SIZE);
+=======
+        putModelDefinition(modelId, TextEmbeddingQueryIT.BASE_64_ENCODED_MODEL, TextEmbeddingQueryIT.RAW_MODEL_SIZE);
+>>>>>>> upstream/main
         putVocabulary(
             List.of("these", "are", "my", "words", "the", "washing", "machine", "is", "leaking", "octopus", "comforter", "smells"),
             modelId
         );
+<<<<<<< HEAD
+=======
+
+        if (randomBoolean()) {
+            // Set an allocation awareness attribute that doesn't exist on the ML nodes.
+            // It shouldn't make any difference to the result of the test.
+            // The setting is cleared in the cleanup method of these tests.
+            Request clusterSettings = new Request("PUT", "_cluster/settings");
+            clusterSettings.setJsonEntity("""
+                {"persistent" : {
+                        "cluster.routing.allocation.awareness.attributes": "rack"
+                    }}""");
+            client().performRequest(clusterSettings);
+        }
+
+>>>>>>> upstream/main
         startDeployment(modelId, AllocationStatus.State.FULLY_ALLOCATED.toString());
 
         List<String> inputs = List.of(
@@ -548,7 +569,7 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
         createPassThroughModel(model);
         putVocabulary(List.of("once", "twice"), model);
         Request request = new Request("PUT", "_ml/trained_models/" + model + "/definition/0");
-        request.setJsonEntity(formatted("""
+        request.setJsonEntity(Strings.format("""
             {"total_definition_length":%s2,"definition": "%s","total_parts": 1}""", RAW_MODEL_SIZE, BASE_64_ENCODED_MODEL));
         client().performRequest(request);
         Exception ex = expectThrows(Exception.class, () -> startDeployment(model));
@@ -649,7 +670,11 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
 
         // We set timeout to 20s as we've seen this test time out on some busy workers.
         request = new Request("POST", "/_ml/trained_models/" + modelId + "/_infer?timeout=20s");
+<<<<<<< HEAD
         request.setJsonEntity(formatted("""
+=======
+        request.setJsonEntity(Strings.format("""
+>>>>>>> upstream/main
             {
               "docs": [
                 {
@@ -676,7 +701,7 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
         putVocabulary(List.of("these", "are", "my", "words"), modelId);
         startDeployment(modelId);
 
-        client().performRequest(putPipeline("my_pipeline", formatted("""
+        client().performRequest(putPipeline("my_pipeline", Strings.format("""
             {
               "processors": [
                 {
@@ -706,9 +731,9 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
         putModelDefinition(modelId);
         putVocabulary(List.of("these", "are", "my", "words"), modelId);
         startDeployment(modelId);
-        client().performRequest(new Request("PUT", formatted("_ml/trained_models/%s/model_aliases/%s", modelId, modelAlias)));
+        client().performRequest(new Request("PUT", Strings.format("_ml/trained_models/%s/model_aliases/%s", modelId, modelAlias)));
 
-        client().performRequest(putPipeline("my_pipeline", formatted("""
+        client().performRequest(putPipeline("my_pipeline", Strings.format("""
             {
               "processors": [
                 {
@@ -738,9 +763,9 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
         putModelDefinition(modelId);
         putVocabulary(List.of("these", "are", "my", "words"), modelId);
         startDeployment(modelId);
-        client().performRequest(new Request("PUT", formatted("_ml/trained_models/%s/model_aliases/%s", modelId, modelAlias)));
+        client().performRequest(new Request("PUT", Strings.format("_ml/trained_models/%s/model_aliases/%s", modelId, modelAlias)));
 
-        String source = formatted("""
+        String source = Strings.format("""
             {
               "pipeline": {
                 "processors": [
@@ -853,12 +878,12 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
 
         // Enable lazy starting so that the deployments start even if they cannot get fully allocated.
         // The setting is cleared in the cleanup method of these tests.
-        Request loggingSettings = new Request("PUT", "_cluster/settings");
-        loggingSettings.setJsonEntity("""
+        Request clusterSettings = new Request("PUT", "_cluster/settings");
+        clusterSettings.setJsonEntity("""
             {"persistent" : {
                     "xpack.ml.max_lazy_ml_nodes": 5
                 }}""");
-        client().performRequest(loggingSettings);
+        client().performRequest(clusterSettings);
 
         String modelId1 = "stopping_triggers_rebalance_1";
         createPassThroughModel(modelId1);
@@ -932,12 +957,12 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
 
         // Enable lazy starting so that the deployments start even if they cannot get fully allocated.
         // The setting is cleared in the cleanup method of these tests.
-        Request loggingSettings = new Request("PUT", "_cluster/settings");
-        loggingSettings.setJsonEntity("""
+        Request clusterSettings = new Request("PUT", "_cluster/settings");
+        clusterSettings.setJsonEntity("""
             {"persistent" : {
                     "xpack.ml.max_lazy_ml_nodes": 5
                 }}""");
-        client().performRequest(loggingSettings);
+        client().performRequest(clusterSettings);
 
         String modelId1 = "start_no_processors_left_lazy_start_1";
         createPassThroughModel(modelId1);
@@ -1012,12 +1037,12 @@ public class PyTorchModelIT extends PyTorchModelRestTestCase {
     }
 
     public void testUpdateDeployment_GivenAllocationsAreIncreasedOverResources_AndScalingIsPossible() throws Exception {
-        Request maxLazyNodeSetting = new Request("PUT", "_cluster/settings");
-        maxLazyNodeSetting.setJsonEntity("""
+        Request clusterSettings = new Request("PUT", "_cluster/settings");
+        clusterSettings.setJsonEntity("""
             {"persistent" : {
                     "xpack.ml.max_lazy_ml_nodes": 5
                 }}""");
-        client().performRequest(maxLazyNodeSetting);
+        client().performRequest(clusterSettings);
 
         String modelId = "update_deployment_allocations_increased_scaling_possible";
         createPassThroughModel(modelId);

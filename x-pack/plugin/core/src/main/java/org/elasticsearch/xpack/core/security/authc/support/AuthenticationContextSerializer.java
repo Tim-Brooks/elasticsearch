@@ -9,7 +9,11 @@ package org.elasticsearch.xpack.core.security.authc.support;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+<<<<<<< HEAD
 import org.elasticsearch.Version;
+=======
+import org.elasticsearch.TransportVersion;
+>>>>>>> upstream/main
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.core.Nullable;
@@ -64,8 +68,13 @@ public class AuthenticationContextSerializer {
         try {
             byte[] bytes = Base64.getDecoder().decode(header);
             StreamInput input = StreamInput.wrap(bytes);
+<<<<<<< HEAD
             Version version = Version.readVersion(input);
             input.setVersion(version);
+=======
+            TransportVersion version = TransportVersion.readVersion(input);
+            input.setTransportVersion(version);
+>>>>>>> upstream/main
             return new Authentication(input);
         } catch (IOException | RuntimeException e) {
             logger.warn("Failed to decode authentication [" + header + "]", e);

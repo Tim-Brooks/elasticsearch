@@ -60,9 +60,14 @@ similarity.
 
 In many cases, a brute-force kNN search is not efficient enough. For this
 reason, the `dense_vector` type supports indexing vectors into a specialized
-data structure to support fast kNN retrieval through the
-<<knn-search-api, kNN search API>>. You can enable indexing by setting the
-`index` parameter:
+data structure to support fast kNN retrieval through the <<search-api-knn, `knn` option>> in the search API
+
+NOTE: Indexing vectors for approximate kNN search is an expensive process. It
+can take substantial time to ingest documents that contain vector fields with
+`index` enabled. See <<tune-knn-search,k-nearest neighbor (kNN) search>> to
+learn more about the memory requirements.
+
+You can enable indexing by setting the `index` parameter:
 
 [source,console]
 --------------------------------------------------
@@ -86,10 +91,6 @@ PUT my-index-2
 efficient kNN search. Like most kNN algorithms, HNSW is an approximate method
 that sacrifices result accuracy for improved speed.
 
-NOTE: Indexing vectors for approximate kNN search is an expensive process. It
-can take substantial time to ingest documents that contain vector fields with
-`index` enabled.
-
 Dense vector fields cannot be indexed if they are within
 <<nested, `nested`>> mappings.
 
@@ -99,6 +100,7 @@ Dense vector fields cannot be indexed if they are within
 
 The following mapping parameters are accepted:
 
+[[dense-vector-element-type]]
 `element_type`::
 (Optional, string)
 The data type used to encode vectors. The supported data types are
@@ -193,5 +195,13 @@ neighbors for each new node. Defaults to `100`.
 ====
 
 [[dense-vector-synthetic-source]]
-==== Synthetic `_source` preview:[]
+==== Synthetic `_source`
+
+IMPORTANT: Synthetic `_source` is Generally Available only for TSDB indices
+(indices that have `index.mode` set to `time_series`). For other indices
+synthetic `_source` is in technical preview. Features in technical preview may
+be changed or removed in a future release. Elastic will apply best effort to fix
+any issues, but features in technical preview are not subject to the support SLA
+of official GA features.
+
 `dense_vector` fields support <<synthetic-source,synthetic `_source`>> .

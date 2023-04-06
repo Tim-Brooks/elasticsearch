@@ -13,6 +13,7 @@ import org.elasticsearch.client.Response;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
+import org.elasticsearch.core.Strings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.test.SecuritySettingsSourceField;
 import org.elasticsearch.test.rest.ESRestTestCase;
@@ -27,7 +28,6 @@ import org.junit.Before;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -69,16 +69,17 @@ public abstract class PyTorchModelRestTestCase extends ESRestTestCase {
     public void cleanup() throws Exception {
         terminate(executorService);
 
-        Request loggingSettings = new Request("PUT", "_cluster/settings");
-        loggingSettings.setJsonEntity("""
+        Request clusterSettings = new Request("PUT", "_cluster/settings");
+        clusterSettings.setJsonEntity("""
             {"persistent" : {
                 "logger.org.elasticsearch.xpack.ml.inference.assignment": null,
                 "logger.org.elasticsearch.xpack.ml.inference.deployment" : null,
                 "logger.org.elasticsearch.xpack.ml.inference.pytorch" : null,
                 "logger.org.elasticsearch.xpack.ml.process.logging" : null,
+                "cluster.routing.allocation.awareness.attributes": null,
                 "xpack.ml.max_lazy_ml_nodes": null
             }}""");
-        client().performRequest(loggingSettings);
+        client().performRequest(clusterSettings);
 
         new MlRestTestStateCleaner(logger, adminClient()).resetFeatures();
         waitForPendingTasks(adminClient());
@@ -129,7 +130,7 @@ public abstract class PyTorchModelRestTestCase extends ESRestTestCase {
 
     protected void putModelDefinition(String modelId, String base64EncodedModel, long unencodedModelSize) throws IOException {
         Request request = new Request("PUT", "_ml/trained_models/" + modelId + "/definition/0");
-        String body = String.format(Locale.ROOT, """
+        String body = Strings.format("""
             {"total_definition_length":%s,"definition": "%s","total_parts": 1}""", unencodedModelSize, base64EncodedModel);
         request.setJsonEntity(body);
         client().performRequest(request);
@@ -143,7 +144,7 @@ public abstract class PyTorchModelRestTestCase extends ESRestTestCase {
         String quotedWords = vocabularyWithPad.stream().map(s -> "\"" + s + "\"").collect(Collectors.joining(","));
 
         Request request = new Request("PUT", "_ml/trained_models/" + modelId + "/vocabulary");
-        request.setJsonEntity(String.format(Locale.ROOT, """
+        request.setJsonEntity(Strings.format("""
             { "vocabulary": [%s] }
             """, quotedWords));
         client().performRequest(request);
@@ -244,7 +245,7 @@ public abstract class PyTorchModelRestTestCase extends ESRestTestCase {
 
     protected Response infer(String input, String modelId, TimeValue timeout) throws IOException {
         Request request = new Request("POST", "/_ml/trained_models/" + modelId + "/_infer?timeout=" + timeout.toString());
-        request.setJsonEntity(String.format(Locale.ROOT, """
+        request.setJsonEntity(Strings.format("""
             {  "docs": [{"input":"%s"}] }
             """, input));
         return client().performRequest(request);
@@ -252,7 +253,11 @@ public abstract class PyTorchModelRestTestCase extends ESRestTestCase {
 
     protected Response infer(String input, String modelId) throws IOException {
         Request request = new Request("POST", "/_ml/trained_models/" + modelId + "/_infer?timeout=30s");
+<<<<<<< HEAD
         request.setJsonEntity(String.format(Locale.ROOT, """
+=======
+        request.setJsonEntity(Strings.format("""
+>>>>>>> upstream/main
             {  "docs": [{"input":"%s"}] }
             """, input));
         return client().performRequest(request);
@@ -260,7 +265,11 @@ public abstract class PyTorchModelRestTestCase extends ESRestTestCase {
 
     protected Response infer(String input, String modelId, String resultsField) throws IOException {
         Request request = new Request("POST", "/_ml/trained_models/" + modelId + "/_infer?timeout=30s");
+<<<<<<< HEAD
         request.setJsonEntity(String.format(Locale.ROOT, """
+=======
+        request.setJsonEntity(Strings.format("""
+>>>>>>> upstream/main
             {
               "docs": [ { "input": "%s" } ],
               "inference_config": {
@@ -310,7 +319,7 @@ public abstract class PyTorchModelRestTestCase extends ESRestTestCase {
     protected void assertNotificationsContain(String modelId, String... auditMessages) throws IOException {
         client().performRequest(new Request("POST", ".ml-notifications-*/_refresh"));
         Request search = new Request("POST", ".ml-notifications-*/_search");
-        search.setJsonEntity(String.format(Locale.ROOT, """
+        search.setJsonEntity(Strings.format("""
             {
                 "size": 100,
                 "query": {

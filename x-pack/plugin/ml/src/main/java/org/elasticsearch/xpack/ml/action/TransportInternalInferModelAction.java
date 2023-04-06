@@ -252,12 +252,31 @@ public class TransportInternalInferModelAction extends HandledTransportAction<Re
         int slot = 0;
         for (var node : nodes) {
             InferTrainedModelDeploymentAction.Request deploymentRequest;
+<<<<<<< HEAD
             deploymentRequest = new InferTrainedModelDeploymentAction.Request(
                 concreteModelId,
                 request.getUpdate(),
                 request.getObjectsToInfer().subList(startPos, startPos + node.v2()),
                 request.getTimeout()
             );
+=======
+            if (request.getTextInput() == null) {
+                deploymentRequest = InferTrainedModelDeploymentAction.Request.forDocs(
+                    concreteModelId,
+                    request.getUpdate(),
+                    request.getObjectsToInfer().subList(startPos, startPos + node.v2()),
+                    request.getInferenceTimeout()
+                );
+            } else {
+                deploymentRequest = InferTrainedModelDeploymentAction.Request.forTextInput(
+                    concreteModelId,
+                    request.getUpdate(),
+                    request.getTextInput().subList(startPos, startPos + node.v2()),
+                    request.getInferenceTimeout()
+                );
+            }
+            deploymentRequest.setHighPriority(request.isHighPriority());
+>>>>>>> upstream/main
             deploymentRequest.setNodes(node.v1());
             deploymentRequest.setParentTask(parentTaskId);
 

@@ -17,7 +17,7 @@ import org.elasticsearch.index.Index;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.search.SearchShardTarget;
 import org.elasticsearch.test.ESTestCase;
-import org.elasticsearch.test.VersionUtils;
+import org.elasticsearch.test.TransportVersionUtils;
 import org.elasticsearch.xcontent.ToXContent;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentType;
@@ -160,7 +160,11 @@ public class ShardSearchFailureTests extends ESTestCase {
                 testItem,
                 writableRegistry(),
                 ShardSearchFailure::new,
+<<<<<<< HEAD
                 VersionUtils.randomVersion(random())
+=======
+                TransportVersionUtils.randomVersion(random())
+>>>>>>> upstream/main
             );
             assertEquals(testItem.index(), deserializedInstance.index());
             assertEquals(testItem.shard(), deserializedInstance.shard());

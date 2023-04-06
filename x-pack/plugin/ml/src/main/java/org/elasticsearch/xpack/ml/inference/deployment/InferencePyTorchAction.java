@@ -61,7 +61,7 @@ class InferencePyTorchAction extends AbstractPyTorchAction<InferenceResults> {
             try {
                 cancellableTask.ensureNotCancelled();
             } catch (TaskCancelledException ex) {
-                logger.debug(() -> format("[%s] %s", getModelId(), ex.getMessage()));
+                logger.warn(() -> format("[%s] %s", getModelId(), ex.getMessage()));
                 return true;
             }
         }
@@ -91,7 +91,7 @@ class InferencePyTorchAction extends AbstractPyTorchAction<InferenceResults> {
             NlpConfig nlpConfig = (NlpConfig) config;
             NlpTask.Request request = processor.getRequestBuilder(nlpConfig)
                 .buildRequest(text, requestIdStr, nlpConfig.getTokenization().getTruncate(), nlpConfig.getTokenization().getSpan());
-            logger.debug(() -> "Inference Request " + request.processInput().utf8ToString());
+            logger.debug(() -> format("handling request [%s]", requestIdStr));
             if (request.tokenization().anyTruncated()) {
                 logger.debug("[{}] [{}] input truncated", getModelId(), getRequestId());
             }
@@ -141,7 +141,7 @@ class InferencePyTorchAction extends AbstractPyTorchAction<InferenceResults> {
             return;
         }
         InferenceResults results = inferenceResultsProcessor.processResult(tokenization, pyTorchResult.inferenceResult());
-        logger.debug(() -> format("[%s] processed result for request [%s]", getModelId(), getRequestId()));
+        logger.trace(() -> format("[%s] processed result for request [%s]", getModelId(), getRequestId()));
         onSuccess(results);
     }
 

@@ -235,11 +235,19 @@ public class ReadinessClusterIT extends ESIntegTestCase implements ReadinessClie
 
         FileSettingsService fileSettingsService = internalCluster().getInstance(FileSettingsService.class, node);
 
+<<<<<<< HEAD
         Files.createDirectories(fileSettingsService.operatorSettingsDir());
         Path tempFilePath = createTempFile();
 
         Files.write(tempFilePath, Strings.format(json, version).getBytes(StandardCharsets.UTF_8));
         Files.move(tempFilePath, fileSettingsService.operatorSettingsFile(), StandardCopyOption.ATOMIC_MOVE);
+=======
+        Files.createDirectories(fileSettingsService.watchedFileDir());
+        Path tempFilePath = createTempFile();
+
+        Files.write(tempFilePath, Strings.format(json, version).getBytes(StandardCharsets.UTF_8));
+        Files.move(tempFilePath, fileSettingsService.watchedFile(), StandardCopyOption.ATOMIC_MOVE);
+>>>>>>> upstream/main
         logger.info("--> New file settings: [{}]", Strings.format(json, version));
     }
 
@@ -299,6 +307,16 @@ public class ReadinessClusterIT extends ESIntegTestCase implements ReadinessClie
         return new Tuple<>(savedClusterState, metadataVersion);
     }
 
+<<<<<<< HEAD
+=======
+    private CountDownLatch setupReadinessProbeListener(String masterNode) {
+        ReadinessService s = internalCluster().getInstance(ReadinessService.class, masterNode);
+        CountDownLatch readinessProbeListening = new CountDownLatch(1);
+        s.addBoundAddressListener(x -> readinessProbeListening.countDown());
+        return readinessProbeListening;
+    }
+
+>>>>>>> upstream/main
     public void testReadyAfterCorrectFileSettings() throws Exception {
         internalCluster().setBootstrapMasterNodeIndex(0);
         logger.info("--> start data node / non master node");
@@ -314,6 +332,10 @@ public class ReadinessClusterIT extends ESIntegTestCase implements ReadinessClie
         logger.info("--> start master node");
         final String masterNode = internalCluster().startMasterOnlyNode();
         assertMasterNode(internalCluster().nonMasterClient(), masterNode);
+<<<<<<< HEAD
+=======
+        var readinessProbeListening = setupReadinessProbeListener(masterNode);
+>>>>>>> upstream/main
 
         FileSettingsService masterFileSettingsService = internalCluster().getInstance(FileSettingsService.class, masterNode);
 
@@ -324,6 +346,10 @@ public class ReadinessClusterIT extends ESIntegTestCase implements ReadinessClie
         assertTrue(awaitSuccessful);
 
         ReadinessService s = internalCluster().getInstance(ReadinessService.class, internalCluster().getMasterName());
+<<<<<<< HEAD
+=======
+        readinessProbeListening.await(20, TimeUnit.SECONDS);
+>>>>>>> upstream/main
         tcpReadinessProbeTrue(s);
     }
 

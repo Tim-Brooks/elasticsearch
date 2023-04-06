@@ -8,54 +8,68 @@
 
 package org.elasticsearch.gradle.plugin;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
-import org.elasticsearch.gradle.plugin.scanner.ClassReaders;
-import org.elasticsearch.gradle.plugin.scanner.NamedComponentScanner;
+import org.elasticsearch.gradle.LoggedExec;
 import org.gradle.api.DefaultTask;
-import org.gradle.api.file.ConfigurableFileCollection;
 import org.gradle.api.file.FileCollection;
 import org.gradle.api.file.ProjectLayout;
 import org.gradle.api.file.RegularFileProperty;
 import org.gradle.api.logging.Logger;
 import org.gradle.api.logging.Logging;
-import org.gradle.api.model.ObjectFactory;
 import org.gradle.api.tasks.CompileClasspath;
+import org.gradle.api.tasks.InputFiles;
 import org.gradle.api.tasks.OutputFile;
+import org.gradle.api.tasks.PathSensitive;
+import org.gradle.api.tasks.PathSensitivity;
 import org.gradle.api.tasks.TaskAction;
-import org.gradle.workers.WorkAction;
-import org.gradle.workers.WorkParameters;
+import org.gradle.process.ExecOperations;
+import org.gradle.process.ExecResult;
 import org.gradle.workers.WorkerExecutor;
-import org.objectweb.asm.ClassReader;
 
 import java.io.File;
+<<<<<<< HEAD
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+=======
+>>>>>>> upstream/main
 
 import javax.inject.Inject;
 
 public abstract class GenerateNamedComponentsTask extends DefaultTask {
     private static final Logger LOGGER = Logging.getLogger(GenerateNamedComponentsTask.class);
+    private static final String NAMED_COMPONENTS_DIR = "generated-named-components/";
     private static final String NAMED_COMPONENTS_FILE = "named_components.json";
+    private static final String NAMED_COMPONENTS_PATH = NAMED_COMPONENTS_DIR + NAMED_COMPONENTS_FILE;
 
     private final WorkerExecutor workerExecutor;
+    private FileCollection pluginScannerClasspath;
     private FileCollection classpath;
+    private ExecOperations execOperations;
+    private ProjectLayout projectLayout;
 
     @Inject
-    public GenerateNamedComponentsTask(WorkerExecutor workerExecutor, ObjectFactory objectFactory, ProjectLayout projectLayout) {
+    public GenerateNamedComponentsTask(WorkerExecutor workerExecutor, ExecOperations execOperations, ProjectLayout projectLayout) {
         this.workerExecutor = workerExecutor;
-        getOutputFile().convention(projectLayout.getBuildDirectory().file("generated-named-components/" + NAMED_COMPONENTS_FILE));
+        this.execOperations = execOperations;
+        this.projectLayout = projectLayout;
+
+        getOutputFile().convention(projectLayout.getBuildDirectory().file(NAMED_COMPONENTS_PATH));
     }
 
     @TaskAction
     public void scanPluginClasses() {
-        workerExecutor.noIsolation().submit(GenerateNamedComponentsAction.class, params -> {
-            params.getClasspath().from(classpath);
-            params.getOutputFile().set(getOutputFile());
+        File outputFile = projectLayout.getBuildDirectory().file(NAMED_COMPONENTS_PATH).get().getAsFile();
+
+        ExecResult execResult = LoggedExec.javaexec(execOperations, spec -> {
+            spec.classpath(pluginScannerClasspath.plus(getClasspath()).getAsPath());
+            spec.getMainClass().set("org.elasticsearch.plugin.scanner.NamedComponentScanner");
+            spec.args(outputFile);
+            spec.setErrorOutput(System.err);
+            spec.setStandardOutput(System.out);
         });
+        execResult.assertNormalExitValue();
     }
 
     @OutputFile
@@ -70,6 +84,7 @@ public abstract class GenerateNamedComponentsTask extends DefaultTask {
         this.classpath = classpath;
     }
 
+<<<<<<< HEAD
     public abstract static class GenerateNamedComponentsAction implements WorkAction<Parameters> {
         private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
@@ -94,12 +109,15 @@ public abstract class GenerateNamedComponentsTask extends DefaultTask {
                 e.printStackTrace();
             }
         }
+=======
+    public void setPluginScannerClasspath(FileCollection pluginScannerClasspath) {
+        this.pluginScannerClasspath = pluginScannerClasspath;
+>>>>>>> upstream/main
     }
 
-    interface Parameters extends WorkParameters {
-
-        ConfigurableFileCollection getClasspath();
-
-        RegularFileProperty getOutputFile();
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    public FileCollection getPluginScannerClasspath() {
+        return pluginScannerClasspath;
     }
 }

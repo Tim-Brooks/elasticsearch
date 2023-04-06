@@ -305,7 +305,6 @@ public abstract class AbstractXContentFilteringTestCase extends AbstractFilterin
         );
     }
 
-    @AwaitsFix(bugUrl = "https://github.com/elastic/elasticsearch/pull/80160")
     public void testDotsAndDoubleWildcardInExcludedFieldName() throws IOException {
         testFilter(
             builder -> builder.startObject().endObject(),
@@ -314,7 +313,6 @@ public abstract class AbstractXContentFilteringTestCase extends AbstractFilterin
             singleton("**.baz"),
             true
         );
-        // bug of double wildcard in excludes report in https://github.com/FasterXML/jackson-core/issues/700
         testFilter(
             builder -> builder.startObject().startObject("foo").field("baz", "test").endObject().endObject(),
             builder -> builder.startObject().startObject("foo").field("bar", "test").field("baz", "test").endObject().endObject(),
@@ -409,13 +407,9 @@ public abstract class AbstractXContentFilteringTestCase extends AbstractFilterin
             return filterOnBuilder(sample, includes, excludes);
         }
         FilterPath[] excludesFilter = FilterPath.compile(excludes);
-        if (excludesFilter != null && Arrays.stream(excludesFilter).anyMatch(FilterPath::hasDoubleWildcard)) {
-            /*
-             * If there are any double wildcard filters the parser based
-             * filtering produced weird invalid json. Just field names
-             * and no objects?! Weird. Anyway, we can't use it.
-             */
-            assertFalse("can't filter on builder with dotted wildcards in exclude", matchFieldNamesWithDots);
+        if (excludesFilter != null
+            && Arrays.stream(excludesFilter).anyMatch(FilterPath::hasDoubleWildcard)
+            && matchFieldNamesWithDots == false) {
             return filterOnBuilder(sample, includes, excludes);
         }
         return filterOnParser(sample, includes, excludes, matchFieldNamesWithDots);

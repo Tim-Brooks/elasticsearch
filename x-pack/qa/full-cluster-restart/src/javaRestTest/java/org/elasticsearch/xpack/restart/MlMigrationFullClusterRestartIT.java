@@ -211,7 +211,7 @@ public class MlMigrationFullClusterRestartIT extends AbstractXpackFullClusterRes
     }
 
     private void putJob(String jobId) throws IOException {
-        String jobConfig = formatted("""
+        String jobConfig = Strings.format("""
             {
                 "job_id": "%s",
                 "analysis_config": {

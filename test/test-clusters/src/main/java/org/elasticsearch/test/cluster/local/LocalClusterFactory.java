@@ -8,6 +8,11 @@
 
 package org.elasticsearch.test.cluster.local;
 
+<<<<<<< HEAD
+=======
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+>>>>>>> upstream/main
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.test.cluster.ClusterFactory;
@@ -66,10 +71,18 @@ public class LocalClusterFactory implements ClusterFactory<LocalClusterSpec, Loc
     private static final String ENABLE_DEBUG_JVM_ARGS = "-agentlib:jdwp=transport=dt_socket,server=n,suspend=y,address=";
     private static final int DEFAULT_DEBUG_PORT = 5007;
 
+<<<<<<< HEAD
+=======
+    private final ObjectMapper objectMapper;
+>>>>>>> upstream/main
     private final DistributionResolver distributionResolver;
     private Path baseWorkingDir;
 
     public LocalClusterFactory(DistributionResolver distributionResolver) {
+<<<<<<< HEAD
+=======
+        this.objectMapper = new ObjectMapper();
+>>>>>>> upstream/main
         this.distributionResolver = distributionResolver;
     }
 
@@ -136,6 +149,10 @@ public class LocalClusterFactory implements ClusterFactory<LocalClusterSpec, Loc
             createKeystore();
             addKeystoreSettings();
             addKeystoreFiles();
+<<<<<<< HEAD
+=======
+            writeSecureSecretsFile();
+>>>>>>> upstream/main
             configureSecurity();
 
             startElasticsearch();
@@ -171,15 +188,34 @@ public class LocalClusterFactory implements ClusterFactory<LocalClusterSpec, Loc
             return readPortsFile(portsFile).get(0);
         }
 
+<<<<<<< HEAD
+=======
+        public String getRemoteClusterServerEndpoint() {
+            Path portsFile = workingDir.resolve("logs").resolve("remote_cluster.ports");
+            if (Files.notExists(portsFile)) {
+                waitUntilReady();
+            }
+            return readPortsFile(portsFile).get(0);
+        }
+
+>>>>>>> upstream/main
         public void deletePortsFiles() {
             try {
                 Path hostsFile = workingDir.resolve("config").resolve("unicast_hosts.txt");
                 Path httpPortsFile = workingDir.resolve("logs").resolve("http.ports");
                 Path transportPortsFile = workingDir.resolve("logs").resolve("transport.ports");
+<<<<<<< HEAD
+=======
+                Path remoteClusterServerPortsFile = workingDir.resolve("logs").resolve("remote_cluster.ports");
+>>>>>>> upstream/main
 
                 Files.deleteIfExists(hostsFile);
                 Files.deleteIfExists(httpPortsFile);
                 Files.deleteIfExists(transportPortsFile);
+<<<<<<< HEAD
+=======
+                Files.deleteIfExists(remoteClusterServerPortsFile);
+>>>>>>> upstream/main
             } catch (IOException e) {
                 throw new UncheckedIOException("Failed to write unicast_hosts for: " + this, e);
             }
@@ -363,7 +399,11 @@ public class LocalClusterFactory implements ClusterFactory<LocalClusterSpec, Loc
         }
 
         private void addKeystoreSettings() {
+<<<<<<< HEAD
             spec.getKeystoreSettings().forEach((key, value) -> {
+=======
+            spec.resolveKeystore().forEach((key, value) -> {
+>>>>>>> upstream/main
                 String input = spec.getKeystorePassword() == null || spec.getKeystorePassword().isEmpty()
                     ? value
                     : spec.getKeystorePassword() + "\n" + value;
@@ -397,6 +437,24 @@ public class LocalClusterFactory implements ClusterFactory<LocalClusterSpec, Loc
             });
         }
 
+<<<<<<< HEAD
+=======
+        private void writeSecureSecretsFile() {
+            if (spec.getSecrets().isEmpty() == false) {
+                try {
+                    Path secretsFile = configDir.resolve("secrets/secrets.json");
+                    Files.createDirectories(secretsFile.getParent());
+                    Map<String, Object> secretsFileContent = new HashMap<>();
+                    secretsFileContent.put("secrets", spec.getSecrets());
+                    secretsFileContent.put("metadata", Map.of("version", "1", "compatibility", spec.getVersion().toString()));
+                    Files.writeString(secretsFile, objectMapper.writeValueAsString(secretsFileContent));
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }
+        }
+
+>>>>>>> upstream/main
         private void configureSecurity() {
             if (spec.isSecurityEnabled()) {
                 if (spec.getUsers().isEmpty() == false) {
