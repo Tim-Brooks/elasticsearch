@@ -2010,7 +2010,7 @@ public class InternalEngine extends Engine {
     }
 
     @Override
-    public boolean flush(boolean force, boolean waitIfOngoing) throws EngineException {
+    public FlushResult flush(boolean force, boolean waitIfOngoing) throws EngineException {
         ensureOpen();
         if (force && waitIfOngoing == false) {
             assert false : "wait_if_ongoing must be true for a force flush: force=" + force + " wait_if_ongoing=" + waitIfOngoing;
@@ -2018,13 +2018,14 @@ public class InternalEngine extends Engine {
                 "wait_if_ongoing must be true for a force flush: force=" + force + " wait_if_ongoing=" + waitIfOngoing
             );
         }
+        final FlushResult flushResult;
         try (ReleasableLock lock = readLock.acquire()) {
             ensureOpen();
             if (flushLock.tryLock() == false) {
                 // if we can't get the lock right away we block if needed otherwise barf
                 if (waitIfOngoing == false) {
                     logger.trace("detected an in-flight flush, not blocking to wait for it's completion");
-                    return false;
+                    return FlushResult.NO_FLUSH;
                 }
                 logger.trace("waiting for in-flight flush to finish");
                 flushLock.lock();
@@ -2065,6 +2066,9 @@ public class InternalEngine extends Engine {
                     }
                     refreshLastCommittedSegmentInfos();
                     flushListener.afterFlush(lastCommittedSegmentInfos.getGeneration(), commitLocation);
+                    flushResult = new FlushResult(true, lastCommittedSegmentInfos.getGeneration());
+                } else {
+                    flushResult = new FlushResult(false, lastCommittedSegmentInfos.getGeneration());
                 }
             } catch (FlushFailedEngineException ex) {
                 maybeFailEngine("flush", ex);
@@ -2079,7 +2083,7 @@ public class InternalEngine extends Engine {
         if (engineConfig.isEnableGcDeletes()) {
             pruneDeletedTombstones();
         }
-        return true;
+        return flushResult;
     }
 
     private void refreshLastCommittedSegmentInfos() {

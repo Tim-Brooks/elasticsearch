@@ -441,8 +441,8 @@ public class ReadOnlyEngine extends Engine {
     }
 
     @Override
-    public boolean flush(boolean force, boolean waitIfOngoing) throws EngineException {
-        return true; // noop
+    public FlushResult flush(boolean force, boolean waitIfOngoing) throws EngineException {
+        return FlushResult.NO_FLUSH; // noop
     }
 
     @Override

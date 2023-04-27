@@ -1381,7 +1381,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
          */
         verifyNotClosed();
         final long time = System.nanoTime();
-        boolean flushHappened = getEngine().flush(force, waitIfOngoing);
+        boolean flushHappened = getEngine().flush(force, waitIfOngoing).flushed();
         flushMetric.inc(System.nanoTime() - time);
         return flushHappened;
     }

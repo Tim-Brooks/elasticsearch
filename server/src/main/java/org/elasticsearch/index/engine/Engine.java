@@ -1044,7 +1044,7 @@ public abstract class Engine implements Closeable {
      * @return <code>false</code> if <code>waitIfOngoing==false</code> and an ongoing request is detected, else <code>true</code>.
      *         If <code>false</code> is returned, no flush happened.
      */
-    public abstract boolean flush(boolean force, boolean waitIfOngoing) throws EngineException;
+    public abstract FlushResult flush(boolean force, boolean waitIfOngoing) throws EngineException;
 
     /**
      * Flushes the state of the engine including the transaction log, clearing memory and persisting
@@ -1052,8 +1052,12 @@ public abstract class Engine implements Closeable {
      * This operation is not going to block if another flush operation is currently running and won't write
      * a lucene commit if nothing needs to be committed.
      */
-    public final void flush() throws EngineException {
-        flush(false, false);
+    public final FlushResult flush() throws EngineException {
+        return flush(false, false);
+    }
+
+    public void awaitFlushDurability() {
+
     }
 
     /**
@@ -1981,5 +1985,11 @@ public abstract class Engine implements Closeable {
         public RefreshResult(boolean refreshed) {
             this(refreshed, UNKNOWN_GENERATION);
         }
+    }
+
+    public record FlushResult(boolean flushed, long generation) {
+
+        public static final FlushResult NO_FLUSH = new FlushResult(false, -1L);
+
     }
 }

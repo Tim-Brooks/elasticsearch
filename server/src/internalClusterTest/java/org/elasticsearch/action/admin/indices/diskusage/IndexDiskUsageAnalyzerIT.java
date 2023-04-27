@@ -66,7 +66,7 @@ public class IndexDiskUsageAnalyzerIT extends ESIntegTestCase {
         public Optional<EngineFactory> getEngineFactory(IndexSettings indexSettings) {
             return Optional.of(config -> new InternalEngine(config) {
                 @Override
-                public boolean flush(boolean force, boolean waitIfOngoing) throws EngineException {
+                public FlushResult flush(boolean force, boolean waitIfOngoing) throws EngineException {
                     final ShardId shardId = config.getShardId();
                     if (failOnFlushShards.contains(shardId)) {
                         throw new EngineException(shardId, "simulated IO");
