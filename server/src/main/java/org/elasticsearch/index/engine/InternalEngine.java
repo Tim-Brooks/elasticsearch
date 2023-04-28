@@ -2010,7 +2010,7 @@ public class InternalEngine extends Engine {
     }
 
     @Override
-    public boolean flush(boolean force, boolean waitIfOngoing) throws EngineException {
+    public boolean flushWithAsyncDurability(boolean force, boolean waitIfOngoing, ActionListener<Void> listener) {
         ensureOpen();
         if (force && waitIfOngoing == false) {
             assert false : "wait_if_ongoing must be true for a force flush: force=" + force + " wait_if_ongoing=" + waitIfOngoing;
@@ -2024,6 +2024,7 @@ public class InternalEngine extends Engine {
                 // if we can't get the lock right away we block if needed otherwise barf
                 if (waitIfOngoing == false) {
                     logger.trace("detected an in-flight flush, not blocking to wait for it's completion");
+                    listener.onResponse(null);
                     return false;
                 }
                 logger.trace("waiting for in-flight flush to finish");
@@ -2041,8 +2042,8 @@ public class InternalEngine extends Engine {
                     || force
                     || shouldPeriodicallyFlush()
                     || getProcessedLocalCheckpoint() > Long.parseLong(
-                        lastCommittedSegmentInfos.userData.get(SequenceNumbers.LOCAL_CHECKPOINT_KEY)
-                    )) {
+                    lastCommittedSegmentInfos.userData.get(SequenceNumbers.LOCAL_CHECKPOINT_KEY)
+                )) {
                     ensureCanFlush();
                     Translog.Location commitLocation = getTranslogLastWriteLocation();
                     try {
@@ -2061,15 +2062,20 @@ public class InternalEngine extends Engine {
                         failOnTragicEvent(e);
                         throw e;
                     } catch (Exception e) {
-                        throw new FlushFailedEngineException(shardId, e);
+                        FlushFailedEngineException engineException = new FlushFailedEngineException(shardId, e);
+                        throw engineException;
                     }
                     refreshLastCommittedSegmentInfos();
                     flushListener.afterFlush(lastCommittedSegmentInfos.getGeneration(), commitLocation);
                 }
-            } catch (FlushFailedEngineException ex) {
+            }catch (FlushFailedEngineException ex) {
                 maybeFailEngine("flush", ex);
+                listener.onFailure(ex);
                 throw ex;
-            } finally {
+            } catch (Exception ex) {
+                listener.onFailure(ex);
+                throw ex;
+            }  finally {
                 flushLock.unlock();
                 logger.trace("released flush lock");
             }
@@ -2079,7 +2085,13 @@ public class InternalEngine extends Engine {
         if (engineConfig.isEnableGcDeletes()) {
             pruneDeletedTombstones();
         }
+        listener.onResponse(null);
         return true;
+    }
+
+    @Override
+    public boolean flush(boolean force, boolean waitIfOngoing) throws EngineException {
+        return flushWithAsyncDurability(force, waitIfOngoing);
     }
 
     private void refreshLastCommittedSegmentInfos() {

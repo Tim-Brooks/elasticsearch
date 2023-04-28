@@ -28,6 +28,7 @@ import org.apache.lucene.util.SetOnce;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.lucene.Lucene;
@@ -1036,7 +1037,9 @@ public abstract class Engine implements Closeable {
     public abstract boolean shouldPeriodicallyFlush();
 
     /**
-     * Flushes the state of the engine including the transaction log, clearing memory.
+     * Flushes the state of the engine including the transaction log, clearing memory. This method call will synchronously
+     * determine if a flush/commit needs to occur and will issue the commit. Additionally, it will flush that data to disk
+     * which may or may not provide full durability depending on the underlying engine implementation.
      *
      * @param force         if <code>true</code> a lucene commit is executed even if no changes need to be committed.
      * @param waitIfOngoing if <code>true</code> this call will block until all currently running flushes have finished.
@@ -1044,13 +1047,49 @@ public abstract class Engine implements Closeable {
      * @return <code>false</code> if <code>waitIfOngoing==false</code> and an ongoing request is detected, else <code>true</code>.
      *         If <code>false</code> is returned, no flush happened.
      */
-    public abstract boolean flush(boolean force, boolean waitIfOngoing) throws EngineException;
+    public boolean flushWithAsyncDurability(boolean force, boolean waitIfOngoing) {
+        return flushWithAsyncDurability(force, waitIfOngoing, ActionListener.noop());
+    }
+
+    /**
+     * Provides the same mechanics as {@link #flushWithAsyncDurability(boolean, boolean)}}. However, a listener can be provided
+     * which will be triggered once full durability has been provided.
+     *
+     * @param force         if <code>true</code> a lucene commit is executed even if no changes need to be committed.
+     * @param waitIfOngoing if <code>true</code> this call will block until all currently running flushes have finished.
+     *                      Otherwise this call will return without blocking.
+     * @param listener      listener that will be completed once full durability has been provided
+     * @return <code>false</code> if <code>waitIfOngoing==false</code> and an ongoing request is detected, else <code>true</code>.
+     *         If <code>false</code> is returned, no flush happened.
+     */
+    public boolean flushWithAsyncDurability(boolean force, boolean waitIfOngoing, ActionListener<Void> listener) {
+        return false;
+    }
+
+    /**
+     * Flushes the state of the engine including the transaction log, clearing memory. This method synchronously guarantees full
+     * data durability of the flush.
+     *
+     * @param force         if <code>true</code> a lucene commit is executed even if no changes need to be committed.
+     * @param waitIfOngoing if <code>true</code> this call will block until all currently running flushes have finished.
+     *                      Otherwise this call will return without blocking.
+     * @return <code>false</code> if <code>waitIfOngoing==false</code> and an ongoing request is detected, else <code>true</code>.
+     *         If <code>false</code> is returned, no flush happened.
+     */
+    public boolean flush(boolean force, boolean waitIfOngoing) throws EngineException {
+        PlainActionFuture<Void> listener = PlainActionFuture.newFuture();
+        boolean flushedHappened = flushWithAsyncDurability(force, waitIfOngoing, listener);
+        listener.actionGet();
+        return flushedHappened;
+    }
 
     /**
      * Flushes the state of the engine including the transaction log, clearing memory and persisting
      * documents in the lucene index to disk including a potentially heavy and durable fsync operation.
      * This operation is not going to block if another flush operation is currently running and won't write
      * a lucene commit if nothing needs to be committed.
+     *
+     * This method synchronously guarantees full data durability of the flush.
      */
     public final void flush() throws EngineException {
         flush(false, false);

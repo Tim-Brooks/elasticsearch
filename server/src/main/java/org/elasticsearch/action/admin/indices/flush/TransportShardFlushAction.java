@@ -12,6 +12,7 @@ import org.elasticsearch.TransportVersion;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionType;
 import org.elasticsearch.action.support.ActionFilters;
+import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.action.support.replication.ReplicationResponse;
 import org.elasticsearch.action.support.replication.TransportReplicationAction;
 import org.elasticsearch.cluster.action.shard.ShardStateAction;
@@ -79,20 +80,18 @@ public class TransportShardFlushAction extends TransportReplicationAction<ShardF
         IndexShard primary,
         ActionListener<PrimaryResult<ShardFlushRequest, ReplicationResponse>> listener
     ) {
-        ActionListener.completeWith(listener, () -> {
-            primary.flush(shardRequest.getRequest());
+        primary.asyncFlush(shardRequest.getRequest(), listener.map(v -> {
             logger.trace("{} flush request executed on primary", primary.shardId());
             return new PrimaryResult<>(shardRequest, new ReplicationResponse());
-        });
+        }));
     }
 
     @Override
     protected void shardOperationOnReplica(ShardFlushRequest request, IndexShard replica, ActionListener<ReplicaResult> listener) {
-        ActionListener.completeWith(listener, () -> {
-            replica.flush(request.getRequest());
+        replica.asyncFlush(request.getRequest(), listener.map(v -> {
             logger.trace("{} flush request executed on replica", replica.shardId());
             return new ReplicaResult();
-        });
+        }));
     }
 
     // TODO: Remove this transition in 9.0
@@ -129,7 +128,12 @@ public class TransportShardFlushAction extends TransportReplicationAction<ShardF
         @Override
         public void messageReceived(PreShardSyncedFlushRequest request, TransportChannel channel, Task task) {
             IndexShard indexShard = indicesService.indexServiceSafe(request.shardId.getIndex()).getShard(request.shardId.id());
-            indexShard.flush(new FlushRequest().force(false).waitIfOngoing(true));
+            // Preferably we would like to make this async. However, that makes it difficult to propagate the
+            // UnsupportedOperationException. Since this is a deprecated call, it should be fine to make this more "blocking"
+            // than ideal.
+            PlainActionFuture<Void> listener = PlainActionFuture.newFuture();
+            indexShard.asyncFlush(new FlushRequest().force(false).waitIfOngoing(true), listener);
+            listener.actionGet();
             throw new UnsupportedOperationException("Synced flush was removed and a normal flush was performed instead.");
         }
     }

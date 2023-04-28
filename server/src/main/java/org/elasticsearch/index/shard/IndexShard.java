@@ -1387,6 +1387,31 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     /**
+     * Executes the given flush request against the engine. This method will synchronously execute the flush and commit. However,
+     * durability will be provided asynchronoously.
+     *
+     * @param request the flush request
+     * @param listener for asynchronous data durability
+     * @return <code>false</code> if <code>waitIfOngoing==false</code> and an ongoing request is detected, else <code>true</code>.
+     *         If <code>false</code> is returned, no flush happened.
+     */
+    public boolean asyncFlush(FlushRequest request, ActionListener<Void> listener) {
+        final boolean waitIfOngoing = request.waitIfOngoing();
+        final boolean force = request.force();
+        logger.trace("flush with {}", request);
+        /*
+         * We allow flushes while recovery since we allow operations to happen while recovering and we want to keep the translog under
+         * control (up to deletes, which we do not GC). Yet, we do not use flush internally to clear deletes and flush the index writer
+         * since we use Engine#writeIndexingBuffer for this now.
+         */
+        verifyNotClosed();
+        final long time = System.nanoTime();
+        boolean flushHappened = getEngine().flushWithAsyncDurability(force, waitIfOngoing, listener);
+        flushMetric.inc(System.nanoTime() - time);
+        return flushHappened;
+    }
+
+    /**
      * checks and removes translog files that no longer need to be retained. See
      * {@link org.elasticsearch.index.translog.TranslogDeletionPolicy} for details
      */
@@ -2227,7 +2252,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
                     @Override
                     protected void doRun() {
-                        if (flush(new FlushRequest().waitIfOngoing(false).force(false)) == false) {
+                        if (asyncFlush(new FlushRequest().waitIfOngoing(false).force(false), ActionListener.noop()) == false) {
                             // In case an ongoing flush was detected, revert active flag so that a next flushOnIdle request
                             // will retry (#87888)
                             active.set(true);
@@ -3660,7 +3685,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
                         @Override
                         protected void doRun() {
-                            flush(new FlushRequest());
+                            asyncFlush(new FlushRequest(), ActionListener.noop());
                             periodicFlushMetric.inc();
                         }
 
