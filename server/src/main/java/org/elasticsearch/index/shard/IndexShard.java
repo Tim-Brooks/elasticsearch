@@ -1389,6 +1389,25 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         return flushResult.flushPerformed();
     }
 
+    public void flush(FlushRequest request, ActionListener<Boolean> listener) {
+        final boolean waitIfOngoing = request.waitIfOngoing();
+        final boolean force = request.force();
+        logger.trace("flush with {}", request);
+        /*
+         * We allow flushes while recovery since we allow operations to happen while recovering and we want to keep the translog under
+         * control (up to deletes, which we do not GC). Yet, we do not use flush internally to clear deletes and flush the index writer
+         * since we use Engine#writeIndexingBuffer for this now.
+         */
+        verifyNotClosed();
+        final long time = System.nanoTime();
+        // TODO: Do we want the flush metric to reflect the full durability async step?
+        getEngine().flush(
+            force,
+            waitIfOngoing,
+            ActionListener.runBefore(listener.map(Engine.FlushResult::flushPerformed), () -> flushMetric.inc(System.nanoTime() - time))
+        );
+    }
+
     /**
      * checks and removes translog files that no longer need to be retained. See
      * {@link org.elasticsearch.index.translog.TranslogDeletionPolicy} for details
