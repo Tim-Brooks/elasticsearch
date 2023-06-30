@@ -167,6 +167,7 @@ import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -225,7 +226,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     protected volatile ShardRouting shardRouting;
     protected volatile IndexShardState state;
     // ensure happens-before relation between addRefreshListener() and postRecovery()
-    private final Object postRecoveryMutex = new Object();
+    private final Semaphore postRecoveryMutex = new Semaphore(1);
     private volatile long pendingPrimaryTerm; // see JavaDocs for getPendingPrimaryTerm
     private final Object engineMutex = new Object(); // lock ordering: engineMutex -> mutex
     private final AtomicReference<Engine> currentEngineReference = new AtomicReference<>();
@@ -1657,7 +1658,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
     }
 
-    public void preRecovery(ActionListener<Void> listener) {
+    public void preRecovery(ActionListener<Void> listener) throws IndexShardNotRecoveringException {
         final IndexShardState currentState = this.state; // single volatile read
         if (currentState == IndexShardState.CLOSED) {
             throw new IndexShardNotRecoveringException(shardId, currentState);
@@ -1667,23 +1668,40 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     public void postRecovery(String reason) throws IndexShardStartedException, IndexShardRelocatedException, IndexShardClosedException {
-        synchronized (postRecoveryMutex) {
-            // we need to refresh again to expose all operations that were index until now. Otherwise
-            // we may not expose operations that were indexed with a refresh listener that was immediately
-            // responded to in addRefreshListener. The refresh must happen under the same mutex used in addRefreshListener
-            // and before moving this shard to POST_RECOVERY state (i.e., allow to read from this shard).
-            getEngine().refresh("post_recovery");
-            synchronized (mutex) {
-                if (state == IndexShardState.CLOSED) {
-                    throw new IndexShardClosedException(shardId);
+        PlainActionFuture<Void> listener = PlainActionFuture.newFuture();
+        postRecovery(reason, listener);
+        listener.actionGet();
+    }
+
+    public void postRecovery(String reason, ActionListener<Void> listener) throws IndexShardStartedException, IndexShardRelocatedException,
+        IndexShardClosedException {
+        postRecoveryMutex.acquireUninterruptibly();
+        // we need to refresh again to expose all operations that were index until now. Otherwise
+        // we may not expose operations that were indexed with a refresh listener that was immediately
+        // responded to in addRefreshListener. The refresh must happen under the same mutex used in addRefreshListener
+        // and before moving this shard to POST_RECOVERY state (i.e., allow to read from this shard).
+        getEngine().externalRefresh("post_recovery", ActionListener.runAfter(new ActionListener<>() {
+            @Override
+            public void onResponse(Engine.RefreshResult refreshResult) {
+                synchronized (mutex) {
+                    if (state == IndexShardState.CLOSED) {
+                        listener.onFailure(new IndexShardClosedException(shardId));
+                    }
+                    if (state == IndexShardState.STARTED) {
+                        listener.onFailure(new IndexShardStartedException(shardId));
+                    }
+                    recoveryState.setStage(RecoveryState.Stage.DONE);
+                    changeState(IndexShardState.POST_RECOVERY, reason);
+                    listener.onResponse(null);
                 }
-                if (state == IndexShardState.STARTED) {
-                    throw new IndexShardStartedException(shardId);
-                }
-                recoveryState.setStage(RecoveryState.Stage.DONE);
-                changeState(IndexShardState.POST_RECOVERY, reason);
             }
-        }
+
+            @Override
+            public void onFailure(Exception e) {
+                listener.onFailure(e);
+
+            }
+        }, postRecoveryMutex::release));
     }
 
     /**
@@ -3895,8 +3913,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             // check again under postRecoveryMutex. this is important to create a happens before relationship
             // between the switch to POST_RECOVERY + associated refresh. Otherwise we may respond
             // to a listener before a refresh actually happened that contained that operation.
-            synchronized (postRecoveryMutex) {
+            postRecoveryMutex.acquireUninterruptibly();
+            try {
                 readAllowed = isReadAllowed();
+            } finally {
+                postRecoveryMutex.release();
             }
         }
         if (readAllowed) {
@@ -3922,8 +3943,11 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             // check again under postRecoveryMutex. this is important to create a happens before relationship
             // between the switch to POST_RECOVERY + associated refresh. Otherwise we may respond
             // to a listener before a refresh actually happened that contained that operation.
-            synchronized (postRecoveryMutex) {
+            postRecoveryMutex.acquireUninterruptibly();
+            try {
                 readAllowed = isReadAllowed();
+            } finally {
+                postRecoveryMutex.release();
             }
         }
         if (readAllowed) {
