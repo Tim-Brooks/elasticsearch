@@ -72,7 +72,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -428,7 +430,9 @@ public class MockTransportService extends TransportService {
         );
 
         transport().addSendBehavior(transportAddress, new StubbableTransport.SendRequestBehavior() {
+            private volatile boolean isClosed = false;
             private final Set<Transport.Connection> toClose = ConcurrentHashMap.newKeySet();
+
 
             @Override
             public void sendRequest(
@@ -438,6 +442,9 @@ public class MockTransportService extends TransportService {
                 TransportRequest request,
                 TransportRequestOptions options
             ) {
+                if (isClosed) {
+                    logger.error("ADDED REQUEST AFTER BEHAVIOR CLEARED");
+                }
                 // don't send anything, the receiving node is unresponsive
                 toClose.add(connection);
             }
@@ -447,6 +454,7 @@ public class MockTransportService extends TransportService {
                 // close to simulate that tcp-ip eventually times out and closes connection (necessary to ensure transport eventually
                 // responds).
                 try {
+                    isClosed = true;
                     IOUtils.close(toClose);
                 } catch (IOException e) {
                     throw new RuntimeException(e);
