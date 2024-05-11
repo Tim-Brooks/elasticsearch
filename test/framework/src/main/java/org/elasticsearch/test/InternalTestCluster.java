@@ -1302,16 +1302,26 @@ public final class InternalTestCluster extends TestCluster {
             for (NodeAndClient nodeAndClient : nodes.values()) {
                 IndexingPressure indexingPressure = getInstance(IndexingPressure.class, nodeAndClient.name);
                 final long combinedBytes = indexingPressure.stats().getCurrentCombinedCoordinatingAndPrimaryBytes();
-                if (combinedBytes > 0) {
-                    throw new AssertionError("pending combined bytes [" + combinedBytes + "] bytes on node [" + nodeAndClient.name + "].");
-                }
                 final long coordinatingBytes = indexingPressure.stats().getCurrentCoordinatingBytes();
+                final long primaryBytes = indexingPressure.stats().getCurrentPrimaryBytes();
+                if (combinedBytes > 0) {
+                    throw new AssertionError(
+                        "pending combined bytes ["
+                            + combinedBytes
+                            + "] bytes, pending coordinating bytes ["
+                            + coordinatingBytes
+                            + "], pending primary bytes ["
+                            + primaryBytes
+                            + "] on node ["
+                            + nodeAndClient.name
+                            + "]."
+                    );
+                }
                 if (coordinatingBytes > 0) {
                     throw new AssertionError(
                         "pending coordinating bytes [" + coordinatingBytes + "] bytes on node [" + nodeAndClient.name + "]."
                     );
                 }
-                final long primaryBytes = indexingPressure.stats().getCurrentPrimaryBytes();
                 if (primaryBytes > 0) {
                     throw new AssertionError("pending primary bytes [" + primaryBytes + "] bytes on node [" + nodeAndClient.name + "].");
                 }
