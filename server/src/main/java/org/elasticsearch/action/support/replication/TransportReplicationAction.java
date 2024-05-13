@@ -1015,6 +1015,7 @@ public abstract class TransportReplicationAction<
 
                 @Override
                 public void onClusterServiceClose() {
+                    logger.error("Failed transport replication action because close {}", TransportReplicationAction.super.getClass());
                     finishAsFailed(new NodeClosedException(clusterService.localNode()));
                 }
 
