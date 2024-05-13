@@ -1305,7 +1305,10 @@ public final class InternalTestCluster extends TestCluster {
                 final long coordinatingBytes = indexingPressure.stats().getCurrentCoordinatingBytes();
                 final long primaryBytes = indexingPressure.stats().getCurrentPrimaryBytes();
                 if (combinedBytes > 0) {
-                    logger.error("Outstanding tasks: \n{}", client().admin().cluster().prepareListTasks(nodeAndClient.name).get());
+                    logger.error(
+                        "Outstanding tasks: \n{}",
+                        client().admin().cluster().prepareListTasks(nodeAndClient.name).setDetailed(true).get()
+                    );
                     throw new AssertionError(
                         "pending combined bytes ["
                             + combinedBytes
