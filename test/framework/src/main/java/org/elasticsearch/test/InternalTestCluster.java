@@ -1298,6 +1298,7 @@ public final class InternalTestCluster extends TestCluster {
     }
 
     private void assertAllPendingWriteLimitsReleased() throws Exception {
+        AtomicInteger spins = new AtomicInteger(0);
         assertBusy(() -> {
             for (NodeAndClient nodeAndClient : nodes.values()) {
                 IndexingPressure indexingPressure = getInstance(IndexingPressure.class, nodeAndClient.name);
@@ -1305,10 +1306,12 @@ public final class InternalTestCluster extends TestCluster {
                 final long coordinatingBytes = indexingPressure.stats().getCurrentCoordinatingBytes();
                 final long primaryBytes = indexingPressure.stats().getCurrentPrimaryBytes();
                 if (combinedBytes > 0) {
-                    logger.error(
-                        "Outstanding tasks: \n{}",
-                        client().admin().cluster().prepareListTasks(nodeAndClient.name).setDetailed(true).get()
-                    );
+                    if (spins.getAndIncrement() % 10 == 0) {
+                        logger.error(
+                            "Outstanding tasks: \n{}",
+                            client().admin().cluster().prepareListTasks().setDetailed(true).setActions("indices:data/*").get()
+                        );
+                    }
                     throw new AssertionError(
                         "pending combined bytes ["
                             + combinedBytes
