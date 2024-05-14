@@ -365,6 +365,7 @@ public class TransportService extends AbstractLifecycleComponent
                     if (tracerLog.isTraceEnabled() && shouldTraceAction(holderToNotify.action())) {
                         tracerLog.trace("[{}][{}] pruning request for node [{}]", requestId, holderToNotify.action(), targetNode);
                     }
+                    logger.error("OUTSTANDING RESPONSE: {}", holderToNotify);
 
                     assert transport instanceof TcpTransport == false
                         /* other transports (used in tests) may not implement the proper close-connection behaviour. TODO fix this. */
