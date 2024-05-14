@@ -443,6 +443,9 @@ public class MockTransportService extends TransportService {
                 TransportRequestOptions options
             ) {
                 if (semaphore.tryAcquire()) {
+                    if (action.startsWith("indices:data/write/bulk")) {
+                        logger.error("Failed Bulk {}, {}", request, request.getParentTask());
+                    }
                     toClose.add(connection);
                     semaphore.release();
                 } else {
