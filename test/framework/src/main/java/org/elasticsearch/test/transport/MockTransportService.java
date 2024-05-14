@@ -444,7 +444,7 @@ public class MockTransportService extends TransportService {
             ) {
                 if (semaphore.tryAcquire()) {
                     if (action.startsWith("indices:data/write/bulk")) {
-                        logger.error("Failed Bulk {}, {}", request, request.getParentTask());
+                        logger.error("Failed Bulk {}, {}, {}, {}", connection, connection.hashCode(), request, request.getParentTask());
                     }
                     toClose.add(connection);
                     semaphore.release();
@@ -461,6 +461,7 @@ public class MockTransportService extends TransportService {
                 try {
                     semaphore.acquire(Integer.MAX_VALUE);
                     IOUtils.close(toClose);
+                    logger.error("CLOSING: {}", toClose);
                 } catch (IOException | InterruptedException e) {
                     throw new RuntimeException(e);
                 }
