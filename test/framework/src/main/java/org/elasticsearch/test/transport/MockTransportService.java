@@ -433,7 +433,6 @@ public class MockTransportService extends TransportService {
             private final Semaphore semaphore = new Semaphore(Integer.MAX_VALUE);
             private final Set<Transport.Connection> toClose = ConcurrentHashMap.newKeySet();
 
-
             @Override
             public void sendRequest(
                 Transport.Connection connection,
@@ -445,6 +444,10 @@ public class MockTransportService extends TransportService {
                 if (semaphore.tryAcquire()) {
                     if (action.startsWith("indices:data/write/bulk")) {
                         logger.error("Failed Bulk {}, {}, {}, {}", connection, connection.hashCode(), request, request.getParentTask());
+                        if (connection.isClosed()
+                            || (connection instanceof TcpTransport.NodeChannels nodeChannels && nodeChannels.isClosing.get())) {
+                            logger.error("ADDED TO CLOSING CONNECTION {}", connection.isClosed());
+                        }
                     }
                     toClose.add(connection);
                     semaphore.release();

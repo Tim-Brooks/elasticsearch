@@ -241,7 +241,7 @@ public abstract class TcpTransport extends AbstractLifecycleComponent implements
         private final TransportVersion version;
         private final Compression.Enabled compress;
         private final Compression.Scheme compressionScheme;
-        private final AtomicBoolean isClosing = new AtomicBoolean(false);
+        public final AtomicBoolean isClosing = new AtomicBoolean(false);
 
         NodeChannels(
             DiscoveryNode node,
@@ -339,6 +339,7 @@ public abstract class TcpTransport extends AbstractLifecycleComponent implements
             stringBuilder.append("NodeChannels[");
             node.appendDescriptionWithoutAttributes(stringBuilder);
             stringBuilder.append("]");
+            stringBuilder.append(isClosing.get());
             return stringBuilder.toString();
         }
     }
