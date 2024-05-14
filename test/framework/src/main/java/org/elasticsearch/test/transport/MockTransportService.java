@@ -74,7 +74,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -430,7 +429,8 @@ public class MockTransportService extends TransportService {
         );
 
         transport().addSendBehavior(transportAddress, new StubbableTransport.SendRequestBehavior() {
-            private volatile boolean isClosed = false;
+
+            private final Semaphore semaphore = new Semaphore(Integer.MAX_VALUE);
             private final Set<Transport.Connection> toClose = ConcurrentHashMap.newKeySet();
 
 
@@ -442,11 +442,13 @@ public class MockTransportService extends TransportService {
                 TransportRequest request,
                 TransportRequestOptions options
             ) {
-                if (isClosed) {
+                if (semaphore.tryAcquire()) {
+                    toClose.add(connection);
+                    semaphore.release();
+                } else {
                     logger.error("ADDED REQUEST AFTER BEHAVIOR CLEARED");
                 }
                 // don't send anything, the receiving node is unresponsive
-                toClose.add(connection);
             }
 
             @Override
@@ -454,9 +456,9 @@ public class MockTransportService extends TransportService {
                 // close to simulate that tcp-ip eventually times out and closes connection (necessary to ensure transport eventually
                 // responds).
                 try {
-                    isClosed = true;
+                    semaphore.acquire(Integer.MAX_VALUE);
                     IOUtils.close(toClose);
-                } catch (IOException e) {
+                } catch (IOException | InterruptedException e) {
                     throw new RuntimeException(e);
                 }
             }
