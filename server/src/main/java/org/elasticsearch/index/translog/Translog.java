@@ -429,21 +429,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         }
     }
 
-    /**
-     * Returns the number of operations in the translog files
-     */
-    public int totalOperations() {
-        return totalOperationsByMinGen(-1);
-    }
-
-    /**
-     * Returns the size in bytes of the v files
-     */
-    public long sizeInBytes() {
-        return sizeInBytesByMinGen(-1);
-    }
-
-    long earliestLastModifiedAge() {
+    private long earliestLastModifiedAge() {
         try (ReleasableLock ignored = readLock.acquire()) {
             ensureOpen();
             return findEarliestLastModifiedAge(System.currentTimeMillis(), readers, current);
@@ -890,8 +876,8 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         try (ReleasableLock lock = readLock.acquire()) {
             final long uncommittedGen = minGenerationForSeqNo(deletionPolicy.getLocalCheckpointOfSafeCommit() + 1, current, readers);
             return new TranslogStats(
-                totalOperations(),
-                sizeInBytes(),
+                totalOperationsByMinGen(-1),
+                sizeInBytesByMinGen(-1),
                 totalOperationsByMinGen(uncommittedGen),
                 sizeInBytesByMinGen(uncommittedGen),
                 earliestLastModifiedAge()

@@ -5790,7 +5790,8 @@ public class InternalEngineTests extends EngineTestCase {
             globalCheckpoint.set(randomLongBetween(engine.getPersistedLocalCheckpoint(), Long.MAX_VALUE));
             engine.syncTranslog();
             assertThat(DirectoryReader.listCommits(store.directory()), contains(commits.get(commits.size() - 1)));
-            assertThat(engine.getTranslog().totalOperations(), equalTo(0));
+            Translog translog = engine.getTranslog();
+            assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(0));
         }
     }
 

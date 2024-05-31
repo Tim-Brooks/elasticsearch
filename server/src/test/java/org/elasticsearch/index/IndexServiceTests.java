@@ -370,7 +370,10 @@ public class IndexServiceTests extends ESSingleNodeTestCase {
         prepareIndex("test").setId("1").setSource("{\"foo\": \"bar\"}", XContentType.JSON).get();
         indicesAdmin().prepareFlush("test").get();
         IndexShard shard = indexService.getShard(0);
-        assertBusy(() -> assertThat(IndexShardTestCase.getTranslog(shard).totalOperations(), equalTo(0)));
+        assertBusy(() -> {
+            Translog translog = IndexShardTestCase.getTranslog(shard);
+            assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(0));
+        });
     }
 
     public void testAsyncTranslogTrimTaskOnClosedIndex() throws Exception {
@@ -393,7 +396,7 @@ public class IndexServiceTests extends ESSingleNodeTestCase {
                 }
             }
         }
-        assertThat(translog.totalOperations(), equalTo(translogOps));
+        assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(translogOps));
         assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(translogOps));
         assertAcked(indicesAdmin().prepareClose("test"));
 
@@ -412,7 +415,7 @@ public class IndexServiceTests extends ESSingleNodeTestCase {
 
         indexService = getInstanceFromNode(IndicesService.class).indexServiceSafe(indexService.index());
         translog = IndexShardTestCase.getTranslog(indexService.getShard(0));
-        assertThat(translog.totalOperations(), equalTo(0));
+        assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(0));
         assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(0));
         assertThat(
             getEngine(indexService.getShard(0)).getTranslogStats().getTranslogSizeInBytes(),

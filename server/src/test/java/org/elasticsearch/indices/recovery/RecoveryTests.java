@@ -73,7 +73,8 @@ public class RecoveryTests extends ESIndexLevelReplicationTestCase {
             shards.startAll();
             final IndexShard replica = shards.getReplicas().get(0);
             boolean softDeletesEnabled = replica.indexSettings().isSoftDeleteEnabled();
-            assertThat(getTranslog(replica).totalOperations(), equalTo(softDeletesEnabled ? 0 : docs + moreDocs));
+            Translog translog = getTranslog(replica);
+            assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(softDeletesEnabled ? 0 : docs + moreDocs));
             shards.assertAllEqual(docs + moreDocs);
         }
     }
@@ -115,7 +116,8 @@ public class RecoveryTests extends ESIndexLevelReplicationTestCase {
             // rolling/flushing is async
             assertBusy(() -> {
                 assertThat(replica.getLastSyncedGlobalCheckpoint(), equalTo(19L));
-                assertThat(getTranslog(replica).totalOperations(), equalTo(0));
+                Translog translog = getTranslog(replica);
+                assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(0));
             });
         }
     }
@@ -264,7 +266,8 @@ public class RecoveryTests extends ESIndexLevelReplicationTestCase {
             // file based recovery should be made
             assertThat(newReplica.recoveryState().getIndex().fileDetails(), not(empty()));
             boolean softDeletesEnabled = replica.indexSettings().isSoftDeleteEnabled();
-            assertThat(getTranslog(newReplica).totalOperations(), equalTo(softDeletesEnabled ? 0 : numDocs));
+            Translog translog = getTranslog(newReplica);
+            assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(softDeletesEnabled ? 0 : numDocs));
 
             // history uuid was restored
             assertThat(newReplica.getHistoryUUID(), equalTo(historyUUID));
@@ -401,7 +404,8 @@ public class RecoveryTests extends ESIndexLevelReplicationTestCase {
             // Make sure the flushing will eventually be completed (eg. `shouldPeriodicallyFlush` is false)
             assertBusy(() -> assertThat(getEngine(replica).shouldPeriodicallyFlush(), equalTo(false)));
             boolean softDeletesEnabled = replica.indexSettings().isSoftDeleteEnabled();
-            assertThat(getTranslog(replica).totalOperations(), equalTo(softDeletesEnabled ? 0 : numDocs));
+            Translog translog = getTranslog(replica);
+            assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(softDeletesEnabled ? 0 : numDocs));
             shards.assertAllEqual(numDocs);
         }
     }

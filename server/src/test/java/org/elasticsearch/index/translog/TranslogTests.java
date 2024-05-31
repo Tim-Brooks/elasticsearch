@@ -1286,7 +1286,7 @@ public class TranslogTests extends ESTestCase {
                 lastSyncedGlobalCheckpoint = globalCheckpoint.get();
             }
         }
-        assertEquals(translogOperations, translog.totalOperations());
+        assertEquals(translogOperations, translog.stats().estimatedNumberOfOperations());
         translog.add(indexOp("" + translogOperations, translogOperations, primaryTerm.get(), Integer.toString(translogOperations)));
 
         final Checkpoint checkpoint = Checkpoint.read(translog.location().resolve(Translog.CHECKPOINT_FILE_NAME));
@@ -1311,7 +1311,7 @@ public class TranslogTests extends ESTestCase {
             Translog.Operation next = snapshot.next();
             assertNull(next);
         }
-        assertEquals(translogOperations + 1, translog.totalOperations());
+        assertEquals(translogOperations + 1, translog.stats().estimatedNumberOfOperations());
         assertThat(checkpoint.globalCheckpoint, equalTo(lastSyncedGlobalCheckpoint));
         translog.close();
     }
@@ -3477,7 +3477,7 @@ public class TranslogTests extends ESTestCase {
             }
             assertThat(translog.currentFileGeneration(), equalTo(generation + i + 1));
             assertThat(translog.getCurrent().getPrimaryTerm(), equalTo(primaryTerm.get()));
-            assertThat(translog.totalOperations(), equalTo(totalOperations));
+            assertThat(translog.stats().estimatedNumberOfOperations(), equalTo(totalOperations));
         }
         for (int i = 0; i <= rolls; i++) {
             assertFileIsPresent(translog, generation + i);
