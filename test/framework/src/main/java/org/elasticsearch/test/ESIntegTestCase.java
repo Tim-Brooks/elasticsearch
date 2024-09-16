@@ -1758,7 +1758,7 @@ public abstract class ESIntegTestCase extends ESTestCase {
         List<CountDownLatch> inFlightAsyncOperations = new ArrayList<>();
         // If you are indexing just a few documents then frequently do it one at a time. If many then frequently in bulk.
         final String[] indicesArray = indices.toArray(new String[] {});
-        if (builders.size() < FREQUENT_BULK_THRESHOLD ? frequently() : builders.size() < ALWAYS_BULK_THRESHOLD ? rarely() : false) {
+        if (false) {
             if (frequently()) {
                 logger.info("Index [{}] docs async: [{}] bulk: [{}]", builders.size(), true, false);
                 for (IndexRequestBuilder indexRequestBuilder : builders) {
@@ -1782,47 +1782,17 @@ public abstract class ESIntegTestCase extends ESTestCase {
             logger.info("Index [{}] docs async: [{}] bulk: [{}] partitions [{}]", builders.size(), false, true, partition.size());
             for (List<IndexRequestBuilder> segmented : partition) {
                 BulkResponse actionGet;
-                if (randomBoolean()) {
+                if (false) {
                     BulkRequestBuilder bulkBuilder = client().prepareBulk();
                     for (IndexRequestBuilder indexRequestBuilder : segmented) {
                         bulkBuilder.add(indexRequestBuilder);
                     }
                     actionGet = bulkBuilder.get();
                 } else {
-                    IncrementalBulkService bulkService = internalCluster().getInstance(IncrementalBulkService.class);
-                    IncrementalBulkService.Handler handler = bulkService.newBulkRequest();
-
-                    ConcurrentLinkedQueue<IndexRequest> queue = new ConcurrentLinkedQueue<>();
-                    segmented.forEach(b -> queue.add(b.request()));
-
-                    PlainActionFuture<BulkResponse> future = new PlainActionFuture<>();
-                    AtomicInteger runs = new AtomicInteger(0);
-                    Runnable r = new Runnable() {
-
-                        @Override
-                        public void run() {
-                            int toRemove = Math.min(randomIntBetween(5, 10), queue.size());
-                            ArrayList<DocWriteRequest<?>> docs = new ArrayList<>();
-                            for (int i = 0; i < toRemove; i++) {
-                                docs.add(queue.poll());
-                            }
-
-                            if (queue.isEmpty()) {
-                                handler.lastItems(docs, () -> {}, future);
-                            } else {
-                                handler.addItems(docs, () -> {}, () -> {
-                                    // Every 10 runs dispatch to new thread to prevent stackoverflow
-                                    if (runs.incrementAndGet() % 10 == 0) {
-                                        new Thread(this).start();
-                                    } else {
-                                        this.run();
-                                    }
-                                });
-                            }
-                        }
-                    };
-                    r.run();
-                    actionGet = future.actionGet();
+                    actionGet = client().execute(
+                        IncrementalBulkTestPlugin.TestIncrementalBulkAction.TYPE,
+                        new IncrementalBulkTestPlugin.TestIncrementalBulkAction.Request(segmented, randomIntBetween(5, 10))
+                    ).actionGet();
                 }
                 assertThat(actionGet.hasFailures() ? actionGet.buildFailureMessage() : "", actionGet.hasFailures(), equalTo(false));
             }
@@ -2273,6 +2243,7 @@ public abstract class ESIntegTestCase extends ESTestCase {
         mocks.add(TestSeedPlugin.class);
         mocks.add(AssertActionNamePlugin.class);
         mocks.add(MockScriptService.TestPlugin.class);
+        mocks.add(IncrementalBulkTestPlugin.class);
         return Collections.unmodifiableList(mocks);
     }
 
