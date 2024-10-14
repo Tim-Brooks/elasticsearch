@@ -52,8 +52,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 
 import static org.elasticsearch.core.Strings.format;
@@ -124,6 +126,9 @@ public class TaskManager implements ClusterStateApplier {
      * tracing a task.
      */
     public Task register(String type, String action, TaskAwareRequest request, boolean traceRequest) {
+        if (action.contains("reindex")) {
+            System.err.println("REGISTER: " + action);
+        }
         Map<String, String> headers = new HashMap<>();
         long headerSize = 0;
         long maxSize = maxHeaderSize.getBytes();
@@ -317,6 +322,9 @@ public class TaskManager implements ClusterStateApplier {
      */
     public Task unregister(Task task) {
         logger.trace("unregister task for id: {}", task.getId());
+        if (task.getAction().contains("reindex")) {
+            System.err.println("UNREGISTER: " + task.getAction());
+        }
         try {
             if (task instanceof CancellableTask) {
                 CancellableTaskHolder holder = cancellableTasks.remove(task);
@@ -414,6 +422,8 @@ public class TaskManager implements ClusterStateApplier {
      * Stores the task result
      */
     public <Response extends ActionResponse> void storeResult(Task task, Response response, ActionListener<Response> listener) {
+        LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(3));
+        System.err.println("STORE RESULT");
         DiscoveryNode localNode = lastDiscoveryNodes.getLocalNode();
         if (localNode == null) {
             // too early to store anything, shouldn't really be here - just pass the response along

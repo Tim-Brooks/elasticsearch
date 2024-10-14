@@ -296,6 +296,8 @@ public final class ClusterSettings extends AbstractScopedSettings {
         NetworkModule.TRANSPORT_DEFAULT_TYPE_SETTING,
         NetworkModule.HTTP_TYPE_SETTING,
         NetworkModule.TRANSPORT_TYPE_SETTING,
+        Node.MAXIMUM_SHUTDOWN_TIMEOUT_SETTING,
+        Node.MAXIMUM_REINDEXING_TIMEOUT_SETTING,
         HttpTransportSettings.SETTING_CORS_ALLOW_CREDENTIALS,
         HttpTransportSettings.SETTING_CORS_ENABLED,
         HttpTransportSettings.SETTING_CORS_MAX_AGE,

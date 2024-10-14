@@ -1162,6 +1162,8 @@ class NodeConstruction {
         );
         dataStreamAutoShardingService.init();
 
+        ShutdownFenceService shutdownFenceService = new ShutdownFenceService(settings, httpServerTransport, taskManager);
+
         modules.add(b -> {
             b.bind(NodeService.class).toInstance(nodeService);
             b.bind(BigArrays.class).toInstance(bigArrays);
@@ -1200,6 +1202,7 @@ class NodeConstruction {
             b.bind(CompatibilityVersions.class).toInstance(compatibilityVersions);
             b.bind(DataStreamAutoShardingService.class).toInstance(dataStreamAutoShardingService);
             b.bind(FailureStoreMetrics.class).toInstance(failureStoreMetrics);
+            b.bind(ShutdownFenceService.class).toInstance(shutdownFenceService);
         });
 
         if (ReadinessService.enabled(environment)) {

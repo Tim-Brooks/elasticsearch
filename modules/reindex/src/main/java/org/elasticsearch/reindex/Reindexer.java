@@ -69,6 +69,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BiFunction;
 import java.util.function.LongSupplier;
 
@@ -109,7 +110,6 @@ public class Reindexer {
 
     public void execute(BulkByScrollTask task, ReindexRequest request, Client bulkClient, ActionListener<BulkByScrollResponse> listener) {
         long startTime = System.nanoTime();
-
         BulkByScrollParallelizationHelper.executeSlicedAction(
             task,
             request,

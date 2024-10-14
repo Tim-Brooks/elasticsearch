@@ -62,6 +62,7 @@ public class WatcherExecutorServiceBenchmark {
 
     protected static void start() throws Exception {
         Node node = new MockNode(Settings.builder().put(SETTINGS).put("node.data", false).build(), Arrays.asList(BenchmarkWatcher.class));
+        node.prepareForClose();
         client = node.client();
         client.admin().cluster().prepareHealth(TimeValue.THIRTY_SECONDS, "*").setWaitForGreenStatus().get();
         Thread.sleep(5000);
