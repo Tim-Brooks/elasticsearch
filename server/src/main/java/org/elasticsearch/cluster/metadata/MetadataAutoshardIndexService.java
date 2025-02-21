@@ -140,6 +140,7 @@ public class MetadataAutoshardIndexService {
         final ActionListener<Void> rerouteListener
     ) {
         final String indexName = request.index();
+        // TODO: Handle Missing
         final IndexMetadata sourceMetadata = currentState.metadata().index(indexName);
         int sourceNumShards = sourceMetadata.getNumberOfShards();
         int targetNumShards = sourceNumShards * 2;
@@ -159,7 +160,7 @@ public class MetadataAutoshardIndexService {
 
         Metadata newMetadata = Metadata.builder(currentState.metadata()).updateNumberOfShards(targetNumShards, indexName).build();
         ClusterState updated = ClusterState.builder(currentState)
-            .incrementVersion()
+//            .incrementVersion()
             .routingTable(routingTableBuilder)
             .metadata(newMetadata)
             .build();

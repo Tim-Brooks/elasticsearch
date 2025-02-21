@@ -20,17 +20,13 @@ import org.elasticsearch.action.support.ActiveShardCount;
 public class AutoshardIndexClusterStateUpdateRequest {
     private final String cause;
     private final String index;
+    private final ActiveShardCount waitForActiveShards;
 
-    private ActiveShardCount waitForActiveShards = ActiveShardCount.DEFAULT;
 
-    public AutoshardIndexClusterStateUpdateRequest(String cause, String index) {
+    public AutoshardIndexClusterStateUpdateRequest(String cause, String index, ActiveShardCount waitForActiveShards) {
         this.cause = cause;
         this.index = index;
-    }
-
-    public AutoshardIndexClusterStateUpdateRequest waitForActiveShards(ActiveShardCount waitForActiveShards) {
         this.waitForActiveShards = waitForActiveShards;
-        return this;
     }
 
     public String cause() {

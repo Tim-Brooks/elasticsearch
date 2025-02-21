@@ -2178,7 +2178,11 @@ public class Metadata implements Iterable<IndexMetadata>, Diffable<Metadata>, Ch
                 throw new IndexNotFoundException(index);
             }
             IndexMetadata newIndexMetadata = indexMetadata.withIncrementedPrimaryShards(numberOfShards);
-            put(IndexMetadata.builder(newIndexMetadata).numberOfShards(numberOfShards));
+            put(
+                IndexMetadata.builder(newIndexMetadata)
+                    .settingsVersion(indexMetadata.getSettingsVersion() + 1)
+                    .numberOfShards(numberOfShards)
+            );
 
             return this;
         }
