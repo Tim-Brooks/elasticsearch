@@ -121,7 +121,7 @@ public class AzureRepositoryPlugin extends Plugin implements RepositoryPlugin, R
     }
 
     public static ExecutorBuilder<?> executorBuilder() {
-        return new ScalingExecutorBuilder(REPOSITORY_THREAD_POOL_NAME, 0, 5, TimeValue.timeValueSeconds(30L), false);
+        return new ScalingExecutorBuilder(REPOSITORY_THREAD_POOL_NAME, 0, 32, TimeValue.timeValueSeconds(30L), false);
     }
 
     public static ExecutorBuilder<?> nettyEventLoopExecutorBuilder(Settings settings) {
