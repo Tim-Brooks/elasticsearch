@@ -156,18 +156,23 @@ public class IndexingPressure implements IndexingPressureMonitor {
 
     public Incremental startIncrementalCoordinating(int operations, long bytes, boolean forceExecution) {
         Incremental coordinating = new Incremental(forceExecution);
+        totalCoordinatingRequests.getAndIncrement();
         coordinating.coordinating.increment(operations, bytes);
         return coordinating;
     }
 
     public Coordinating markCoordinatingOperationStarted(int operations, long bytes, boolean forceExecution) {
-        Coordinating coordinating = createCoordinatingOperation(forceExecution);
+        Coordinating coordinating = createCoordinatingOperation(forceExecution, true);
         coordinating.increment(operations, bytes);
         return coordinating;
     }
 
-    public Coordinating createCoordinatingOperation(boolean forceExecution) {
-        return new Coordinating(forceExecution);
+    public Coordinating createCoordinatingOperation(boolean forceExecution, boolean isNewRequest) {
+        Coordinating coordinating = new Coordinating(forceExecution);
+        if (isNewRequest) {
+            totalCoordinatingRequests.getAndIncrement();
+        }
+        return coordinating;
     }
 
     public class Incremental implements Releasable {
@@ -300,7 +305,6 @@ public class IndexingPressure implements IndexingPressureMonitor {
             totalCombinedCoordinatingAndPrimaryBytes.getAndAdd(bytes);
             totalCoordinatingBytes.getAndAdd(bytes);
             totalCoordinatingOps.getAndAdd(operations);
-            totalCoordinatingRequests.getAndIncrement();
         }
 
         @Override

@@ -1232,8 +1232,8 @@ public class ShardBulkInferenceActionFilterTests extends ESTestCase {
         }
 
         @Override
-        public Coordinating createCoordinatingOperation(boolean forceExecution) {
-            coordinating = spy(super.createCoordinatingOperation(forceExecution));
+        public Coordinating createCoordinatingOperation(boolean forceExecution, boolean isNewRequest) {
+            coordinating = spy(super.createCoordinatingOperation(forceExecution, isNewRequest));
             return coordinating;
         }
     }
@@ -1244,7 +1244,7 @@ public class ShardBulkInferenceActionFilterTests extends ESTestCase {
         }
 
         @Override
-        public Coordinating createCoordinatingOperation(boolean forceExecution) {
+        public Coordinating createCoordinatingOperation(boolean forceExecution, boolean isNewRequest) {
             return new NoopCoordinating(forceExecution);
         }
 

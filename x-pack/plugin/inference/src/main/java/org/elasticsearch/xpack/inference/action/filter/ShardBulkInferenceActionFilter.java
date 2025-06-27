@@ -158,7 +158,7 @@ public class ShardBulkInferenceActionFilter implements MappedActionFilter {
             var fieldInferenceMetadata = bulkShardRequest.consumeInferenceFieldMap();
             if (fieldInferenceMetadata != null && fieldInferenceMetadata.isEmpty() == false) {
                 // Maintain coordinating indexing pressure from inference until the indexing operations are complete
-                IndexingPressure.Coordinating coordinatingIndexingPressure = indexingPressure.createCoordinatingOperation(false);
+                IndexingPressure.Coordinating coordinatingIndexingPressure = indexingPressure.createCoordinatingOperation(false, false);
                 Runnable onInferenceCompletion = () -> chain.proceed(
                     task,
                     action,
