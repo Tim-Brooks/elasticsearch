@@ -214,6 +214,14 @@ public class ESONSource {
         }
     }
 
+    public record ContainerEntry(String key, boolean isArray) implements KeyEntry {
+
+        @Override
+        public boolean isArray() {
+            return isArray;
+        }
+    }
+
     public static class ArrayEntry implements KeyEntry {
 
         private final String key;
@@ -262,8 +270,6 @@ public class ESONSource {
     public interface Type {}
 
     public record Mutation(Object object) implements Type {}
-
-    public record ContainerType(int keyArrayIndex) implements Type {}
 
     public enum NullValue implements Type {
         INSTANCE
@@ -327,6 +333,7 @@ public class ESONSource {
     }
 
     public record Values(BytesReference data) {
+
         public int readInt(int position) {
             return data.getInt(position);
         }
@@ -915,9 +922,6 @@ public class ESONSource {
 
             newObjEntry.fieldCount = fieldCount;
         } else {
-            // Has mutations - need to iterate through materialized map
-            obj.ensureMaterializedMap();
-
             int fieldCount = 0;
             for (Map.Entry<String, Type> entry : obj.objEntry.mutationMap.entrySet()) {
                 String key = entry.getKey();
