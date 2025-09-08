@@ -99,7 +99,9 @@ public class JsonXContentParser extends AbstractXContentParser {
     @Override
     public String nextFieldName() throws IOException {
         try {
-            return parser.nextFieldName();
+            String fieldName = parser.nextFieldName();
+            currentToken = convertToken(parser.currentToken());
+            return fieldName;
         } catch (IOException e) {
             throw handleParserException(e);
         }
