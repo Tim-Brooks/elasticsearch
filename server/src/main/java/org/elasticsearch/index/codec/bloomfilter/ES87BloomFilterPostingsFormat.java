@@ -420,15 +420,50 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
 
         private boolean mayContainTerm(BytesRef term) throws IOException {
             hashTerm(term, hashes);
-            for (int hash : hashes) {
-                hash = hash % bloomFilterSize;
-                final int pos = hash >> 3;
-                final int mask = 1 << (hash & 7);
-                final byte bits = data.readByte(pos);
-                if ((bits & mask) == 0) {
-                    return false;
+
+            // Calculate all positions first
+            int minPos = Integer.MAX_VALUE;
+            int maxPos = Integer.MIN_VALUE;
+
+            for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
+                int hash = hashes[i] % bloomFilterSize;
+                int pos = hash >> 3;
+                hashes[i] = hash; // Store the final hash value
+                if (pos < minPos) minPos = pos;
+                if (pos > maxPos) maxPos = pos;
+            }
+
+            int rangeSize = maxPos - minPos + 1;
+
+            // If positions are clustered, read all bytes at once
+            if (rangeSize <= 32) { // 32-byte threshold - tune based on your use case
+                byte[] bytes = new byte[rangeSize];
+                for (int i = 0; i < rangeSize; i++) {
+                    bytes[i] = data.readByte(minPos + i);
+                }
+
+                // Check all hashes against the cached bytes
+                for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
+                    int hash = hashes[i];
+                    int pos = hash >> 3;
+                    int mask = 1 << (hash & 7);
+                    if ((bytes[pos - minPos] & mask) == 0) {
+                        return false;
+                    }
+                }
+            } else {
+                // Positions are scattered - use individual reads
+                for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
+                    int hash = hashes[i];
+                    int pos = hash >> 3;
+                    int mask = 1 << (hash & 7);
+                    byte bits = data.readByte(pos);
+                    if ((bits & mask) == 0) {
+                        return false;
+                    }
                 }
             }
+
             return true;
         }
 
