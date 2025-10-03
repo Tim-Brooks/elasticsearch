@@ -423,40 +423,18 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
         private boolean mayContainTerm(BytesRef term) throws IOException {
             hashTerm(term, hashes);
 
-            // Calculate all positions and find range
-            int minPos = Integer.MAX_VALUE;
-            int maxPos = Integer.MIN_VALUE;
-
+            // Pre-compute positions and masks to avoid redundant work
             for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
                 int hash = hashes[i] % bloomFilterSize;
-                int pos = hash >> 3;
-                positions[i] = pos;
+                positions[i] = hash >> 3;
                 masks[i] = 1 << (hash & 7);
-                if (pos < minPos) minPos = pos;
-                if (pos > maxPos) maxPos = pos;
             }
 
-            int rangeSize = maxPos - minPos + 1;
-
-            // If positions are clustered, read all bytes at once
-            if (rangeSize <= 32) {
-                byte[] bytes = new byte[rangeSize];
-                for (int i = 0; i < rangeSize; i++) {
-                    bytes[i] = data.readByte(minPos + i);
-                }
-
-                for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
-                    if ((bytes[positions[i] - minPos] & masks[i]) == 0) {
-                        return false;
-                    }
-                }
-            } else {
-                // Positions are scattered - use individual reads
-                for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
-                    byte bits = data.readByte(positions[i]);
-                    if ((bits & masks[i]) == 0) {
-                        return false;
-                    }
+            // Check each position
+            for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
+                byte bits = data.readByte(positions[i]);
+                if ((bits & masks[i]) == 0) {
+                    return false;
                 }
             }
 
