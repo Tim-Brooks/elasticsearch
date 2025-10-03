@@ -411,6 +411,8 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
         private final RandomAccessInput data;
         private final int bloomFilterSize;
         private final int[] hashes = new int[NUM_HASH_FUNCTIONS];
+        private final int[] positions = new int[NUM_HASH_FUNCTIONS];
+        private final int[] masks = new int[NUM_HASH_FUNCTIONS];
 
         BloomFilterTerms(Terms in, RandomAccessInput data, int bloomFilterSize) {
             super(in);
@@ -421,14 +423,15 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
         private boolean mayContainTerm(BytesRef term) throws IOException {
             hashTerm(term, hashes);
 
-            // Calculate all positions first
+            // Calculate all positions and find range
             int minPos = Integer.MAX_VALUE;
             int maxPos = Integer.MIN_VALUE;
 
             for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
                 int hash = hashes[i] % bloomFilterSize;
                 int pos = hash >> 3;
-                hashes[i] = hash; // Store the final hash value
+                positions[i] = pos;
+                masks[i] = 1 << (hash & 7);
                 if (pos < minPos) minPos = pos;
                 if (pos > maxPos) maxPos = pos;
             }
@@ -436,29 +439,22 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
             int rangeSize = maxPos - minPos + 1;
 
             // If positions are clustered, read all bytes at once
-            if (rangeSize <= 32) { // 32-byte threshold - tune based on your use case
+            if (rangeSize <= 32) {
                 byte[] bytes = new byte[rangeSize];
                 for (int i = 0; i < rangeSize; i++) {
                     bytes[i] = data.readByte(minPos + i);
                 }
 
-                // Check all hashes against the cached bytes
                 for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
-                    int hash = hashes[i];
-                    int pos = hash >> 3;
-                    int mask = 1 << (hash & 7);
-                    if ((bytes[pos - minPos] & mask) == 0) {
+                    if ((bytes[positions[i] - minPos] & masks[i]) == 0) {
                         return false;
                     }
                 }
             } else {
                 // Positions are scattered - use individual reads
                 for (int i = 0; i < NUM_HASH_FUNCTIONS; i++) {
-                    int hash = hashes[i];
-                    int pos = hash >> 3;
-                    int mask = 1 << (hash & 7);
-                    byte bits = data.readByte(pos);
-                    if ((bits & mask) == 0) {
+                    byte bits = data.readByte(positions[i]);
+                    if ((bits & masks[i]) == 0) {
                         return false;
                     }
                 }
