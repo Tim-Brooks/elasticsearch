@@ -12,6 +12,7 @@ package org.elasticsearch.index.mapper;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.action.bulk.Routing;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.util.ByteUtils;
@@ -122,14 +123,14 @@ public class TimeSeriesRoutingHashFieldMapper extends MetadataFieldMapper {
     public void postParse(DocumentParserContext context) {
         if (context.indexSettings().getMode() == IndexMode.TIME_SERIES
             && context.indexSettings().getIndexVersionCreated().onOrAfter(IndexVersions.TIME_SERIES_ROUTING_HASH_IN_ID)) {
-            String routingHash = context.sourceToParse().routing();
+            Routing routingHash = context.sourceToParse().routing();
             if (routingHash == null) {
                 assert context.sourceToParse().id() != null;
-                routingHash = Strings.BASE_64_NO_PADDING_URL_ENCODER.encodeToString(
-                    Arrays.copyOf(Base64.getUrlDecoder().decode(context.sourceToParse().id()), 4)
-                );
+                byte[] bytes = Arrays.copyOf(Base64.getUrlDecoder().decode(context.sourceToParse().id()), 4);
+                routingHash = Routing.fromBytes(bytes);
             }
-            var field = new SortedDocValuesField(NAME, Uid.encodeId(routingHash));
+            // TODO: This might be broken need to check all the encoding back and forth
+            var field = new SortedDocValuesField(NAME, new BytesRef(routingHash.value()));
             context.rootDoc().add(field);
         }
     }
@@ -153,6 +154,10 @@ public class TimeSeriesRoutingHashFieldMapper extends MetadataFieldMapper {
 
     public static int decode(String routingId) {
         byte[] bytes = Base64.getUrlDecoder().decode(routingId);
-        return ByteUtils.readIntLE(bytes, 0);
+        return decode(bytes);
+    }
+
+    public static int decode(byte[] routingId) {
+        return ByteUtils.readIntLE(routingId, 0);
     }
 }

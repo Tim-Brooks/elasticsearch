@@ -116,7 +116,7 @@ public final class DocumentParser {
             context.version(),
             context.seqID(),
             context.id(),
-            context.routing(),
+            context.routing() == null ? null : context.routing().asString(),
             context.reorderParentAndGetDocs(),
             context.sourceToParse().source(),
             context.sourceToParse().getXContentType(),

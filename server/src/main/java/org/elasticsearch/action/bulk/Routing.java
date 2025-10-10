@@ -22,22 +22,13 @@ import java.nio.ByteOrder;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 
-public class Routing implements Writeable {
+public record Routing(byte type, byte[] value) implements Writeable {
 
     public static final byte TYPE_UTF16LE = 0;
     public static final byte TYPE_BYTES = 1;
 
-    private final byte type;
-    private final byte[] value;
-
-    public Routing(byte type, byte[] value) {
-        this.type = type;
-        this.value = value;
-    }
-
     public Routing(StreamInput in) throws IOException {
-        this.type = in.readByte();
-        this.value = in.readByteArray();
+        this(in.readByte(), in.readByteArray());
     }
 
     // TODO: Maybe cache string if valuable

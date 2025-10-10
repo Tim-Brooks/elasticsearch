@@ -67,7 +67,7 @@ public class TsidExtractingIdFieldMapper extends IdFieldMapper {
                 || context.getDynamicRuntimeFields().isEmpty() == false
                 || id.equals(indexRouting.createId(context.sourceToParse().getXContentType(), context.sourceToParse().source(), suffix));
         } else if (context.sourceToParse().routing() != null) {
-            int routingHash = TimeSeriesRoutingHashFieldMapper.decode(context.sourceToParse().routing());
+            int routingHash = TimeSeriesRoutingHashFieldMapper.decode(context.sourceToParse().routing().value());
             id = createId(routingHash, tsid, timestamp);
         } else {
             if (context.sourceToParse().id() == null) {

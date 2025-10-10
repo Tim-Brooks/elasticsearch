@@ -10,6 +10,7 @@
 package org.elasticsearch.index.mapper;
 
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.action.bulk.Routing;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.core.Nullable;
@@ -27,7 +28,7 @@ public class SourceToParse {
 
     private final @Nullable BytesRef tsid;
 
-    private final @Nullable String routing;
+    private final @Nullable Routing routing;
 
     private final XContentType xContentType;
 
@@ -41,7 +42,7 @@ public class SourceToParse {
         @Nullable String id,
         BytesReference source,
         XContentType xContentType,
-        @Nullable String routing,
+        @Nullable Routing routing,
         Map<String, String> dynamicTemplates,
         boolean includeSourceOnError,
         XContentMeteringParserDecorator meteringParserDecorator,
@@ -64,6 +65,10 @@ public class SourceToParse {
     }
 
     public SourceToParse(String id, BytesReference source, XContentType xContentType, String routing) {
+        this(id, source, xContentType, Routing.fromString(routing));
+    }
+
+    public SourceToParse(String id, BytesReference source, XContentType xContentType, Routing routing) {
         this(id, source, xContentType, routing, Map.of(), true, XContentMeteringParserDecorator.NOOP, null);
     }
 
@@ -71,7 +76,7 @@ public class SourceToParse {
         String id,
         BytesReference source,
         XContentType xContentType,
-        String routing,
+        Routing routing,
         Map<String, String> dynamicTemplates,
         BytesRef tsid
     ) {
@@ -97,7 +102,7 @@ public class SourceToParse {
         return this.id;
     }
 
-    public @Nullable String routing() {
+    public @Nullable Routing routing() {
         return this.routing;
     }
 

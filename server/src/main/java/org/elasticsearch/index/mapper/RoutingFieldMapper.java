@@ -11,6 +11,7 @@ package org.elasticsearch.index.mapper;
 
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.StringField;
+import org.elasticsearch.action.bulk.Routing;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.index.analysis.NamedAnalyzer;
 import org.elasticsearch.index.query.SearchExecutionContext;
@@ -109,9 +110,10 @@ public class RoutingFieldMapper extends MetadataFieldMapper {
 
     @Override
     public void preParse(DocumentParserContext context) {
-        String routing = context.routing();
+        Routing routing = context.routing();
         if (routing != null) {
-            context.doc().add(new StringField(fieldType().name(), routing, Field.Store.YES));
+            // TODO: Needless string back and forth
+            context.doc().add(new StringField(fieldType().name(), routing.asString(), Field.Store.YES));
             context.addToFieldNames(fieldType().name());
         }
     }

@@ -9,6 +9,7 @@ package org.elasticsearch.xpack.inference.mapper;
 
 import com.carrotsearch.randomizedtesting.annotations.ParametersFactory;
 
+import org.elasticsearch.action.bulk.Routing;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Settings;
@@ -141,7 +142,7 @@ public class SemanticInferenceMetadataFieldsRecoveryTests extends EngineTestCase
         int size = randomIntBetween(10, 50);
         for (int i = 0; i < size; i++) {
             var source = randomSource();
-            var sourceToParse = new SourceToParse(Integer.toString(i), source, XContentType.JSON, null);
+            var sourceToParse = new SourceToParse(Integer.toString(i), source, XContentType.JSON, (Routing) null);
             var doc = mapperService.documentMapper().parse(sourceToParse);
             assertNull(doc.dynamicMappingsUpdate());
             if (useSynthetic) {
