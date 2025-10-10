@@ -13,6 +13,7 @@ import org.apache.lucene.util.RamUsageEstimator;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.CompositeIndicesRequest;
 import org.elasticsearch.action.DocWriteRequest;
+import org.elasticsearch.action.bulk.Routing;
 import org.elasticsearch.action.support.replication.ReplicatedWriteRequest;
 import org.elasticsearch.cluster.routing.IndexRouting;
 import org.elasticsearch.common.Strings;
@@ -143,6 +144,11 @@ public class DeleteRequest extends ReplicatedWriteRequest<DeleteRequest>
     @Override
     public String routing() {
         return this.routing;
+    }
+
+    @Override
+    public Routing newRouting() {
+        return Routing.fromStringMaybeNull(this.routing);
     }
 
     @Override

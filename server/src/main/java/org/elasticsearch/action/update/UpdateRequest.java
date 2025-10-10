@@ -13,6 +13,7 @@ import org.apache.lucene.util.RamUsageEstimator;
 import org.elasticsearch.TransportVersions;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.DocWriteRequest;
+import org.elasticsearch.action.bulk.Routing;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.support.ActiveShardCount;
 import org.elasticsearch.action.support.WriteRequest;
@@ -245,6 +246,11 @@ public class UpdateRequest extends InstanceShardOperationRequest<UpdateRequest>
     @Override
     public String routing() {
         return this.routing;
+    }
+
+    @Override
+    public Routing newRouting() {
+        return Routing.fromStringMaybeNull(this.routing);
     }
 
     public ShardId getShardId() {

@@ -139,10 +139,14 @@ public class TimeSeriesRoutingHashFieldMapper extends MetadataFieldMapper {
         return NAME;
     }
 
-    public static String encode(int routingId) {
+    public static byte[] encodeToBytes(int routingId) {
         byte[] bytes = new byte[4];
         ByteUtils.writeIntLE(routingId, bytes, 0);
-        return Strings.BASE_64_NO_PADDING_URL_ENCODER.encodeToString(bytes);
+        return bytes;
+    }
+
+    public static String encode(int routingId) {
+        return Strings.BASE_64_NO_PADDING_URL_ENCODER.encodeToString(encodeToBytes(routingId));
     }
 
     public static final String DUMMY_ENCODED_VALUE = encode(0);

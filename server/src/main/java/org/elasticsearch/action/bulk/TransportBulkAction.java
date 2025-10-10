@@ -569,7 +569,7 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
             return;
         }
 
-        if (writeRequest.routing() != null) {
+        if (writeRequest.newRouting() != null) {
             DataStream dataStream = (DataStream) indexAbstraction;
             if (dataStream.isAllowCustomRouting() == false) {
                 throw new IllegalArgumentException(

@@ -92,8 +92,9 @@ public class FailureStoreDocumentConverter {
                 if (source.id() != null) {
                     builder.field("id", source.id());
                 }
-                if (source.routing() != null) {
-                    builder.field("routing", source.routing());
+                Routing routing = source.newRouting();
+                if (routing != null) {
+                    builder.field("routing", routing.asString());
                 }
                 if (source.index() != null) {
                     builder.field("index", source.index());

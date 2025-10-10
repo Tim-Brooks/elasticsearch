@@ -18,6 +18,7 @@ import org.elasticsearch.TransportVersions;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.CompositeIndicesRequest;
 import org.elasticsearch.action.DocWriteRequest;
+import org.elasticsearch.action.bulk.Routing;
 import org.elasticsearch.action.support.replication.ReplicatedWriteRequest;
 import org.elasticsearch.action.support.replication.ReplicationRequest;
 import org.elasticsearch.client.internal.Requests;
@@ -79,6 +80,7 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
     private static final TransportVersion PIPELINES_HAVE_RUN_FIELD_ADDED = TransportVersions.V_8_10_X;
     private static final TransportVersion INDEX_REQUEST_INCLUDE_TSID = TransportVersion.fromName("index_request_include_tsid");
     private static final TransportVersion INDEX_SOURCE = TransportVersion.fromName("index_source");
+    private static final TransportVersion ROUTING_AS_BYTES = TransportVersion.fromName("routing_as_bytes");
 
     private static final Supplier<String> ID_GENERATOR = UUIDs::base64UUID;
 
@@ -97,8 +99,9 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
     private static final ShardId NO_SHARD_ID = null;
 
     private String id;
+
     @Nullable
-    private String routing;
+    private Routing routing;
 
     private final IndexSource indexSource;
 
@@ -165,7 +168,12 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
             assert MapperService.SINGLE_MAPPING_NAME.equals(type) : "Expected [_doc] but received [" + type + "]";
         }
         id = in.readOptionalString();
-        routing = in.readOptionalString();
+        if (in.getTransportVersion().supports(ROUTING_AS_BYTES)) {
+            routing = in.readOptional(Routing::new);
+        } else {
+            String stringRouting = in.readOptionalString();
+            routing = stringRouting == null ? null : Routing.fromString(stringRouting);
+        }
         boolean beforeSourceContext = in.getTransportVersion().supports(INDEX_SOURCE) == false;
         BytesReference source;
         IndexSource localIndexSource = null;
@@ -354,10 +362,25 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
      */
     @Override
     public IndexRequest routing(String routing) {
-        if (routing != null && routing.isEmpty()) {
+        if (routing == null || routing.isEmpty()) {
             this.routing = null;
         } else {
-            this.routing = routing;
+            this.routing = Routing.fromString(routing);
+        }
+        return this;
+    }
+
+    @Override
+    public IndexRequest routing(Routing routing) {
+        this.routing = routing;
+        return this;
+    }
+
+    public IndexRequest routing(byte[] routing) {
+        if (routing == null || routing.length == 0) {
+            this.routing = null;
+        } else {
+            this.routing = Routing.fromBytes(routing);
         }
         return this;
     }
@@ -368,6 +391,10 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
      */
     @Override
     public String routing() {
+        return this.routing == null ? null : this.routing.toString();
+    }
+
+    public Routing newRouting() {
         return this.routing;
     }
 
@@ -764,7 +791,11 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
             out.writeOptionalString(MapperService.SINGLE_MAPPING_NAME);
         }
         out.writeOptionalString(id);
-        out.writeOptionalString(routing);
+        if (out.getTransportVersion().supports(ROUTING_AS_BYTES)) {
+            out.writeOptionalWriteable(routing);
+        } else {
+            out.writeOptionalString(routing == null ? null : routing.asString());
+        }
         if (out.getTransportVersion().supports(INDEX_SOURCE)) {
             indexSource.writeTo(out);
         } else {

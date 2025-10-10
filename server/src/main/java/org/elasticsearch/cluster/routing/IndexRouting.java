@@ -13,6 +13,7 @@ import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.StringHelper;
 import org.elasticsearch.ResourceNotFoundException;
 import org.elasticsearch.action.RoutingMissingException;
+import org.elasticsearch.action.bulk.Routing;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.IndexReshardingMetadata;
@@ -328,7 +329,7 @@ public abstract class IndexRouting {
         @Override
         public void postProcess(IndexRequest indexRequest) {
             if (trackTimeSeriesRoutingHash) {
-                indexRequest.routing(TimeSeriesRoutingHashFieldMapper.encode(hash));
+                indexRequest.routing(TimeSeriesRoutingHashFieldMapper.encodeToBytes(hash));
             } else if (addIdWithRoutingHash) {
                 assert hash != Integer.MAX_VALUE;
                 indexRequest.autoGenerateTimeBasedId(OptionalInt.of(hash));
@@ -338,7 +339,7 @@ public abstract class IndexRouting {
         @Override
         public int indexShard(IndexRequest indexRequest) {
             assert Transports.assertNotTransportThread("parsing the _source can get slow");
-            checkNoRouting(indexRequest.routing());
+            checkNoRouting(indexRequest.newRouting());
             hash = hashSource(indexRequest);
             int shardId = hashToShardId(hash);
             return (rerouteWritesIfResharding(shardId));
@@ -361,19 +362,19 @@ public abstract class IndexRouting {
 
         @Override
         public int deleteShard(String id, @Nullable String routing) {
-            checkNoRouting(routing);
+            checkNoRouting(Routing.fromStringMaybeNull(routing));
             int shardId = idToHash(id);
             return (rerouteWritesIfResharding(shardId));
         }
 
         @Override
         public int getShard(String id, @Nullable String routing) {
-            checkNoRouting(routing);
+            checkNoRouting(Routing.fromStringMaybeNull(routing));
             int shardId = idToHash(id);
             return (rerouteWritesIfResharding(shardId));
         }
 
-        private void checkNoRouting(@Nullable String routing) {
+        private void checkNoRouting(@Nullable Routing routing) {
             if (routing != null) {
                 throw new IllegalArgumentException(error("specifying routing"));
             }

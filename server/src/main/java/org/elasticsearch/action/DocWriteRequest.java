@@ -9,6 +9,7 @@
 package org.elasticsearch.action;
 
 import org.apache.lucene.util.Accountable;
+import org.elasticsearch.action.bulk.Routing;
 import org.elasticsearch.action.bulk.TransportAbstractBulkAction;
 import org.elasticsearch.action.delete.DeleteRequest;
 import org.elasticsearch.action.index.IndexRequest;
@@ -82,10 +83,24 @@ public interface DocWriteRequest<T> extends IndicesRequest, Accountable, Releasa
     T routing(String routing);
 
     /**
+     * Set the routing for this request
+     * @return the Request
+     */
+    default T routing(Routing routing) {
+        return routing == null ? routing((String) null) : routing(routing.asString());
+    }
+
+    /**
      * Get the routing for this request
      * @return the Routing
      */
     String routing();
+
+    /**
+     * Get the routing for this request
+     * @return the Routing
+     */
+    Routing newRouting();
 
     /**
      * Get the document version for this request
