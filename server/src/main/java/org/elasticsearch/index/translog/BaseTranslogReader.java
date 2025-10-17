@@ -14,9 +14,8 @@ import org.elasticsearch.index.seqno.SequenceNumbers;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 
 /**
  * A base class for all classes that allows reading ops from translog files
@@ -24,17 +23,16 @@ import java.nio.file.Path;
 public abstract class BaseTranslogReader implements Comparable<BaseTranslogReader> {
 
     protected final long generation;
-    protected final FileChannel channel;
-    protected final Path path;
+    protected final TranslogDurabilityLayer.GenerationHandle generationHandle;
     protected final TranslogHeader header;
 
-    public BaseTranslogReader(long generation, FileChannel channel, Path path, TranslogHeader header) {
+    public BaseTranslogReader(long generation, TranslogDurabilityLayer.GenerationHandle generationHandle, TranslogHeader header) {
+        Path path = Paths.get(generationHandle.path());
         assert Translog.parseIdFromFileName(path) == generation
             : "generation mismatch. Path: " + Translog.parseIdFromFileName(path) + " but generation: " + generation;
 
         this.generation = generation;
-        this.path = path;
-        this.channel = channel;
+        this.generationHandle = generationHandle;
         this.header = header;
     }
 
@@ -73,7 +71,7 @@ public abstract class BaseTranslogReader implements Comparable<BaseTranslogReade
         final long maxSize = sizeInBytes() - position;
         if (size < 0 || size > maxSize) {
             throw new TranslogCorruptedException(
-                path.toString(),
+                generationHandle.path(),
                 "operation size is corrupted must be [0.." + maxSize + "] but was: " + size
             );
         }
@@ -104,14 +102,14 @@ public abstract class BaseTranslogReader implements Comparable<BaseTranslogReade
         buffer.limit(opSize);
         readBytes(buffer, position);
         buffer.flip();
-        return new BufferedChecksumStreamInput(new ByteBufferStreamInput(buffer), path.toString(), reuse);
+        return new BufferedChecksumStreamInput(new ByteBufferStreamInput(buffer), generationHandle.path(), reuse);
     }
 
     protected Translog.Operation read(BufferedChecksumStreamInput inStream) throws IOException {
         final Translog.Operation op = Translog.readOperation(inStream);
         if (op.primaryTerm() > getPrimaryTerm() && getPrimaryTerm() != SequenceNumbers.UNASSIGNED_PRIMARY_TERM) {
             throw new TranslogCorruptedException(
-                path.toString(),
+                generationHandle.path(),
                 "operation's term is newer than translog header term; "
                     + "operation term["
                     + op.primaryTerm()
@@ -130,7 +128,7 @@ public abstract class BaseTranslogReader implements Comparable<BaseTranslogReade
 
     @Override
     public String toString() {
-        return "translog [" + generation + "][" + path + "]";
+        return "translog [" + generation + "][" + generationHandle.path() + "]";
     }
 
     @Override
@@ -139,11 +137,11 @@ public abstract class BaseTranslogReader implements Comparable<BaseTranslogReade
     }
 
     public Path path() {
-        return path;
+        return Paths.get(generationHandle.path());
     }
 
     public long getLastModifiedTime() throws IOException {
-        return Files.getLastModifiedTime(path).toMillis();
+        return generationHandle.lastModifiedTime();
     }
 
     /**

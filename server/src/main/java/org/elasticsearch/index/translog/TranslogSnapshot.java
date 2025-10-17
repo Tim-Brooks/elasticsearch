@@ -8,7 +8,6 @@
  */
 package org.elasticsearch.index.translog;
 
-import org.elasticsearch.common.io.Channels;
 import org.elasticsearch.index.seqno.SequenceNumbers;
 
 import java.io.EOFException;
@@ -31,7 +30,7 @@ final class TranslogSnapshot extends BaseTranslogReader {
      * Create a snapshot of translog file channel.
      */
     TranslogSnapshot(final BaseTranslogReader reader, final long length) {
-        super(reader.generation, reader.channel, reader.path, reader.header);
+        super(reader.generation, reader.generationHandle, reader.header);
         this.length = length;
         this.totalOperations = reader.totalOperations();
         this.checkpoint = reader.getCheckpoint();
@@ -94,7 +93,7 @@ final class TranslogSnapshot extends BaseTranslogReader {
                         + "], generation: ["
                         + getGeneration()
                         + "], path: ["
-                        + path
+                        + generationHandle.path()
                         + "]"
                 );
             }
@@ -107,13 +106,13 @@ final class TranslogSnapshot extends BaseTranslogReader {
                         + "], generation: ["
                         + getGeneration()
                         + "], path: ["
-                        + path
+                        + generationHandle.path()
                         + "]"
                 );
             }
-            Channels.readFromFileChannelWithEofException(channel, position, buffer);
+            generationHandle.read(position, buffer);
         } catch (EOFException e) {
-            throw new TranslogCorruptedException(path.toString(), "translog truncated", e);
+            throw new TranslogCorruptedException(generationHandle.path(), "translog truncated", e);
         }
     }
 

@@ -129,6 +129,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     protected final Lock readLock;
     protected final Lock writeLock;
     private final Path location;
+    private final TranslogDurabilityLayer durabilityLayer;
     private TranslogWriter current;
 
     protected final TragicExceptionHolder tragedy = new TragicExceptionHolder();
@@ -187,9 +188,10 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         this.writeLock = rwl.writeLock();
         this.location = config.getTranslogPath();
         Files.createDirectories(this.location);
+        this.durabilityLayer = new FileChannelDurabilityLayer(location, getChannelFactory(), translogUUID, config.fsync());
 
         try {
-            final Checkpoint checkpoint = readCheckpoint(location);
+            final Checkpoint checkpoint = durabilityLayer.readCheckpoint();
             final Path nextTranslogFile = location.resolve(getFilename(checkpoint.generation + 1));
             final Path currentCheckpointFile = location.resolve(getCommitCheckpointFileName(checkpoint.generation));
             // this is special handling for error condition when we create a new writer but we fail to bake
@@ -351,15 +353,16 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     }
 
     TranslogReader openReader(Path path, Checkpoint checkpoint) throws IOException {
-        FileChannel channel = FileChannel.open(path, StandardOpenOption.READ);
+        long generation = Translog.parseIdFromFileName(path);
+        assert generation == checkpoint.generation
+            : "expected generation: " + generation + " but got: " + checkpoint.generation;
+        TranslogDurabilityLayer.GenerationHandle handle = durabilityLayer.openForRead(generation, checkpoint);
         try {
-            assert Translog.parseIdFromFileName(path) == checkpoint.generation
-                : "expected generation: " + Translog.parseIdFromFileName(path) + " but got: " + checkpoint.generation;
-            TranslogReader reader = TranslogReader.open(channel, path, checkpoint, translogUUID);
-            channel = null;
+            TranslogReader reader = TranslogReader.open(handle, durabilityLayer, checkpoint);
+            handle = null;
             return reader;
         } finally {
-            IOUtils.close(channel);
+            IOUtils.close(handle);
         }
     }
 
@@ -593,8 +596,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
                 shardId,
                 translogUUID,
                 fileGeneration,
-                location.resolve(getFilename(fileGeneration)),
-                getChannelFactory(),
+                durabilityLayer,
                 config.getBufferSize(),
                 initialMinTranslogGen,
                 initialGlobalCheckpoint,
@@ -944,7 +946,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             try {
                 for (TranslogReader reader : readers) {
                     final TranslogReader newReader = reader.getPrimaryTerm() < belowTerm
-                        ? reader.closeIntoTrimmedReader(aboveSeqNo, getChannelFactory())
+                        ? reader.closeIntoTrimmedReader(aboveSeqNo)
                         : reader;
                     newReaders.add(newReader);
                 }
@@ -2140,16 +2142,17 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         final ChannelFactory channelFactory = factory != null ? factory : FileChannel::open;
         final String uuid = Strings.hasLength(translogUUID) ? translogUUID : UUIDs.randomBase64UUID();
         final Path checkpointFile = location.resolve(CHECKPOINT_FILE_NAME);
-        final Path translogFile = location.resolve(getFilename(generation));
         final Checkpoint checkpoint = Checkpoint.emptyTranslogCheckpoint(0, generation, initialGlobalCheckpoint, minTranslogGeneration);
 
         Checkpoint.write(channelFactory, checkpointFile, checkpoint, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+
+        // Create a durability layer for the empty translog
+        TranslogDurabilityLayer durabilityLayer = new FileChannelDurabilityLayer(location, channelFactory, uuid, true);
         final TranslogWriter writer = TranslogWriter.create(
             shardId,
             uuid,
             generation,
-            translogFile,
-            channelFactory,
+            durabilityLayer,
             EMPTY_TRANSLOG_BUFFER_SIZE,
             minTranslogGeneration,
             initialGlobalCheckpoint,

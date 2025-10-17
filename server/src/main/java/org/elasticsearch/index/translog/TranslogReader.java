@@ -10,7 +10,6 @@
 package org.elasticsearch.index.translog;
 
 import org.apache.lucene.store.AlreadyClosedException;
-import org.elasticsearch.common.io.Channels;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.index.seqno.SequenceNumbers;
 
@@ -18,12 +17,7 @@ import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import static org.elasticsearch.index.translog.Translog.getCommitCheckpointFileName;
 
 /**
  * an immutable translog filereader
@@ -33,50 +27,39 @@ public class TranslogReader extends BaseTranslogReader implements Closeable {
     private final int totalOperations;
     private final Checkpoint checkpoint;
     protected final AtomicBoolean closed = new AtomicBoolean(false);
-    private long lastModifiedTime = -1;
+    private final TranslogDurabilityLayer durabilityLayer;
 
     /**
-     * Create a translog writer against the specified translog file channel.
+     * Create a translog reader against the specified generation handle.
      *
      * @param checkpoint the translog checkpoint
-     * @param channel    the translog file channel to open a translog reader against
-     * @param path       the path to the translog
+     * @param generationHandle the generation handle to read from
      * @param header     the header of the translog file
+     * @param durabilityLayer the durability layer for checkpoint operations
      */
-    TranslogReader(final Checkpoint checkpoint, final FileChannel channel, final Path path, final TranslogHeader header) {
-        super(checkpoint.generation, channel, path, header);
+    TranslogReader(
+        final Checkpoint checkpoint,
+        final TranslogDurabilityLayer.GenerationHandle generationHandle,
+        final TranslogHeader header,
+        final TranslogDurabilityLayer durabilityLayer
+    ) {
+        super(checkpoint.generation, generationHandle, header);
         this.length = checkpoint.offset;
         this.totalOperations = checkpoint.numOps;
         this.checkpoint = checkpoint;
+        this.durabilityLayer = durabilityLayer;
     }
 
     /**
-     * Given a file channel, opens a {@link TranslogReader}, taking care of checking and validating the file header.
-     *
-     * @param channel the translog file channel
-     * @param path the path to the translog
-     * @param checkpoint the translog checkpoint
-     * @param translogUUID the tranlog UUID
-     * @return a new TranslogReader
-     * @throws IOException if any of the file operations resulted in an I/O exception
+     * Closes current reader and creates new one with new checkpoint and trimmed above sequence number
      */
-    public static TranslogReader open(final FileChannel channel, final Path path, final Checkpoint checkpoint, final String translogUUID)
-        throws IOException {
-        final TranslogHeader header = TranslogHeader.read(translogUUID, path, channel);
-        return new TranslogReader(checkpoint, channel, path, header);
-    }
-
-    /**
-     * Closes current reader and creates new one with new checkoint and same file channel
-     */
-    TranslogReader closeIntoTrimmedReader(long aboveSeqNo, ChannelFactory channelFactory) throws IOException {
+    TranslogReader closeIntoTrimmedReader(long aboveSeqNo) throws IOException {
         if (closed.compareAndSet(false, true)) {
-            Closeable toCloseOnFailure = channel;
+            Closeable toCloseOnFailure = generationHandle;
             final TranslogReader newReader;
             try {
                 if (aboveSeqNo < checkpoint.trimmedAboveSeqNo
                     || aboveSeqNo < checkpoint.maxSeqNo && checkpoint.trimmedAboveSeqNo == SequenceNumbers.UNASSIGNED_SEQ_NO) {
-                    final Path checkpointFile = path.getParent().resolve(getCommitCheckpointFileName(checkpoint.generation));
                     final Checkpoint newCheckpoint = new Checkpoint(
                         checkpoint.offset,
                         checkpoint.numOps,
@@ -87,12 +70,15 @@ public class TranslogReader extends BaseTranslogReader implements Closeable {
                         checkpoint.minTranslogGeneration,
                         aboveSeqNo
                     );
-                    Checkpoint.write(channelFactory, checkpointFile, newCheckpoint, StandardOpenOption.WRITE);
-                    IOUtils.fsync(checkpointFile.getParent(), true);
+                    durabilityLayer.writeGenerationCheckpoint(checkpoint.generation, newCheckpoint);
 
-                    newReader = new TranslogReader(newCheckpoint, channel, path, header);
+                    // Reopen with new checkpoint
+                    TranslogDurabilityLayer.GenerationHandle newHandle = durabilityLayer.openForRead(checkpoint.generation, newCheckpoint);
+                    newReader = new TranslogReader(newCheckpoint, newHandle, header, durabilityLayer);
                 } else {
-                    newReader = new TranslogReader(checkpoint, channel, path, header);
+                    // No trimming needed, reuse current checkpoint
+                    TranslogDurabilityLayer.GenerationHandle newHandle = durabilityLayer.openForRead(checkpoint.generation, checkpoint);
+                    newReader = new TranslogReader(checkpoint, newHandle, header, durabilityLayer);
                 }
                 toCloseOnFailure = null;
                 return newReader;
@@ -129,13 +115,13 @@ public class TranslogReader extends BaseTranslogReader implements Closeable {
                 "read requested before position of first ops. pos [" + position + "] first op on: [" + getFirstOperationOffset() + "]"
             );
         }
-        Channels.readFromFileChannelWithEofException(channel, position, buffer);
+        generationHandle.read(position, buffer);
     }
 
     @Override
     public final void close() throws IOException {
         if (closed.compareAndSet(false, true)) {
-            channel.close();
+            generationHandle.close();
         }
     }
 
@@ -149,14 +135,23 @@ public class TranslogReader extends BaseTranslogReader implements Closeable {
         }
     }
 
-    @Override
-    public long getLastModifiedTime() throws IOException {
-        long modified = this.lastModifiedTime;
-        if (modified == -1) {
-            // cache the lastModifiedTime and return it forever, translogs are immutable
-            modified = super.getLastModifiedTime();
-            this.lastModifiedTime = modified;
+    /**
+     * Opens a TranslogReader from the given generation handle.
+     *
+     * @param handle the generation handle to read from
+     * @param durabilityLayer the durability layer for checkpoint operations
+     * @param checkpoint the checkpoint for this generation
+     * @return a new TranslogReader instance
+     * @throws IOException if opening the reader fails
+     */
+    public static TranslogReader open(
+        TranslogDurabilityLayer.GenerationHandle handle,
+        TranslogDurabilityLayer durabilityLayer,
+        Checkpoint checkpoint
+    ) throws IOException {
+        if (handle instanceof FileChannelDurabilityLayer.FileChannelGenerationHandle fileHandle) {
+            return new TranslogReader(checkpoint, handle, fileHandle.getHeader(), durabilityLayer);
         }
-        return modified;
+        throw new IllegalArgumentException("Invalid handle type: " + handle.getClass());
     }
 }

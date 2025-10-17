@@ -110,8 +110,18 @@ public class TranslogHeaderTests extends ESTestCase {
                 1,
                 SequenceNumbers.NO_OPS_PERFORMED
             );
-            try (FileChannel channel = FileChannel.open(translogFile, StandardOpenOption.READ)) {
-                TranslogReader.open(channel, translogFile, checkpoint, null);
+            final String translogUUID = UUIDs.randomBase64UUID();
+            final TranslogDurabilityLayer durabilityLayer = new FileChannelDurabilityLayer(
+                translogFile.getParent(),
+                FileChannel::open,
+                translogUUID,
+                true
+            );
+            TranslogDurabilityLayer.GenerationHandle handle = durabilityLayer.openForRead(checkpoint.generation, checkpoint);
+            try {
+                TranslogReader.open(handle, durabilityLayer, checkpoint);
+            } finally {
+                handle.close();
             }
         });
         assertThat(error.getMessage(), containsString(expectedMessage));

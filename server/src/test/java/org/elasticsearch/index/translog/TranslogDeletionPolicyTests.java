@@ -73,6 +73,12 @@ public class TranslogDeletionPolicyTests extends ESTestCase {
         List<TranslogReader> readers = new ArrayList<>();
         final int numberOfReaders = randomIntBetween(0, 10);
         final String translogUUID = UUIDs.randomBase64UUID(random());
+        final TranslogDurabilityLayer durabilityLayer = new FileChannelDurabilityLayer(
+            tempDir,
+            FileChannel::open,
+            translogUUID,
+            true
+        );
         for (long gen = 1; gen <= numberOfReaders + 1; gen++) {
             if (writer != null) {
                 final TranslogReader reader = Mockito.spy(writer.closeIntoReader());
@@ -83,8 +89,7 @@ public class TranslogDeletionPolicyTests extends ESTestCase {
                 new ShardId("index", "uuid", 0),
                 translogUUID,
                 gen,
-                tempDir.resolve(Translog.getFilename(gen)),
-                FileChannel::open,
+                durabilityLayer,
                 TranslogConfig.DEFAULT_BUFFER_SIZE,
                 1L,
                 1L,
