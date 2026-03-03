@@ -1,0 +1,118 @@
+/*
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
+ */
+
+package org.elasticsearch.action.bulk;
+
+import org.apache.lucene.util.Accountable;
+import org.elasticsearch.core.Releasable;
+
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Immutable reader for a row-oriented document batch.
+ *
+ * <p>Binary layout (28-byte header):
+ * <pre>
+ * magic(4) version(2) flags(2) doc_count(4) schema_offset(4) doc_index_offset(4) data_offset(4) total_size(4)
+ * [Schema]    column_count(2) + entries: name_length(2) + name_bytes
+ * [Doc Index] entries[doc_count]: data_offset(4) + data_length(4)
+ * [Row Data]  rows back-to-back
+ * </pre>
+ */
+public final class RowDocumentBatch implements Releasable, Accountable {
+
+    public static final int MAGIC = 0x45534452; // "ESDR"
+    public static final short VERSION = 1;
+
+    private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
+    private static final VarHandle SHORT_HANDLE = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.BIG_ENDIAN);
+
+    private final byte[] data;
+    private final int docCount;
+    private final DocBatchSchema schema;
+    private final int docIndexOffset;
+    private final int dataOffset;
+
+    public RowDocumentBatch(byte[] data) {
+        this.data = data;
+
+        // Parse header
+        int magic = (int) INT_HANDLE.get(data, 0);
+        if (magic != MAGIC) {
+            throw new IllegalArgumentException("Invalid magic: 0x" + Integer.toHexString(magic) + ", expected 0x" + Integer.toHexString(MAGIC));
+        }
+        short version = (short) SHORT_HANDLE.get(data, 4);
+        if (version != VERSION) {
+            throw new IllegalArgumentException("Unsupported version: " + version);
+        }
+        // flags at offset 6 (reserved, ignored for now)
+        this.docCount = (int) INT_HANDLE.get(data, 8);
+        int schemaOffset = (int) INT_HANDLE.get(data, 12);
+        this.docIndexOffset = (int) INT_HANDLE.get(data, 16);
+        this.dataOffset = (int) INT_HANDLE.get(data, 20);
+        // total_size at offset 24
+
+        // Parse schema
+        this.schema = parseSchema(data, schemaOffset);
+    }
+
+    private static DocBatchSchema parseSchema(byte[] data, int offset) {
+        int columnCount = Short.toUnsignedInt((short) SHORT_HANDLE.get(data, offset));
+        offset += 2;
+        List<String> names = new ArrayList<>(columnCount);
+        for (int i = 0; i < columnCount; i++) {
+            int nameLen = Short.toUnsignedInt((short) SHORT_HANDLE.get(data, offset));
+            offset += 2;
+            names.add(new String(data, offset, nameLen, StandardCharsets.UTF_8));
+            offset += nameLen;
+        }
+        return new DocBatchSchema(names);
+    }
+
+    public int docCount() {
+        return docCount;
+    }
+
+    public DocBatchSchema schema() {
+        return schema;
+    }
+
+    public int columnCount() {
+        return schema.columnCount();
+    }
+
+    public byte[] getRawData() {
+        return data;
+    }
+
+    public DocBatchRowReader getRowReader(int docIndex) {
+        if (docIndex < 0 || docIndex >= docCount) {
+            throw new IndexOutOfBoundsException("docIndex " + docIndex + " out of range [0, " + docCount + ")");
+        }
+        int entryOffset = docIndexOffset + docIndex * 8;
+        int rowDataOffset = (int) INT_HANDLE.get(data, entryOffset);
+        int rowDataLength = (int) INT_HANDLE.get(data, entryOffset + 4);
+        return new DocBatchRowReader(data, dataOffset + rowDataOffset, rowDataLength, schema);
+    }
+
+    @Override
+    public void close() {
+        // no-op for byte array backed batch
+    }
+
+    @Override
+    public long ramBytesUsed() {
+        return data.length + 64; // estimate overhead
+    }
+}
