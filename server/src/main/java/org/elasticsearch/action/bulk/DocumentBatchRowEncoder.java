@@ -11,6 +11,7 @@ package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
@@ -61,7 +62,9 @@ public class DocumentBatchRowEncoder {
             }
 
             List<FieldEntry> fields = new ArrayList<>();
-            try (XContentParser parser = xContentType.xContent().createParser(XContentParserConfiguration.EMPTY, source.streamInput())) {
+            try (
+                XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)
+            ) {
                 parser.nextToken(); // START_OBJECT
                 flattenObject(parser, "", 0, schema, fields, xContentType);
             }
@@ -144,6 +147,7 @@ public class DocumentBatchRowEncoder {
     }
 
     private static BytesReference captureRawXContent(XContentParser parser, XContentType xContentType) throws IOException {
+        // TODO: Currently broken
         try (var builder = XContentFactory.jsonBuilder()) {
             builder.copyCurrentStructure(parser);
             return BytesReference.bytes(builder);
