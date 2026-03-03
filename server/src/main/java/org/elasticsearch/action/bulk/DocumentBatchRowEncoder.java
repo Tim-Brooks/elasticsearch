@@ -15,6 +15,7 @@ import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
+import org.elasticsearch.xcontent.XContentString;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.ByteArrayOutputStream;
@@ -106,7 +107,7 @@ public class DocumentBatchRowEncoder {
                 case VALUE_STRING -> {
                     int colIdx = schema.appendColumn(fieldPath);
                     byte typeByte = objectDepth > 0 ? (byte) (RowType.STRING | RowType.OBJECT_FLAG) : RowType.STRING;
-                    byte[] strBytes = parser.text().getBytes(StandardCharsets.UTF_8);
+                    XContentString.UTF8Bytes strBytes = parser.optimizedText().bytes();
                     fields.add(new FieldEntry(colIdx, typeByte, strBytes, 0, 0, null));
                 }
                 case VALUE_NUMBER -> {
@@ -124,7 +125,7 @@ public class DocumentBatchRowEncoder {
                         default -> {
                             // BIG_INTEGER, BIG_DECIMAL -> store as string
                             byte typeByte = objectDepth > 0 ? (byte) (RowType.STRING | RowType.OBJECT_FLAG) : RowType.STRING;
-                            byte[] strBytes = parser.text().getBytes(StandardCharsets.UTF_8);
+                            XContentString.UTF8Bytes strBytes = parser.optimizedText().bytes();
                             fields.add(new FieldEntry(colIdx, typeByte, strBytes, 0, 0, null));
                         }
                     }
@@ -244,8 +245,8 @@ public class DocumentBatchRowEncoder {
             byte baseType = RowType.baseType(fe.typeByte);
             if (baseType == RowType.STRING) {
                 varOffsets[col] = varOut.size();
-                varLengths[col] = fe.stringBytes.length;
-                varOut.write(fe.stringBytes, 0, fe.stringBytes.length);
+                varLengths[col] = fe.stringBytes.length();
+                varOut.write(fe.stringBytes.bytes(), fe.stringBytes.offset(), fe.stringBytes.length());
             } else if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
                 byte[] raw = BytesReference.toBytes(fe.binaryValue);
                 varOffsets[col] = varOut.size();
@@ -304,7 +305,7 @@ public class DocumentBatchRowEncoder {
     private record FieldEntry(
         int columnIndex,
         byte typeByte,
-        byte[] stringBytes,
+        XContentString.UTF8Bytes stringBytes,
         long longValue,
         double doubleValue,
         BytesReference binaryValue

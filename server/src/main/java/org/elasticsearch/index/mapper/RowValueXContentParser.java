@@ -14,8 +14,10 @@ import org.elasticsearch.action.bulk.RowType;
 import org.elasticsearch.core.RestApiVersion;
 import org.elasticsearch.xcontent.DeprecationHandler;
 import org.elasticsearch.xcontent.NamedXContentRegistry;
+import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentLocation;
 import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xcontent.XContentString;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.support.AbstractXContentParser;
 
@@ -117,6 +119,16 @@ public class RowValueXContentParser extends AbstractXContentParser {
             case RowType.FALSE -> "false";
             default -> null;
         };
+    }
+
+    @Override
+    public XContentString optimizedText() throws IOException {
+        if (reader.getBaseType(col) == RowType.STRING) {
+            return new Text(
+                new XContentString.UTF8Bytes(reader.getStringRawBytes(col), reader.getStringRawOffset(col), reader.getStringRawLength(col))
+            );
+        }
+        return new Text(text());
     }
 
     @Override

@@ -102,6 +102,33 @@ public final class DocBatchRowReader {
         return new String(data, varSectionOffset + varOffset, varLength, StandardCharsets.UTF_8);
     }
 
+    /**
+     * Returns the raw UTF-8 bytes for a string column without copying or decoding.
+     * The returned array is shared — callers must not modify it.
+     *
+     * @return [backing array, absolute offset, length]
+     */
+    public byte[] getStringRawBytes(int col) {
+        return data;
+    }
+
+    /**
+     * Returns the absolute offset within {@link #getStringRawBytes} for the string value at the given column.
+     */
+    public int getStringRawOffset(int col) {
+        int offset = computeFixedOffset(col);
+        int varOffset = (int) INT_HANDLE.get(data, offset);
+        return varSectionOffset + varOffset;
+    }
+
+    /**
+     * Returns the byte length of the string value at the given column.
+     */
+    public int getStringRawLength(int col) {
+        int offset = computeFixedOffset(col);
+        return (int) INT_HANDLE.get(data, offset + 4);
+    }
+
     public byte[] getBinaryValue(int col) {
         int offset = computeFixedOffset(col);
         int varOffset = (int) INT_HANDLE.get(data, offset);
