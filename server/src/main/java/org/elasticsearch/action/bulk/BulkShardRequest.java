@@ -46,6 +46,9 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
     // Serialized over the wire so the primary shard receives the batch from the coordinating node.
     private DocumentBatch documentBatch;
 
+    // Row-oriented batch mode: alternative to columnar DocumentBatch.
+    private RowDocumentBatch rowDocumentBatch;
+
     private transient Map<String, InferenceFieldMetadata> inferenceFieldMap = null;
 
     public BulkShardRequest(StreamInput in) throws IOException {
@@ -55,15 +58,20 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
         if (in.getTransportVersion().supports(BATCH_MODE_VERSION)) {
             boolean hasBatch = in.readBoolean();
             if (hasBatch) {
-                this.documentBatch = new DocumentBatch(in.readByteArray());
-                boolean hasTsids = in.readBoolean();
-                if (hasTsids) {
-                    int docCount = this.documentBatch.docCount();
-                    BytesRef[] tsids = new BytesRef[docCount];
-                    for (int i = 0; i < docCount; i++) {
-                        tsids[i] = in.readBytesRef();
+                boolean isRowBatch = in.readBoolean();
+                if (isRowBatch) {
+                    this.rowDocumentBatch = new RowDocumentBatch(in.readByteArray());
+                } else {
+                    this.documentBatch = new DocumentBatch(in.readByteArray());
+                    boolean hasTsids = in.readBoolean();
+                    if (hasTsids) {
+                        int docCount = this.documentBatch.docCount();
+                        BytesRef[] tsids = new BytesRef[docCount];
+                        for (int i = 0; i < docCount; i++) {
+                            tsids[i] = in.readBytesRef();
+                        }
+                        this.documentBatch.setTsids(tsids);
                     }
-                    this.documentBatch.setTsids(tsids);
                 }
             }
         }
@@ -186,8 +194,13 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
         out.writeArray((o, item) -> o.writeOptional(BulkItemRequest.THIN_WRITER, item), items);
         out.writeBoolean(isSimulated);
         if (out.getTransportVersion().supports(BATCH_MODE_VERSION)) {
-            if (documentBatch != null) {
-                out.writeBoolean(true);
+            if (rowDocumentBatch != null) {
+                out.writeBoolean(true);  // hasBatch
+                out.writeBoolean(true);  // isRowBatch
+                out.writeByteArray(rowDocumentBatch.getRawData());
+            } else if (documentBatch != null) {
+                out.writeBoolean(true);  // hasBatch
+                out.writeBoolean(false); // isRowBatch
                 out.writeByteArray(documentBatch.getRawData());
                 if (documentBatch.hasTsids()) {
                     out.writeBoolean(true);
@@ -227,7 +240,9 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
         if (isSimulated) {
             b.append(", simulated");
         }
-        if (documentBatch != null) {
+        if (rowDocumentBatch != null) {
+            b.append(", rowBatch[").append(rowDocumentBatch.docCount()).append(" docs]");
+        } else if (documentBatch != null) {
             b.append(", batch[").append(documentBatch.docCount()).append(" docs]");
         }
         return b.toString();
@@ -296,9 +311,30 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
     }
 
     /**
-     * Returns true if this request should use the batch processing code path.
+     * Set a RowDocumentBatch for row-oriented batch mode processing.
+     */
+    public void setRowDocumentBatch(RowDocumentBatch rowDocumentBatch) {
+        this.rowDocumentBatch = rowDocumentBatch;
+    }
+
+    /**
+     * Returns the RowDocumentBatch if row batch mode is enabled, null otherwise.
+     */
+    public RowDocumentBatch getRowDocumentBatch() {
+        return rowDocumentBatch;
+    }
+
+    /**
+     * Returns true if this request should use the batch processing code path (columnar or row).
      */
     public boolean isBatchMode() {
-        return documentBatch != null;
+        return documentBatch != null || rowDocumentBatch != null;
+    }
+
+    /**
+     * Returns true if this request uses the row-oriented batch format.
+     */
+    public boolean isRowBatchMode() {
+        return rowDocumentBatch != null;
     }
 }

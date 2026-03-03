@@ -325,6 +325,13 @@ public class MapperService extends AbstractIndexComponent implements Closeable {
     }
 
     /**
+     * Creates a new {@link RowBatchDocumentParser} for row-oriented batch document parsing.
+     */
+    public RowBatchDocumentParser createRowBatchDocumentParser() {
+        return new RowBatchDocumentParser(parserConfiguration, mappingParserContextSupplier.get());
+    }
+
+    /**
      * Exposes a {@link DocumentParser}
      * @return a document parser to be used to parse incoming documents
      */

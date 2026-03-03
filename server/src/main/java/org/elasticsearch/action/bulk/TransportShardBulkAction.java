@@ -290,7 +290,19 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             @Override
             protected void doRun() throws Exception {
                 // Try batch path if the coordinating node determined this request is batch-eligible
-                if (request.isBatchMode()) {
+                if (request.isRowBatchMode()) {
+                    try {
+                        var batchResult = performRowBatchOnPrimary(request, primary, postWriteRefresh, postWriteAction);
+                        if (batchResult != null) {
+                            primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBulkTime);
+                            listener.onResponse(batchResult);
+                            return;
+                        }
+                    } catch (Exception e) {
+                        // Batch failed entirely — fall through to serial path
+                        logger.debug("Row batch execution failed, falling back to serial path", e);
+                    }
+                } else if (request.isBatchMode()) {
                     try {
                         var batchResult = performBatchOnPrimary(request, primary, postWriteRefresh, postWriteAction);
                         if (batchResult != null) {
@@ -502,6 +514,145 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 responses[i] = BulkItemResponse.success(item.id(), item.request().opType(), indexResponse);
                 // Batch results share the same Translog.Location from the single batch translog write,
                 // so we cannot use TransportWriteAction.locationToSync() which asserts strictly increasing locations.
+                if (result.getTranslogLocation() != null) {
+                    locationToSync = result.getTranslogLocation();
+                }
+            } else {
+                responses[i] = BulkItemResponse.failure(
+                    item.id(),
+                    item.request().opType(),
+                    new BulkItemResponse.Failure(request.index(), result.getId(), result.getFailure(), result.getSeqNo(), result.getTerm())
+                );
+            }
+            item.setPrimaryResponse(responses[i]);
+        }
+
+        BulkShardResponse shardResponse = new BulkShardResponse(shardId, responses);
+
+        return new WritePrimaryResult<>(request, shardResponse, locationToSync, primary, logger, postWriteRefresh, postWriteAction);
+    }
+
+    /**
+     * Attempts row-oriented batch execution of all items on the primary shard.
+     * Returns a WritePrimaryResult on success, or null if the batch should fall back to the serial path.
+     */
+    @Nullable
+    static WritePrimaryResult<BulkShardRequest, BulkShardResponse> performRowBatchOnPrimary(
+        BulkShardRequest request,
+        IndexShard primary,
+        @Nullable PostWriteRefresh postWriteRefresh,
+        @Nullable Consumer<Runnable> postWriteAction
+    ) throws IOException {
+        final BulkItemRequest[] items = request.items();
+        final ShardId shardId = request.shardId();
+        final MapperService mapperService = primary.mapperService();
+        final MappingLookup mappingLookup = mapperService.mappingLookup();
+        final RowDocumentBatch rowBatch = request.getRowDocumentBatch();
+
+        // Phase 1: Collect items — if any are aborted, fall back to serial
+        final int batchDocCount = items.length;
+        final java.util.List<IndexRequest> indexRequests = new java.util.ArrayList<>(batchDocCount);
+
+        for (int i = 0; i < items.length; i++) {
+            BulkItemRequest item = items[i];
+            if (item.getPrimaryResponse() != null) {
+                return null; // aborted item — fall back to serial path
+            }
+            indexRequests.add((IndexRequest) item.request());
+        }
+
+        if (batchDocCount == 0) {
+            return null;
+        }
+
+        // Check if all schema columns have mappers — if not, fall back to serial path
+        DocBatchSchema schema = rowBatch.schema();
+        for (int col = 0; col < schema.columnCount(); col++) {
+            if (BatchDocumentParser.resolveMapper(schema.getColumnName(col), mappingLookup) == null) {
+                return null;
+            }
+        }
+
+        // Phase 2: Parse batch using RowBatchDocumentParser
+        var batchParser = mapperService.createRowBatchDocumentParser();
+        var parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
+
+        // Phase 3: Build Engine.Index operations for successfully parsed documents
+        final java.util.List<Engine.Index> engineOps = new java.util.ArrayList<>(batchDocCount);
+        final long startTimeNanos = primary.getRelativeTimeInNanos();
+        final long operationPrimaryTerm = primary.getOperationPrimaryTerm();
+
+        for (int i = 0; i < batchDocCount; i++) {
+            if (parseResult.isSuccess(i) == false) {
+                continue;
+            }
+
+            var parsedDoc = parseResult.getDocument(i);
+            IndexRequest indexRequest = indexRequests.get(i);
+
+            Engine.Index engineIndex = new Engine.Index(
+                org.elasticsearch.index.mapper.Uid.encodeId(parsedDoc.id()),
+                parsedDoc,
+                SequenceNumbers.UNASSIGNED_SEQ_NO,
+                operationPrimaryTerm,
+                indexRequest.version(),
+                indexRequest.versionType(),
+                Engine.Operation.Origin.PRIMARY,
+                startTimeNanos,
+                indexRequest.getAutoGeneratedTimestamp(),
+                indexRequest.isRetry(),
+                SequenceNumbers.UNASSIGNED_SEQ_NO,
+                0
+            );
+
+            engineOps.add(engineIndex);
+        }
+
+        // Phase 4: Execute on engine
+        final java.util.List<Engine.IndexResult> engineResults = primary.indexBatch(engineOps, rowBatch.getRawData());
+
+        // Phase 5: Build BulkItemResponse for each item
+        final BulkItemResponse[] responses = new BulkItemResponse[items.length];
+        Translog.Location locationToSync = null;
+
+        // Handle parse failures first
+        for (int i = 0; i < batchDocCount; i++) {
+            if (parseResult.isSuccess(i) == false) {
+                BulkItemRequest item = items[i];
+                Exception parseException = parseResult.getException(i);
+                responses[i] = BulkItemResponse.failure(
+                    item.id(),
+                    item.request().opType(),
+                    new BulkItemResponse.Failure(request.index(), item.request().id(), parseException)
+                );
+                item.setPrimaryResponse(responses[i]);
+            }
+        }
+
+        // Handle engine results for successfully parsed documents
+        int engineResultIdx = 0;
+        for (int i = 0; i < batchDocCount; i++) {
+            if (parseResult.isSuccess(i) == false) {
+                continue;
+            }
+
+            BulkItemRequest item = items[i];
+            Engine.IndexResult result = engineResults.get(engineResultIdx);
+            engineResultIdx++;
+
+            if (result.getResultType() == Engine.Result.Type.SUCCESS) {
+                IndexRequest indexRequest = indexRequests.get(i);
+                IndexResponse indexResponse = new IndexResponse(
+                    shardId,
+                    result.getId(),
+                    result.getSeqNo(),
+                    result.getTerm(),
+                    result.getVersion(),
+                    result.isCreated(),
+                    indexRequest.getExecutedPipelines()
+                );
+                indexResponse.setShardInfo(org.elasticsearch.action.support.replication.ReplicationResponse.ShardInfo.EMPTY);
+                responses[i] = BulkItemResponse.success(item.id(), item.request().opType(), indexResponse);
                 if (result.getTranslogLocation() != null) {
                     locationToSync = result.getTranslogLocation();
                 }
@@ -867,7 +1018,9 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     }
 
     public static Translog.Location performOnReplica(BulkShardRequest request, IndexShard replica) throws Exception {
-        if (request.isBatchMode()) {
+        if (request.isRowBatchMode()) {
+            return performRowBatchOnReplica(request, replica);
+        } else if (request.isBatchMode()) {
             return performBatchOnReplica(request, replica);
         }
         Translog.Location location = null;
@@ -978,6 +1131,87 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             }
         }
         return location;
+    }
+
+    private static Translog.Location performRowBatchOnReplica(BulkShardRequest request, IndexShard replica) throws Exception {
+        final RowDocumentBatch rowBatch = request.getRowDocumentBatch();
+        final MapperService mapperService = replica.mapperService();
+        final MappingLookup mappingLookup = mapperService.mappingLookup();
+        final BulkItemRequest[] items = request.items();
+
+        // Collect IndexRequests for the parser
+        final java.util.List<IndexRequest> indexRequests = new java.util.ArrayList<>(items.length);
+        for (BulkItemRequest item : items) {
+            indexRequests.add((IndexRequest) item.request());
+        }
+
+        // Parse batch using RowBatchDocumentParser
+        var batchParser = mapperService.createRowBatchDocumentParser();
+        var parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
+
+        // Build Engine.Index operations for successfully parsed & non-failed docs
+        final java.util.List<Engine.Index> engineOps = new java.util.ArrayList<>();
+        final long startTimeNanos = replica.getRelativeTimeInNanos();
+
+        for (int i = 0; i < items.length; i++) {
+            BulkItemRequest item = items[i];
+            BulkItemResponse response = item.getPrimaryResponse();
+
+            if (response.isFailed()) {
+                if (response.getFailure().getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
+                    replica.markSeqNoAsNoop(
+                        response.getFailure().getSeqNo(),
+                        response.getFailure().getTerm() == SequenceNumbers.UNASSIGNED_PRIMARY_TERM
+                            ? replica.getOperationPrimaryTerm()
+                            : response.getFailure().getTerm(),
+                        response.getFailure().getMessage()
+                    );
+                }
+                continue;
+            }
+
+            if (response.getResponse().getResult() == DocWriteResponse.Result.NOOP) {
+                continue;
+            }
+
+            if (parseResult.isSuccess(i) == false) {
+                continue;
+            }
+
+            var parsedDoc = parseResult.getDocument(i);
+            IndexRequest indexRequest = (IndexRequest) item.request();
+
+            Engine.Index engineIndex = new Engine.Index(
+                org.elasticsearch.index.mapper.Uid.encodeId(parsedDoc.id()),
+                parsedDoc,
+                response.getResponse().getSeqNo(),
+                response.getResponse().getPrimaryTerm(),
+                response.getResponse().getVersion(),
+                null,
+                Engine.Operation.Origin.REPLICA,
+                startTimeNanos,
+                indexRequest.getAutoGeneratedTimestamp(),
+                indexRequest.isRetry(),
+                SequenceNumbers.UNASSIGNED_SEQ_NO,
+                0
+            );
+
+            engineOps.add(engineIndex);
+        }
+
+        if (engineOps.isEmpty()) {
+            return null;
+        }
+
+        java.util.List<Engine.IndexResult> replicaResults = replica.indexBatch(engineOps, rowBatch.getRawData());
+
+        Translog.Location replicaLocation = null;
+        for (Engine.IndexResult result : replicaResults) {
+            if (result.getTranslogLocation() != null) {
+                replicaLocation = result.getTranslogLocation();
+            }
+        }
+        return replicaLocation;
     }
 
     private static Engine.Result performOpOnReplica(

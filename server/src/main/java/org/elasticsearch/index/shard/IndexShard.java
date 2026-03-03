@@ -33,6 +33,7 @@ import org.elasticsearch.action.ActionRunnable;
 import org.elasticsearch.action.admin.indices.flush.FlushRequest;
 import org.elasticsearch.action.admin.indices.forcemerge.ForceMergeRequest;
 import org.elasticsearch.action.bulk.DocumentBatch;
+import org.elasticsearch.action.bulk.RowDocumentBatch;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.action.support.SubscribableListener;
 import org.elasticsearch.action.support.replication.PendingReplicationActions;
@@ -108,6 +109,7 @@ import org.elasticsearch.index.fielddata.ShardFieldData;
 import org.elasticsearch.index.flush.FlushStats;
 import org.elasticsearch.index.get.GetStats;
 import org.elasticsearch.index.get.ShardGetService;
+import org.elasticsearch.index.mapper.BatchDocumentParser;
 import org.elasticsearch.index.mapper.DateFieldMapper;
 import org.elasticsearch.index.mapper.DocumentMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
@@ -2210,11 +2212,30 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             }
             case BATCH -> {
                 final Translog.Batch batch = (Translog.Batch) operation;
-                // Reconstruct DocumentBatch from stored bytes and re-parse
-                final DocumentBatch documentBatch = new DocumentBatch(batch.batchData());
                 final MappingLookup mappingLookup = mapperService.mappingLookup();
-                var batchParser = mapperService.createBatchDocumentParser();
-                var parseResult = batchParser.parseBatch(documentBatch, mappingLookup);
+
+                // Detect format by magic bytes and parse accordingly
+                final byte[] batchData = batch.batchData();
+                final BatchDocumentParser.BatchResult parseResult;
+                if (isRowBatch(batchData)) {
+                    final RowDocumentBatch rowBatch = new RowDocumentBatch(batchData);
+                    // Build IndexRequests from DocMeta for the row parser
+                    final List<Translog.Batch.DocMeta> metas = batch.docMetas();
+                    final java.util.List<org.elasticsearch.action.index.IndexRequest> indexRequests = new java.util.ArrayList<>(
+                        metas.size()
+                    );
+                    for (Translog.Batch.DocMeta meta : metas) {
+                        var req = new org.elasticsearch.action.index.IndexRequest();
+                        req.id(Uid.decodeId(meta.uid()));
+                        indexRequests.add(req);
+                    }
+                    var rowParser = mapperService.createRowBatchDocumentParser();
+                    parseResult = rowParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
+                } else {
+                    final DocumentBatch documentBatch = new DocumentBatch(batchData);
+                    var batchParser = mapperService.createBatchDocumentParser();
+                    parseResult = batchParser.parseBatch(documentBatch, mappingLookup);
+                }
 
                 // Build Engine.Index operations using DocMeta for seqNo/version/etc.
                 final List<Translog.Batch.DocMeta> docMetas = batch.docMetas();
@@ -2261,6 +2282,15 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             default -> throw new IllegalStateException("No operation defined for [" + operation + "]");
         }
         return result;
+    }
+
+    /**
+     * Checks if the batch data bytes represent a row-oriented batch (ESDR magic) vs columnar (ESDB magic).
+     */
+    private static boolean isRowBatch(byte[] data) {
+        if (data.length < 4) return false;
+        int magic = ((data[0] & 0xFF) << 24) | ((data[1] & 0xFF) << 16) | ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
+        return magic == RowDocumentBatch.MAGIC;
     }
 
     /**

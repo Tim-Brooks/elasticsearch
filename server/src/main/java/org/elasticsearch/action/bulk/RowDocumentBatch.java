@@ -50,7 +50,9 @@ public final class RowDocumentBatch implements Releasable, Accountable {
         // Parse header
         int magic = (int) INT_HANDLE.get(data, 0);
         if (magic != MAGIC) {
-            throw new IllegalArgumentException("Invalid magic: 0x" + Integer.toHexString(magic) + ", expected 0x" + Integer.toHexString(MAGIC));
+            throw new IllegalArgumentException(
+                "Invalid magic: 0x" + Integer.toHexString(magic) + ", expected 0x" + Integer.toHexString(MAGIC)
+            );
         }
         short version = (short) SHORT_HANDLE.get(data, 4);
         if (version != VERSION) {

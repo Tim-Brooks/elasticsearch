@@ -434,8 +434,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                         for (BulkItemRequest r : requests) {
                             indexRequests.add((IndexRequest) r.request());
                         }
-                        DocumentBatch batch = DocumentBatchEncoder.encode(indexRequests);
-                        bulkShardRequest.setDocumentBatch(batch);
+                        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(indexRequests);
+                        bulkShardRequest.setRowDocumentBatch(batch);
                     } catch (IOException e) {
                         // Encoding failed — leave batch null, serial path will be used on the primary
                         logger.debug("Failed to encode document batch, falling back to serial path", e);

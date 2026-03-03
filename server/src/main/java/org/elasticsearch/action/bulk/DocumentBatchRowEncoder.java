@@ -297,6 +297,12 @@ public class DocumentBatchRowEncoder {
     /**
      * Internal representation of a single field value collected during Phase 1.
      */
-    private record FieldEntry(int columnIndex, byte typeByte, byte[] stringBytes, long longValue, double doubleValue,
-        BytesReference binaryValue) {}
+    private record FieldEntry(
+        int columnIndex,
+        byte typeByte,
+        byte[] stringBytes,
+        long longValue,
+        double doubleValue,
+        BytesReference binaryValue
+    ) {}
 }
