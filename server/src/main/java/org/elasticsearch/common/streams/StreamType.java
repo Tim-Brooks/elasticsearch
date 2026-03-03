@@ -13,8 +13,7 @@ import org.elasticsearch.cluster.metadata.ProjectMetadata;
 import org.elasticsearch.cluster.metadata.StreamsMetadata;
 import org.elasticsearch.core.Nullable;
 
-import java.util.Arrays;
-import java.util.List;
+import java.util.ArrayList;
 
 public enum StreamType {
 
@@ -62,11 +61,12 @@ public enum StreamType {
      */
     @Nullable
     public static StreamType exactEnabledStreamMatch(ProjectMetadata projectMetadata, String indexName) {
-        return Arrays.stream(values())
-            .filter(t -> t.streamTypeIsEnabled(projectMetadata))
-            .filter(t -> t.getStreamName().equals(indexName))
-            .findFirst()
-            .orElse(null);
+        for (StreamType streamType : values()) {
+            if (streamType.streamTypeIsEnabled(projectMetadata) && streamType.getStreamName().equals(indexName)) {
+                return streamType;
+            }
+        }
+        return null;
     }
 
     /**
@@ -81,24 +81,27 @@ public enum StreamType {
     @Nullable
     public static StreamType enabledParentStreamOf(ProjectMetadata projectMetadata, String indexName) {
         // Check for exact names first, in which case indexing is allowed
-        if (Arrays.stream(values())
-            .filter(t -> t.streamTypeIsEnabled(projectMetadata))
-            .anyMatch(t -> t.getStreamName().equals(indexName))) {
-            return null;
-        } else {
-            // Check that any enabled stream type isn't targeted by the index
-            List<StreamType> matchingStreamTypes = Arrays.stream(values())
-                .filter(t -> t.streamTypeIsEnabled(projectMetadata))
-                .filter(t -> t.matchesStreamPrefix(indexName))
-                .toList();
-            if (matchingStreamTypes.isEmpty()) {
+        for (StreamType streamType : values()) {
+            if (streamType.streamTypeIsEnabled(projectMetadata) && streamType.getStreamName().equals(indexName)) {
                 return null;
-            } else if (matchingStreamTypes.size() == 1) {
-                return matchingStreamTypes.getFirst();
-            } else {
-                // Try to return the most fine-grained stream type, otherwise `LOGS`
-                return matchingStreamTypes.stream().filter(s -> s != LOGS).findFirst().orElse(LOGS);
             }
+        }
+        ArrayList<StreamType> matchingStreamTypes = null;
+        for (StreamType streamType : values()) {
+            if (streamType.streamTypeIsEnabled(projectMetadata) && streamType.matchesStreamPrefix(indexName)) {
+                if (matchingStreamTypes == null) {
+                    matchingStreamTypes = new ArrayList<>(values().length);
+                }
+                matchingStreamTypes.add(streamType);
+            }
+        }
+        if (matchingStreamTypes == null) {
+            return null;
+        } else if (matchingStreamTypes.size() == 1) {
+            return matchingStreamTypes.getFirst();
+        } else {
+            // Try to return the most fine-grained stream type, otherwise `LOGS`
+            return matchingStreamTypes.stream().filter(s -> s != LOGS).findFirst().orElse(LOGS);
         }
     }
 }
