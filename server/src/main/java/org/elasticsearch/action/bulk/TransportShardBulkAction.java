@@ -572,6 +572,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         DocBatchSchema schema = rowBatch.schema();
         for (int col = 0; col < schema.columnCount(); col++) {
             if (BatchDocumentParser.requiresDynamicMapping(schema.getColumnName(col), mappingLookup)) {
+                logger.error("needs to dynamically map: " + schema.getColumnName(col));
                 return null;
             }
         }
