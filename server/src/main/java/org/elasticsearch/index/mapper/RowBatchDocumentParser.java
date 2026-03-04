@@ -11,6 +11,7 @@ package org.elasticsearch.index.mapper;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.bulk.DocBatchRowReader;
 import org.elasticsearch.action.bulk.DocBatchSchema;
 import org.elasticsearch.action.bulk.RowDocumentBatch;
@@ -25,7 +26,9 @@ import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -33,13 +36,10 @@ import java.util.Set;
 /**
  * Parses a {@link RowDocumentBatch} (row-oriented binary format) into a list of {@link ParsedDocument}s.
  * <p>
- * Unlike {@link BatchDocumentParser} (which iterates columns across all docs), this iterates
- * doc-by-doc, field-by-field, aligning with Elasticsearch's document-centric pipeline.
- * <p>
  * The algorithm per document:
  * <ol>
  *   <li>Create a {@link SourceToParse} from {@link IndexRequest} metadata</li>
- *   <li>Create a {@link BatchDocumentParser.BatchDocumentParserContext}</li>
+ *   <li>Create a {@link BatchDocumentParserContext}</li>
  *   <li>Run metadata preParse</li>
  *   <li>Get {@link DocBatchRowReader} for the row</li>
  *   <li>For each non-null field: resolve mapper, create parser, call fieldMapper.parse()</li>
@@ -60,6 +60,68 @@ public final class RowBatchDocumentParser {
     }
 
     /**
+     * Resolves a mapper for the given field path. Handles dot-notation paths by looking up
+     * the full path directly in the mapping lookup (which stores leaf mappers by full path).
+     */
+    public static Mapper resolveMapper(String fieldPath, MappingLookup mappingLookup) {
+        // First try direct lookup - MappingLookup stores field mappers by full dotted path
+        Mapper mapper = mappingLookup.getMapper(fieldPath);
+        if (mapper != null) {
+            return mapper;
+        }
+        // Also check object mappers for object-typed columns
+        ObjectMapper objectMapper = mappingLookup.objectMappers().get(fieldPath);
+        if (objectMapper != null) {
+            return objectMapper;
+        }
+        return null;
+    }
+
+    /**
+     * Determines whether an unmapped field would require a dynamic mapping update.
+     * Returns {@code true} if the field has no mapper and the effective dynamic setting
+     * for its location in the mapping hierarchy is {@link ObjectMapper.Dynamic#TRUE} or
+     * {@link ObjectMapper.Dynamic#RUNTIME}, meaning the serial path must handle it.
+     * Returns {@code false} if the field is already mapped (including as a runtime field),
+     * or if it's unmapped but would be ignored ({@code dynamic=false}) or rejected at
+     * parse time ({@code dynamic=strict}).
+     */
+    public static boolean requiresDynamicMapping(String fieldPath, MappingLookup mappingLookup) {
+        if (resolveMapper(fieldPath, mappingLookup) != null) {
+            return false;
+        }
+        // Runtime fields are not in the field mappers but are in the field type lookup.
+        // An existing runtime field does not require a dynamic mapping update.
+        if (mappingLookup.getFieldType(fieldPath) != null) {
+            return false;
+        }
+        ObjectMapper.Dynamic dynamic = getEffectiveDynamic(fieldPath, mappingLookup);
+        return dynamic == ObjectMapper.Dynamic.TRUE || dynamic == ObjectMapper.Dynamic.RUNTIME;
+    }
+
+    /**
+     * Walks the object mapper hierarchy to find the effective dynamic setting for a field path.
+     * Checks each parent object from the immediate parent up to the root, returning the first
+     * explicitly configured dynamic setting found. Falls back to the root dynamic setting.
+     */
+    static ObjectMapper.Dynamic getEffectiveDynamic(String fieldPath, MappingLookup mappingLookup) {
+        // Walk up from the immediate parent to the root, looking for an explicit dynamic setting
+        String parentPath = fieldPath;
+        while (true) {
+            int lastDot = parentPath.lastIndexOf('.');
+            if (lastDot < 0) {
+                break;
+            }
+            parentPath = parentPath.substring(0, lastDot);
+            ObjectMapper parentMapper = mappingLookup.objectMappers().get(parentPath);
+            if (parentMapper != null && parentMapper.dynamic() != null) {
+                return parentMapper.dynamic();
+            }
+        }
+        return ObjectMapper.Dynamic.getRootDynamic(mappingLookup);
+    }
+
+    /**
      * Parse all documents in a row batch into parsed documents.
      *
      * @param rowBatch      the row-oriented document batch
@@ -67,11 +129,7 @@ public final class RowBatchDocumentParser {
      * @param mappingLookup the current mapping lookup
      * @return a result containing parsed documents and per-document exceptions
      */
-    public BatchDocumentParser.BatchResult parseRowBatch(
-        RowDocumentBatch rowBatch,
-        List<IndexRequest> indexRequests,
-        MappingLookup mappingLookup
-    ) {
+    public BatchResult parseRowBatch(RowDocumentBatch rowBatch, List<IndexRequest> indexRequests, MappingLookup mappingLookup) {
         final int docCount = rowBatch.docCount();
         final DocBatchSchema schema = rowBatch.schema();
         final MetadataFieldMapper[] metadataFieldMappers = mappingLookup.getMapping().getSortedMetadataMappers();
@@ -83,7 +141,7 @@ public final class RowBatchDocumentParser {
         final Map<String, List<RuntimeField>> sharedDynamicRuntimeFields = new HashMap<>();
 
         final SourceToParse[] sources = new SourceToParse[docCount];
-        final BatchDocumentParser.BatchDocumentParserContext[] contexts = new BatchDocumentParser.BatchDocumentParserContext[docCount];
+        final BatchDocumentParserContext[] contexts = new BatchDocumentParserContext[docCount];
         final ParsedDocument[] results = new ParsedDocument[docCount];
         final Exception[] exceptions = new Exception[docCount];
 
@@ -92,11 +150,11 @@ public final class RowBatchDocumentParser {
         final String[][] columnParentSegments = new String[schema.columnCount()][];
         for (int col = 0; col < schema.columnCount(); col++) {
             String fieldName = schema.getColumnName(col);
-            columnMappers[col] = BatchDocumentParser.resolveMapper(fieldName, mappingLookup);
+            columnMappers[col] = resolveMapper(fieldName, mappingLookup);
             columnParentSegments[col] = computeParentSegments(fieldName);
             if (columnMappers[col] == null && mappingLookup.getFieldType(fieldName) == null) {
                 // Field has no mapper and is not a runtime field — check strict dynamic
-                ObjectMapper.Dynamic dynamic = BatchDocumentParser.getEffectiveDynamic(fieldName, mappingLookup);
+                ObjectMapper.Dynamic dynamic = getEffectiveDynamic(fieldName, mappingLookup);
                 if (dynamic == ObjectMapper.Dynamic.STRICT) {
                     int lastDot = fieldName.lastIndexOf('.');
                     String parentPath = lastDot > 0 ? fieldName.substring(0, lastDot) : "";
@@ -124,7 +182,7 @@ public final class RowBatchDocumentParser {
                 );
 
                 // Step 2: Create context
-                contexts[i] = new BatchDocumentParser.BatchDocumentParserContext(
+                contexts[i] = new BatchDocumentParserContext(
                     mappingLookup,
                     mappingParserContext,
                     sources[i],
@@ -178,7 +236,7 @@ public final class RowBatchDocumentParser {
                 }
 
                 // Step 6: Build ParsedDocument
-                BatchDocumentParser.BatchDocumentParserContext ctx = contexts[i];
+                BatchDocumentParserContext ctx = contexts[i];
                 CompressedXContent dynamicUpdate = DocumentParser.createDynamicUpdate(ctx);
 
                 results[i] = new ParsedDocument(
@@ -203,7 +261,7 @@ public final class RowBatchDocumentParser {
             }
         }
 
-        return new BatchDocumentParser.BatchResult(results, exceptions);
+        return new BatchResult(results, exceptions);
     }
 
     private static void parseFieldForDocument(
@@ -211,7 +269,7 @@ public final class RowBatchDocumentParser {
         DocBatchRowReader rowReader,
         int col,
         byte baseType,
-        BatchDocumentParser.BatchDocumentParserContext context,
+        BatchDocumentParserContext context,
         String[] parentSegments,
         XContentType xContentType
     ) throws IOException {
@@ -256,7 +314,7 @@ public final class RowBatchDocumentParser {
     private static void parseBinaryObjectForDocument(
         DocBatchRowReader rowReader,
         int col,
-        BatchDocumentParser.BatchDocumentParserContext context,
+        BatchDocumentParserContext context,
         Mapper mapper,
         String[] parentSegments,
         XContentType xContentType
@@ -295,6 +353,186 @@ public final class RowBatchDocumentParser {
     private static void resetPath(int segmentCount, ContentPath path) {
         for (int i = 0; i < segmentCount; i++) {
             path.remove();
+        }
+    }
+
+    /**
+     * Result of parsing a batch of documents.
+     *
+     * @param documents  array of parsed documents; null entries indicate failures
+     * @param exceptions array of exceptions; null entries indicate success
+     */
+    public record BatchResult(ParsedDocument[] documents, Exception[] exceptions) {
+
+        /**
+         * Returns the number of documents in the batch.
+         */
+        public int size() {
+            return documents.length;
+        }
+
+        /**
+         * Returns the parsed document at the given index, or null if parsing failed.
+         */
+        public ParsedDocument getDocument(int index) {
+            return documents[index];
+        }
+
+        /**
+         * Returns the exception for the given index, or null if parsing succeeded.
+         */
+        public Exception getException(int index) {
+            return exceptions[index];
+        }
+
+        /**
+         * Returns true if parsing succeeded for the given document index.
+         */
+        public boolean isSuccess(int index) {
+            return exceptions[index] == null;
+        }
+
+        /**
+         * Returns all successfully parsed documents.
+         */
+        public List<ParsedDocument> successfulDocuments() {
+            List<ParsedDocument> result = new ArrayList<>();
+            for (ParsedDocument document : documents) {
+                if (document != null) {
+                    result.add(document);
+                }
+            }
+            return result;
+        }
+    }
+
+    /**
+     * A DocumentParserContext implementation for batch parsing.
+     * Unlike the standard RootDocumentParserContext (which is a private inner class of DocumentParser),
+     * this provides a mutable parser reference so that different column parsers can be swapped in
+     * for each field being parsed.
+     */
+    static final class BatchDocumentParserContext extends DocumentParserContext {
+        private final ContentPath path = new ContentPath();
+        private XContentParser parser;
+        private final LuceneDocument document;
+        private final List<LuceneDocument> documents = new ArrayList<>();
+        private final long maxAllowedNumNestedDocs;
+        private long numNestedDocs;
+        private boolean docsReversed = false;
+
+        BatchDocumentParserContext(
+            MappingLookup mappingLookup,
+            MappingParserContext mappingParserContext,
+            SourceToParse source,
+            Set<String> copyToFields,
+            Map<String, List<Mapper.Builder>> dynamicMappers,
+            Map<String, ObjectMapper.Builder> dynamicObjectMappers,
+            Map<String, List<RuntimeField>> dynamicRuntimeFields
+        ) {
+            super(
+                mappingLookup,
+                mappingParserContext,
+                source,
+                mappingLookup.getMapping().getRoot(),
+                ObjectMapper.Dynamic.getRootDynamic(mappingLookup),
+                copyToFields,
+                dynamicMappers,
+                dynamicObjectMappers,
+                dynamicRuntimeFields
+            );
+            // Create a no-op parser as default. The real parser is set per-field via setParser().
+            // ColumnValueXContentParser.forNullValue() provides a minimal parser that satisfies
+            // the non-null requirement for metadata preParse/postParse calls.
+            this.parser = ColumnValueXContentParser.forNullValue();
+            this.document = new LuceneDocument();
+            this.documents.add(document);
+            this.maxAllowedNumNestedDocs = mappingParserContext.getIndexSettings().getMappingNestedDocsLimit();
+            this.numNestedDocs = 0L;
+        }
+
+        @Override
+        public Mapper getMapper(String name) {
+            Mapper mapper = getMetadataMapper(name);
+            if (mapper != null) {
+                return mapper;
+            }
+            return super.getMapper(name);
+        }
+
+        @Override
+        public ContentPath path() {
+            return this.path;
+        }
+
+        @Override
+        public XContentParser parser() {
+            return this.parser;
+        }
+
+        void setParser(XContentParser parser) {
+            this.parser = parser;
+        }
+
+        @Override
+        public LuceneDocument rootDoc() {
+            return documents.get(0);
+        }
+
+        @Override
+        public LuceneDocument doc() {
+            return this.document;
+        }
+
+        @Override
+        protected void addDoc(LuceneDocument doc) {
+            numNestedDocs++;
+            if (numNestedDocs > maxAllowedNumNestedDocs) {
+                throw new DocumentParsingException(
+                    parser.getTokenLocation(),
+                    "The number of nested documents has exceeded the allowed limit of ["
+                        + maxAllowedNumNestedDocs
+                        + "]."
+                        + " This limit can be set by changing the ["
+                        + MapperService.INDEX_MAPPING_NESTED_DOCS_LIMIT_SETTING.getKey()
+                        + "] index level setting."
+                );
+            }
+            this.documents.add(doc);
+        }
+
+        @Override
+        public Iterable<LuceneDocument> nonRootDocuments() {
+            if (docsReversed) {
+                throw new IllegalStateException("documents are already reversed");
+            }
+            return documents.subList(1, documents.size());
+        }
+
+        @Override
+        public BytesRef getTsid() {
+            return sourceToParse().tsid();
+        }
+
+        /**
+         * Returns a copy of the provided List where parent documents appear after their children.
+         */
+        List<LuceneDocument> reorderParentAndGetDocs() {
+            if (documents.size() > 1 && docsReversed == false) {
+                docsReversed = true;
+                List<LuceneDocument> newDocs = new ArrayList<>(documents.size());
+                LinkedList<LuceneDocument> parents = new LinkedList<>();
+                for (LuceneDocument doc : documents) {
+                    while (parents.peek() != doc.getParent()) {
+                        newDocs.add(parents.poll());
+                    }
+                    parents.add(0, doc);
+                }
+                newDocs.addAll(parents);
+                documents.clear();
+                documents.addAll(newDocs);
+            }
+            return documents;
         }
     }
 }
