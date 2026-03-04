@@ -29,7 +29,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Parses a {@link RowDocumentBatch} (row-oriented binary format) into a list of {@link ParsedDocument}s.
@@ -164,9 +163,9 @@ public final class RowBatchDocumentParser {
                             }
                         }
                     } catch (Exception e) {
-                        if (ThreadLocalRandom.current().nextInt(1000) < 10) {
-                            logger.error("Exception parsing row " + indexRequest.source().utf8ToString(), e);
-                        }
+                        // if (ThreadLocalRandom.current().nextInt(1000) < 10) {
+                        // logger.error("Exception parsing row " + indexRequest.source().utf8ToString(), e);
+                        // }
                         exceptions[docIdx] = e;
                     }
                 });

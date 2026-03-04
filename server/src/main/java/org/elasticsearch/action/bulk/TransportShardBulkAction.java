@@ -763,7 +763,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 request.isRetry()
             );
             if (result.getResultType() == Engine.Result.Type.MAPPING_UPDATE_REQUIRED) {
-                logger.error("maping update " + sourceToParse.source().utf8ToString());
                 return handleMappingUpdateRequired(
                     context,
                     mappingUpdater,
