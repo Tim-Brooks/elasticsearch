@@ -165,8 +165,9 @@ public final class RowBatchDocumentParser {
                             }
                         }
                     } catch (Exception e) {
-                        if (ThreadLocalRandom.current().nextInt(500) < 10) {
-                            logger.error("Exception parsing row", e);
+                        if (ThreadLocalRandom.current().nextInt(1000) < 10) {
+
+                            logger.error("Exception parsing row " + indexRequest.source().utf8ToString(), e);
                         }
                         exceptions[docIdx] = e;
                     }
