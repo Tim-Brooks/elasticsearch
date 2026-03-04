@@ -248,7 +248,8 @@ public class MetadataMappingService {
                     if (logger.isDebugEnabled()) {
                         logger.debug("{} update_mapping [{}] with source [{}]", index, type, updatedSource);
                     } else if (logger.isInfoEnabled()) {
-                        logger.info("{} update_mapping [{}]", index, type);
+                        logger.info("{} update_mapping [{}] with source [{}]", index, type, updatedSource);
+                        // logger.info("{} update_mapping [{}]", index, type);
                     }
                 }
             } else {

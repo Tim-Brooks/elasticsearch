@@ -83,13 +83,22 @@ public final class RowBatchDocumentParser {
         final ParsedDocument[] results = new ParsedDocument[docCount];
         final Exception[] exceptions = new Exception[docCount];
 
-        // Pre-resolve mappers once per column
+        // Pre-resolve mappers once per column and validate strict dynamic mappings upfront
         final Mapper[] columnMappers = new Mapper[schema.columnCount()];
         final String[][] columnParentSegments = new String[schema.columnCount()][];
         for (int col = 0; col < schema.columnCount(); col++) {
             String fieldName = schema.getColumnName(col);
             columnMappers[col] = BatchDocumentParser.resolveMapper(fieldName, mappingLookup);
             columnParentSegments[col] = computeParentSegments(fieldName);
+            if (columnMappers[col] == null) {
+                ObjectMapper.Dynamic dynamic = BatchDocumentParser.getEffectiveDynamic(fieldName, mappingLookup);
+                if (dynamic == ObjectMapper.Dynamic.STRICT) {
+                    int lastDot = fieldName.lastIndexOf('.');
+                    String parentPath = lastDot > 0 ? fieldName.substring(0, lastDot) : "";
+                    String leafName = lastDot > 0 ? fieldName.substring(lastDot + 1) : fieldName;
+                    throw new StrictDynamicMappingException(XContentLocation.UNKNOWN, parentPath, leafName);
+                }
+            }
         }
 
         for (int i = 0; i < docCount; i++) {
@@ -135,16 +144,7 @@ public final class RowBatchDocumentParser {
                     try {
                         Mapper mapper = columnMappers[col];
                         if (mapper == null) {
-                            // Check if dynamic=strict requires failing this document
-                            String fieldName = schema.getColumnName(col);
-                            ObjectMapper.Dynamic dynamic = BatchDocumentParser.getEffectiveDynamic(fieldName, mappingLookup);
-                            if (dynamic == ObjectMapper.Dynamic.STRICT) {
-                                int lastDot = fieldName.lastIndexOf('.');
-                                String parentPath = lastDot > 0 ? fieldName.substring(0, lastDot) : "";
-                                String leafName = lastDot > 0 ? fieldName.substring(lastDot + 1) : fieldName;
-                                throw new StrictDynamicMappingException(XContentLocation.UNKNOWN, parentPath, leafName);
-                            }
-                            return; // unmapped field, skip (dynamic=false)
+                            return; // unmapped field, skip
                         }
 
                         String[] parentSegments = columnParentSegments[col];
