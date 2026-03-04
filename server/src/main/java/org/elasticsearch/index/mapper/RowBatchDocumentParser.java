@@ -90,7 +90,8 @@ public final class RowBatchDocumentParser {
             String fieldName = schema.getColumnName(col);
             columnMappers[col] = BatchDocumentParser.resolveMapper(fieldName, mappingLookup);
             columnParentSegments[col] = computeParentSegments(fieldName);
-            if (columnMappers[col] == null) {
+            if (columnMappers[col] == null && mappingLookup.getFieldType(fieldName) == null) {
+                // Field has no mapper and is not a runtime field — check strict dynamic
                 ObjectMapper.Dynamic dynamic = BatchDocumentParser.getEffectiveDynamic(fieldName, mappingLookup);
                 if (dynamic == ObjectMapper.Dynamic.STRICT) {
                     int lastDot = fieldName.lastIndexOf('.');

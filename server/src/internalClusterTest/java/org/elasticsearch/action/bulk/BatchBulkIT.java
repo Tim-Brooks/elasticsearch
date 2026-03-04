@@ -809,4 +809,104 @@ public class BatchBulkIT extends ESIntegTestCase {
             }
         );
     }
+
+    public void testBatchModeWithDynamicRuntimeFields() throws IOException {
+        String index = "test-batch-runtime";
+
+        // Create index with dynamic=runtime so unmapped fields become runtime fields.
+        // The first bulk triggers dynamic mapping creation (serial path).
+        // The second bulk should use the batch path since runtime fields are already created
+        // and do NOT require a dynamic mapping update.
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            {
+                mapping.startObject("_source");
+                mapping.field("mode", "synthetic");
+                mapping.endObject();
+                mapping.field("dynamic", "runtime");
+                mapping.startObject("properties");
+                {
+                    mapping.startObject("name").field("type", "keyword").endObject();
+                    mapping.startObject("value").field("type", "long").endObject();
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+        }
+        mapping.endObject();
+
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 2)
+                        .put("index.number_of_replicas", 1)
+                        .put("index.mapping.source.mode", "synthetic")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+
+        String coordinatingNode = findCoordinatingNode();
+
+        // First bulk: triggers dynamic runtime mapping creation for "message" field (serial path)
+        int firstBulkDocs = 5;
+        BulkRequest firstBulk = new BulkRequest();
+        for (int i = 0; i < firstBulkDocs; i++) {
+            firstBulk.add(
+                new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE)
+                    .source(Map.of("name", "first-" + i, "value", i, "message", "runtime field test " + i))
+            );
+        }
+        BulkResponse firstResponse = client(coordinatingNode).bulk(firstBulk).actionGet();
+        assertNoFailures(firstResponse);
+
+        // Second bulk: "message" is now a runtime field in the mapping — batch path should work
+        int secondBulkDocs = randomIntBetween(20, 100);
+        BulkRequest secondBulk = new BulkRequest();
+        for (int i = 0; i < secondBulkDocs; i++) {
+            secondBulk.add(
+                new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE)
+                    .source(Map.of("name", "second-" + i, "value", firstBulkDocs + i, "message", "batch runtime test " + i))
+            );
+        }
+        BulkResponse secondResponse = client(coordinatingNode).bulk(secondBulk).actionGet();
+        assertNoFailures(secondResponse);
+        assertThat(secondResponse.getItems().length, equalTo(secondBulkDocs));
+
+        refresh(index);
+
+        int totalDocs = firstBulkDocs + secondBulkDocs;
+
+        // Verify all docs are indexed
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) totalDocs));
+        });
+
+        // Verify mapped fields are correct via source reconstruction
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.matchAllQuery())
+                .setSize(totalDocs)
+                .addSort("value", SortOrder.ASC)
+                .setTrackTotalHits(true),
+            searchResponse -> {
+                assertNoFailures(searchResponse);
+                assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) totalDocs));
+                SearchHit[] hits = searchResponse.getHits().getHits();
+                for (int i = 0; i < firstBulkDocs; i++) {
+                    Map<String, Object> source = hits[i].getSourceAsMap();
+                    assertThat("name mismatch at doc " + i, source.get("name"), equalTo("first-" + i));
+                    assertThat("value mismatch at doc " + i, source.get("value"), equalTo(i));
+                }
+                for (int i = 0; i < secondBulkDocs; i++) {
+                    Map<String, Object> source = hits[firstBulkDocs + i].getSourceAsMap();
+                    assertThat("name mismatch at doc " + i, source.get("name"), equalTo("second-" + i));
+                    assertThat("value mismatch at doc " + i, source.get("value"), equalTo(firstBulkDocs + i));
+                }
+            }
+        );
+    }
 }

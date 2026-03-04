@@ -125,6 +125,10 @@ public final class BatchDocumentParser {
             // Resolve the mapper once for this column
             Mapper mapper = resolveMapper(fieldPath, mappingLookup);
             if (mapper == null) {
+                // Skip runtime fields — they are computed at query time, not indexed
+                if (mappingLookup.getFieldType(fieldPath) != null) {
+                    continue;
+                }
                 // Unmapped column — check if dynamic=strict requires failing docs that have a value
                 ObjectMapper.Dynamic dynamic = getEffectiveDynamic(fieldPath, mappingLookup);
                 if (dynamic == ObjectMapper.Dynamic.STRICT) {
@@ -253,11 +257,17 @@ public final class BatchDocumentParser {
      * Returns {@code true} if the field has no mapper and the effective dynamic setting
      * for its location in the mapping hierarchy is {@link ObjectMapper.Dynamic#TRUE} or
      * {@link ObjectMapper.Dynamic#RUNTIME}, meaning the serial path must handle it.
-     * Returns {@code false} if the field is already mapped, or if it's unmapped but would
-     * be ignored ({@code dynamic=false}) or rejected at parse time ({@code dynamic=strict}).
+     * Returns {@code false} if the field is already mapped (including as a runtime field),
+     * or if it's unmapped but would be ignored ({@code dynamic=false}) or rejected at
+     * parse time ({@code dynamic=strict}).
      */
     public static boolean requiresDynamicMapping(String fieldPath, MappingLookup mappingLookup) {
         if (resolveMapper(fieldPath, mappingLookup) != null) {
+            return false;
+        }
+        // Runtime fields are not in the field mappers but are in the field type lookup.
+        // An existing runtime field does not require a dynamic mapping update.
+        if (mappingLookup.getFieldType(fieldPath) != null) {
             return false;
         }
         ObjectMapper.Dynamic dynamic = getEffectiveDynamic(fieldPath, mappingLookup);
