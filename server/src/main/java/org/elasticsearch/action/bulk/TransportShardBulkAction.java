@@ -424,10 +424,12 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             return null;
         }
 
-        // Check if all columns have mappers — if not, fall back to serial path
+        // Check if any columns require dynamic mapping — if so, fall back to serial path
         // which handles dynamic mapping creation via the standard mapping update flow.
+        // Unmapped fields that will be ignored (dynamic=false) or rejected at parse time
+        // (dynamic=strict) do not require falling back.
         for (FieldColumn column : batch.columnList()) {
-            if (BatchDocumentParser.resolveMapper(column.fieldPath(), mappingLookup) == null) {
+            if (BatchDocumentParser.requiresDynamicMapping(column.fieldPath(), mappingLookup)) {
                 return null;
             }
         }
@@ -565,10 +567,11 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             return null;
         }
 
-        // Check if all schema columns have mappers — if not, fall back to serial path
+        // Check if any schema columns require dynamic mapping — if so, fall back to serial path
+        // which handles dynamic mapping creation via the standard mapping update flow.
         DocBatchSchema schema = rowBatch.schema();
         for (int col = 0; col < schema.columnCount(); col++) {
-            if (BatchDocumentParser.resolveMapper(schema.getColumnName(col), mappingLookup) == null) {
+            if (BatchDocumentParser.requiresDynamicMapping(schema.getColumnName(col), mappingLookup)) {
                 return null;
             }
         }

@@ -631,6 +631,84 @@ public class BatchBulkIT extends ESIntegTestCase {
         );
     }
 
+    public void testBatchModeWithDynamicFalseAndUnmappedFields() throws IOException {
+        String index = "test-batch-dynamic-false";
+
+        // Create index with dynamic=false so unmapped fields are ignored (not rejected, not dynamically mapped).
+        // The batch path should NOT fall back to serial for unmapped fields when dynamic=false.
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            {
+                mapping.startObject("_source");
+                mapping.field("mode", "synthetic");
+                mapping.endObject();
+                mapping.field("dynamic", "false");
+                mapping.startObject("properties");
+                {
+                    mapping.startObject("name").field("type", "keyword").endObject();
+                    mapping.startObject("value").field("type", "long").endObject();
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+        }
+        mapping.endObject();
+
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 2)
+                        .put("index.number_of_replicas", 1)
+                        .put("index.mapping.source.mode", "synthetic")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+
+        String coordinatingNode = findCoordinatingNode();
+        int numDocs = randomIntBetween(20, 100);
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int i = 0; i < numDocs; i++) {
+            // Include "extra_field" which is not mapped — with dynamic=false it should be ignored
+            bulkRequest.add(
+                new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE)
+                    .source(Map.of("name", "doc-" + i, "value", i, "extra_field", "ignored-" + i))
+            );
+        }
+
+        BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+        assertNoFailures(bulkResponse);
+        assertThat(bulkResponse.getItems().length, equalTo(numDocs));
+
+        refresh(index);
+
+        // Verify all docs are indexed
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+
+        // Verify mapped fields are correct via source reconstruction
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.matchAllQuery())
+                .setSize(numDocs)
+                .addSort("value", SortOrder.ASC)
+                .setTrackTotalHits(true),
+            searchResponse -> {
+                assertNoFailures(searchResponse);
+                SearchHit[] hits = searchResponse.getHits().getHits();
+                for (int i = 0; i < numDocs; i++) {
+                    Map<String, Object> source = hits[i].getSourceAsMap();
+                    assertThat("name mismatch at doc " + i, source.get("name"), equalTo("doc-" + i));
+                    assertThat("value mismatch at doc " + i, source.get("value"), equalTo(i));
+                }
+            }
+        );
+    }
+
     public void testTimeSeriesIndexViaBatchMode() throws IOException {
         String index = "test-batch-tsdb";
 

@@ -17,6 +17,7 @@ import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.compress.CompressedXContent;
 import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
+import org.elasticsearch.xcontent.XContentLocation;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.XContentType;
@@ -134,7 +135,16 @@ public final class RowBatchDocumentParser {
                     try {
                         Mapper mapper = columnMappers[col];
                         if (mapper == null) {
-                            return; // unmapped field, skip
+                            // Check if dynamic=strict requires failing this document
+                            String fieldName = schema.getColumnName(col);
+                            ObjectMapper.Dynamic dynamic = BatchDocumentParser.getEffectiveDynamic(fieldName, mappingLookup);
+                            if (dynamic == ObjectMapper.Dynamic.STRICT) {
+                                int lastDot = fieldName.lastIndexOf('.');
+                                String parentPath = lastDot > 0 ? fieldName.substring(0, lastDot) : "";
+                                String leafName = lastDot > 0 ? fieldName.substring(lastDot + 1) : fieldName;
+                                throw new StrictDynamicMappingException(XContentLocation.UNKNOWN, parentPath, leafName);
+                            }
+                            return; // unmapped field, skip (dynamic=false)
                         }
 
                         String[] parentSegments = columnParentSegments[col];

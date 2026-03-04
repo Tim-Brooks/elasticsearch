@@ -17,6 +17,7 @@ import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.compress.CompressedXContent;
 import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
+import org.elasticsearch.xcontent.XContentLocation;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.XContentType;
@@ -124,9 +125,20 @@ public final class BatchDocumentParser {
             // Resolve the mapper once for this column
             Mapper mapper = resolveMapper(fieldPath, mappingLookup);
             if (mapper == null) {
-                continue; // Unmapped column — skip. The pre-check in performBatchOnPrimary
-                // ensures we only reach here if dynamic=false (field ignored) or
-                // the mapping was just updated and the field is now mapped.
+                // Unmapped column — check if dynamic=strict requires failing docs that have a value
+                ObjectMapper.Dynamic dynamic = getEffectiveDynamic(fieldPath, mappingLookup);
+                if (dynamic == ObjectMapper.Dynamic.STRICT) {
+                    // Fail each document that has a non-null value for this unmapped field
+                    int lastDot = fieldPath.lastIndexOf('.');
+                    String parentPath = lastDot > 0 ? fieldPath.substring(0, lastDot) : "";
+                    String leafName = lastDot > 0 ? fieldPath.substring(lastDot + 1) : fieldPath;
+                    for (int i = 0; i < docCount; i++) {
+                        if (exceptions[i] != null) continue;
+                        if (column.isNull(i)) continue;
+                        exceptions[i] = new StrictDynamicMappingException(XContentLocation.UNKNOWN, parentPath, leafName);
+                    }
+                }
+                continue; // Skip — dynamic=false ignores the field, dynamic=strict already recorded errors
             }
 
             // Pre-compute parent path segments once per column to avoid per-doc string splitting
@@ -234,6 +246,44 @@ public final class BatchDocumentParser {
             return objectMapper;
         }
         return null;
+    }
+
+    /**
+     * Determines whether an unmapped field would require a dynamic mapping update.
+     * Returns {@code true} if the field has no mapper and the effective dynamic setting
+     * for its location in the mapping hierarchy is {@link ObjectMapper.Dynamic#TRUE} or
+     * {@link ObjectMapper.Dynamic#RUNTIME}, meaning the serial path must handle it.
+     * Returns {@code false} if the field is already mapped, or if it's unmapped but would
+     * be ignored ({@code dynamic=false}) or rejected at parse time ({@code dynamic=strict}).
+     */
+    public static boolean requiresDynamicMapping(String fieldPath, MappingLookup mappingLookup) {
+        if (resolveMapper(fieldPath, mappingLookup) != null) {
+            return false;
+        }
+        ObjectMapper.Dynamic dynamic = getEffectiveDynamic(fieldPath, mappingLookup);
+        return dynamic == ObjectMapper.Dynamic.TRUE || dynamic == ObjectMapper.Dynamic.RUNTIME;
+    }
+
+    /**
+     * Walks the object mapper hierarchy to find the effective dynamic setting for a field path.
+     * Checks each parent object from the immediate parent up to the root, returning the first
+     * explicitly configured dynamic setting found. Falls back to the root dynamic setting.
+     */
+    static ObjectMapper.Dynamic getEffectiveDynamic(String fieldPath, MappingLookup mappingLookup) {
+        // Walk up from the immediate parent to the root, looking for an explicit dynamic setting
+        String parentPath = fieldPath;
+        while (true) {
+            int lastDot = parentPath.lastIndexOf('.');
+            if (lastDot < 0) {
+                break;
+            }
+            parentPath = parentPath.substring(0, lastDot);
+            ObjectMapper parentMapper = mappingLookup.objectMappers().get(parentPath);
+            if (parentMapper != null && parentMapper.dynamic() != null) {
+                return parentMapper.dynamic();
+            }
+        }
+        return ObjectMapper.Dynamic.getRootDynamic(mappingLookup);
     }
 
     /**
