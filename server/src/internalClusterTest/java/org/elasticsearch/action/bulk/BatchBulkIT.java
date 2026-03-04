@@ -810,6 +810,91 @@ public class BatchBulkIT extends ESIntegTestCase {
         );
     }
 
+    @SuppressWarnings("unchecked")
+    public void testBatchModeWithIpArrayField() throws IOException {
+        String index = "test-batch-ip-array";
+
+        // Create index with strict mapping, synthetic source, and an ip field
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            {
+                mapping.startObject("_source");
+                mapping.field("mode", "synthetic");
+                mapping.endObject();
+                mapping.field("dynamic", "strict");
+                mapping.startObject("properties");
+                {
+                    mapping.startObject("name").field("type", "keyword").endObject();
+                    mapping.startObject("host_ip").field("type", "ip").endObject();
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+        }
+        mapping.endObject();
+
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put("index.mapping.source.mode", "synthetic")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+
+        String coordinatingNode = findCoordinatingNode();
+
+        // First bulk to establish batch path (mappings already strict, no dynamic needed)
+        int numDocs = 10;
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int i = 0; i < numDocs; i++) {
+            XContentBuilder doc = JsonXContent.contentBuilder();
+            doc.startObject();
+            doc.field("name", "host-" + i);
+            doc.array("host_ip", "10.0.0." + i, "10.0.1." + i);
+            doc.endObject();
+            bulkRequest.add(new IndexRequest(index).id("doc-" + i).opType(DocWriteRequest.OpType.CREATE).source(doc));
+        }
+
+        BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+        assertNoFailures(bulkResponse);
+        assertThat(bulkResponse.getItems().length, equalTo(numDocs));
+
+        refresh(index);
+
+        // Verify all docs indexed
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+
+        // Verify source reconstruction returns the IP array correctly
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.matchAllQuery())
+                .setSize(numDocs)
+                .addSort("name", SortOrder.ASC)
+                .setTrackTotalHits(true),
+            searchResponse -> {
+                assertNoFailures(searchResponse);
+                SearchHit[] hits = searchResponse.getHits().getHits();
+                for (int i = 0; i < numDocs; i++) {
+                    Map<String, Object> source = hits[i].getSourceAsMap();
+                    assertThat("name mismatch at doc " + i, source.get("name"), equalTo("host-" + i));
+                    List<String> ips = (List<String>) source.get("host_ip");
+                    assertNotNull("host_ip should be present at doc " + i, ips);
+                    assertThat("should have 2 IPs at doc " + i, ips.size(), equalTo(2));
+                    assertTrue("should contain 10.0.0." + i, ips.contains("10.0.0." + i));
+                    assertTrue("should contain 10.0.1." + i, ips.contains("10.0.1." + i));
+                }
+            }
+        );
+    }
+
     public void testBatchModeWithDynamicRuntimeFields() throws IOException {
         String index = "test-batch-runtime";
 

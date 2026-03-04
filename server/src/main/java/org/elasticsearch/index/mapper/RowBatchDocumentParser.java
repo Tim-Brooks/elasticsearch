@@ -15,7 +15,6 @@ import org.elasticsearch.action.bulk.DocBatchRowReader;
 import org.elasticsearch.action.bulk.DocBatchSchema;
 import org.elasticsearch.action.bulk.RowDocumentBatch;
 import org.elasticsearch.action.bulk.RowType;
-import org.elasticsearch.action.bulk.TransportShardBulkAction;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.compress.CompressedXContent;
@@ -166,7 +165,6 @@ public final class RowBatchDocumentParser {
                         }
                     } catch (Exception e) {
                         if (ThreadLocalRandom.current().nextInt(1000) < 10) {
-
                             logger.error("Exception parsing row " + indexRequest.source().utf8ToString(), e);
                         }
                         exceptions[docIdx] = e;
@@ -220,19 +218,36 @@ public final class RowBatchDocumentParser {
     ) throws IOException {
         setPathForField(parentSegments, context.path());
         try {
-            XContentParser fieldParser;
-            if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
-                fieldParser = RowValueXContentParser.forBinary(rowReader, col, xContentType);
+            if (baseType == RowType.ARRAY && fieldMapper.parsesArrayValue() == false) {
+                // Array field where mapper expects individual scalar values.
+                // Iterate through array elements, calling parse() for each one,
+                // mimicking DocumentParser.parseNonDynamicArray().
+                XContentParser arrayParser = RowValueXContentParser.forBinary(rowReader, col, xContentType);
+                try {
+                    XContentParser.Token token = arrayParser.nextToken(); // START_ARRAY
+                    assert token == XContentParser.Token.START_ARRAY;
+                    while ((token = arrayParser.nextToken()) != XContentParser.Token.END_ARRAY) {
+                        context.setParser(arrayParser);
+                        fieldMapper.parse(context);
+                    }
+                } finally {
+                    arrayParser.close();
+                }
             } else {
-                fieldParser = RowValueXContentParser.forLeafValue(rowReader, col);
-            }
+                XContentParser fieldParser;
+                if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
+                    fieldParser = RowValueXContentParser.forBinary(rowReader, col, xContentType);
+                } else {
+                    fieldParser = RowValueXContentParser.forLeafValue(rowReader, col);
+                }
 
-            try {
-                fieldParser.nextToken();
-                context.setParser(fieldParser);
-                fieldMapper.parse(context);
-            } finally {
-                fieldParser.close();
+                try {
+                    fieldParser.nextToken();
+                    context.setParser(fieldParser);
+                    fieldMapper.parse(context);
+                } finally {
+                    fieldParser.close();
+                }
             }
         } finally {
             resetPath(parentSegments.length, context.path());
