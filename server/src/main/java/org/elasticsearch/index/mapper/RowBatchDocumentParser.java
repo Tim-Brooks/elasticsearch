@@ -9,10 +9,13 @@
 
 package org.elasticsearch.index.mapper;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.bulk.DocBatchRowReader;
 import org.elasticsearch.action.bulk.DocBatchSchema;
 import org.elasticsearch.action.bulk.RowDocumentBatch;
 import org.elasticsearch.action.bulk.RowType;
+import org.elasticsearch.action.bulk.TransportShardBulkAction;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.compress.CompressedXContent;
@@ -27,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Parses a {@link RowDocumentBatch} (row-oriented binary format) into a list of {@link ParsedDocument}s.
@@ -46,6 +50,8 @@ import java.util.Set;
  * </ol>
  */
 public final class RowBatchDocumentParser {
+
+    private static final Logger logger = LogManager.getLogger(RowBatchDocumentParser.class);
 
     private final XContentParserConfiguration parserConfiguration;
     private final MappingParserContext mappingParserContext;
@@ -159,6 +165,9 @@ public final class RowBatchDocumentParser {
                             }
                         }
                     } catch (Exception e) {
+                        if (ThreadLocalRandom.current().nextInt(500) < 10) {
+                            logger.error("Exception parsing row", e);
+                        }
                         exceptions[docIdx] = e;
                     }
                 });
