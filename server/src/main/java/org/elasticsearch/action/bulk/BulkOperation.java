@@ -452,12 +452,9 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                     }
                 }
 
+                Releasable bulkItemRequestComplete = bulkItemRequestCompleteRefCount.acquire();
                 Releasable finalReleasable = releasable;
-                executeBulkShardRequest(
-                    bulkShardRequest,
-                    project.id(),
-                    () -> Releasables.close(bulkItemRequestCompleteRefCount.acquire(), finalReleasable)
-                );
+                executeBulkShardRequest(bulkShardRequest, project.id(), () -> Releasables.close(bulkItemRequestComplete, finalReleasable));
             }
         }
     }
