@@ -9,15 +9,15 @@
 
 package org.elasticsearch.action.bulk;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
-import java.nio.ByteOrder;
+import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.xcontent.XContentString;
+
 import java.nio.charset.StandardCharsets;
 
 /**
  * A forward-only iterator over columns in a row-oriented document batch row.
- * Tracks the fixed-section offset incrementally as columns are advanced,
- * avoiding the O(col) recomputation that {@link DocBatchRowReader#computeFixedOffset} performs.
+ * Tracks the fixed-section offset incrementally as columns are advanced.
  *
  * <p>Usage:
  * <pre>
@@ -30,10 +30,7 @@ import java.nio.charset.StandardCharsets;
  */
 public final class DocBatchRowIterator {
 
-    private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
-    private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.BIG_ENDIAN);
-
-    private final byte[] data;
+    private final BytesReference data;
     private final int typeBytesOffset;
     private final int varSectionOffset;
     private final int rowColumnCount;
@@ -44,7 +41,7 @@ public final class DocBatchRowIterator {
     private byte baseType;
     private int fixedOffset;
 
-    DocBatchRowIterator(byte[] data, int rowOffset, int rowColumnCount, int fixedSectionOffset, int varSectionOffset) {
+    DocBatchRowIterator(BytesReference data, int rowOffset, int rowColumnCount, int fixedSectionOffset, int varSectionOffset) {
         this.data = data;
         this.typeBytesOffset = rowOffset + 4;
         this.varSectionOffset = varSectionOffset;
@@ -64,7 +61,7 @@ public final class DocBatchRowIterator {
         if (col >= rowColumnCount) {
             return false;
         }
-        typeByte = data[typeBytesOffset + col];
+        typeByte = data.get(typeBytesOffset + col);
         baseType = RowType.baseType(typeByte);
         return true;
     }
@@ -96,46 +93,33 @@ public final class DocBatchRowIterator {
     }
 
     public long longValue() {
-        return (long) LONG_HANDLE.get(data, fixedOffset);
+        return data.getLong(fixedOffset);
     }
 
     public double doubleValue() {
-        return Double.longBitsToDouble((long) LONG_HANDLE.get(data, fixedOffset));
+        return Double.longBitsToDouble(longValue());
     }
 
     public String stringValue() {
-        int varOffset = (int) INT_HANDLE.get(data, fixedOffset);
-        int varLength = (int) INT_HANDLE.get(data, fixedOffset + 4);
-        return new String(data, varSectionOffset + varOffset, varLength, StandardCharsets.UTF_8);
+        int varOffset = data.getInt(fixedOffset);
+        int varLength = data.getInt(fixedOffset + 4);
+        BytesRef bytesRef = data.slice(varSectionOffset + varOffset, varLength).toBytesRef();
+        return new String(bytesRef.bytes, bytesRef.offset, bytesRef.length, StandardCharsets.UTF_8);
     }
 
-    /**
-     * Returns the backing byte array containing string data. Callers must not modify it.
-     */
-    public byte[] stringRawBytes() {
-        return data;
-    }
-
-    /**
-     * Returns the absolute offset within {@link #stringRawBytes()} for the current column's string value.
-     */
-    public int stringRawOffset() {
-        int varOffset = (int) INT_HANDLE.get(data, fixedOffset);
-        return varSectionOffset + varOffset;
-    }
-
-    /**
-     * Returns the byte length of the current column's string value.
-     */
-    public int stringRawLength() {
-        return (int) INT_HANDLE.get(data, fixedOffset + 4);
+    public XContentString.UTF8Bytes stringUTF8Bytes() {
+        int varOffset = data.getInt(fixedOffset);
+        int varLength = data.getInt(fixedOffset + 4);
+        BytesRef bytesRef = data.slice(varSectionOffset + varOffset, varLength).toBytesRef();
+        return new XContentString.UTF8Bytes(bytesRef.bytes, bytesRef.offset, bytesRef.length);
     }
 
     public byte[] binaryValue() {
-        int varOffset = (int) INT_HANDLE.get(data, fixedOffset);
-        int varLength = (int) INT_HANDLE.get(data, fixedOffset + 4);
+        int varOffset = data.getInt(fixedOffset);
+        int varLength = data.getInt(fixedOffset + 4);
+        BytesRef bytesRef = data.slice(varSectionOffset + varOffset, varLength).toBytesRef();
         byte[] result = new byte[varLength];
-        System.arraycopy(data, varSectionOffset + varOffset, result, 0, varLength);
+        System.arraycopy(bytesRef.bytes, bytesRef.offset, result, 0, varLength);
         return result;
     }
 }

@@ -9,9 +9,9 @@
 
 package org.elasticsearch.action.bulk;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
-import java.nio.ByteOrder;
+import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.common.bytes.BytesReference;
+
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -24,10 +24,7 @@ import java.nio.charset.StandardCharsets;
  */
 public final class DocBatchRowReader {
 
-    private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
-    private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.BIG_ENDIAN);
-
-    private final byte[] data;
+    private final BytesReference data;
     private final int rowOffset;
     private final int rowLength;
     private final DocBatchSchema schema;
@@ -36,19 +33,19 @@ public final class DocBatchRowReader {
     private final int fixedSectionOffset;
     private final int varSectionOffset;
 
-    public DocBatchRowReader(byte[] data, int rowOffset, int rowLength, DocBatchSchema schema) {
+    public DocBatchRowReader(BytesReference data, int rowOffset, int rowLength, DocBatchSchema schema) {
         this.data = data;
         this.rowOffset = rowOffset;
         this.rowLength = rowLength;
         this.schema = schema;
-        this.rowColumnCount = (int) INT_HANDLE.get(data, rowOffset);
+        this.rowColumnCount = data.getInt(rowOffset);
         this.typeBytesOffset = rowOffset + 4;
         this.fixedSectionOffset = typeBytesOffset + rowColumnCount;
 
         // Compute var section offset by summing fixed sizes of all columns
         int fixedTotal = 0;
         for (int col = 0; col < rowColumnCount; col++) {
-            fixedTotal += RowType.fixedSize(data[typeBytesOffset + col]);
+            fixedTotal += RowType.fixedSize(data.get(typeBytesOffset + col));
         }
         this.varSectionOffset = fixedSectionOffset + fixedTotal;
     }
@@ -61,7 +58,7 @@ public final class DocBatchRowReader {
         if (col >= rowColumnCount) {
             return RowType.NULL;
         }
-        return data[typeBytesOffset + col];
+        return data.get(typeBytesOffset + col);
     }
 
     public byte getBaseType(int col) {
@@ -85,38 +82,37 @@ public final class DocBatchRowReader {
 
     public long getLongValue(int col) {
         int offset = computeFixedOffset(col);
-        return (long) LONG_HANDLE.get(data, offset);
+        return data.getLong(offset);
     }
 
     public double getDoubleValue(int col) {
         int offset = computeFixedOffset(col);
-        long bits = (long) LONG_HANDLE.get(data, offset);
+        long bits = data.getLong(offset);
         return Double.longBitsToDouble(bits);
     }
 
     public String getStringValue(int col) {
         int offset = computeFixedOffset(col);
-        int varOffset = (int) INT_HANDLE.get(data, offset);
-        int varLength = (int) INT_HANDLE.get(data, offset + 4);
-        return new String(data, varSectionOffset + varOffset, varLength, StandardCharsets.UTF_8);
+        int varOffset = data.getInt(offset);
+        int varLength = data.getInt(offset + 4);
+        BytesRef bytesRef = data.slice(varSectionOffset + varOffset, varLength).toBytesRef();
+        return new String(bytesRef.bytes, bytesRef.offset, bytesRef.length, StandardCharsets.UTF_8);
     }
 
     /**
      * Returns the raw UTF-8 bytes for a string column without copying or decoding.
      * The returned array is shared — callers must not modify it.
-     *
-     * @return [backing array, absolute offset, length]
      */
-    public byte[] getStringRawBytes(int col) {
+    public BytesReference data() {
         return data;
     }
 
     /**
-     * Returns the absolute offset within {@link #getStringRawBytes} for the string value at the given column.
+     * Returns the absolute offset within {@link #data} for the string value at the given column.
      */
     public int getStringRawOffset(int col) {
         int offset = computeFixedOffset(col);
-        int varOffset = (int) INT_HANDLE.get(data, offset);
+        int varOffset = data.getInt(offset);
         return varSectionOffset + varOffset;
     }
 
@@ -125,15 +121,16 @@ public final class DocBatchRowReader {
      */
     public int getStringRawLength(int col) {
         int offset = computeFixedOffset(col);
-        return (int) INT_HANDLE.get(data, offset + 4);
+        return data.getInt(offset + 4);
     }
 
     public byte[] getBinaryValue(int col) {
         int offset = computeFixedOffset(col);
-        int varOffset = (int) INT_HANDLE.get(data, offset);
-        int varLength = (int) INT_HANDLE.get(data, offset + 4);
+        int varOffset = data.getInt(offset);
+        int varLength = data.getInt(offset + 4);
+        BytesRef bytesRef = data.slice(varSectionOffset + varOffset, varLength).toBytesRef();
         byte[] result = new byte[varLength];
-        System.arraycopy(data, varSectionOffset + varOffset, result, 0, varLength);
+        System.arraycopy(bytesRef.bytes, bytesRef.offset, result, 0, varLength);
         return result;
     }
 
@@ -146,7 +143,7 @@ public final class DocBatchRowReader {
      */
     public void forEachField(FieldConsumer consumer) {
         for (int col = 0; col < rowColumnCount; col++) {
-            byte typeByte = data[typeBytesOffset + col];
+            byte typeByte = data.get(typeBytesOffset + col);
             if (RowType.baseType(typeByte) != RowType.NULL) {
                 consumer.accept(col, typeByte);
             }
@@ -174,7 +171,7 @@ public final class DocBatchRowReader {
     private int computeFixedOffset(int col) {
         int offset = fixedSectionOffset;
         for (int i = 0; i < col; i++) {
-            offset += RowType.fixedSize(data[typeBytesOffset + i]);
+            offset += RowType.fixedSize(data.get(typeBytesOffset + i));
         }
         return offset;
     }

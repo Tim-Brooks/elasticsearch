@@ -9,6 +9,7 @@
 
 package org.elasticsearch.index.mapper;
 
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.bulk.DocBatchRowIterator;
 import org.elasticsearch.action.bulk.DocBatchRowReader;
 import org.elasticsearch.action.bulk.RowType;
@@ -178,13 +179,12 @@ public class RowValueXContentParser extends AbstractXContentParser {
     public XContentString optimizedText() throws IOException {
         if (baseType() == RowType.STRING) {
             if (iterator != null) {
-                return new Text(
-                    new XContentString.UTF8Bytes(iterator.stringRawBytes(), iterator.stringRawOffset(), iterator.stringRawLength())
-                );
+                return new Text(iterator.stringUTF8Bytes());
             }
-            return new Text(
-                new XContentString.UTF8Bytes(reader.getStringRawBytes(col), reader.getStringRawOffset(col), reader.getStringRawLength(col))
-            );
+            int offset = reader.getStringRawOffset(col);
+            int length = reader.getStringRawLength(col);
+            BytesRef bytesRef = reader.data().slice(offset, length).toBytesRef();
+            return new Text(new XContentString.UTF8Bytes(bytesRef.bytes, bytesRef.offset, bytesRef.length));
         }
         return new Text(text());
     }

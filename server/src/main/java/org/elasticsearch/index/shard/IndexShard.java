@@ -51,6 +51,7 @@ import org.elasticsearch.cluster.service.ClusterApplierService;
 import org.elasticsearch.cluster.service.MasterService;
 import org.elasticsearch.common.CheckedBiConsumer;
 import org.elasticsearch.common.UUIDs;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.compress.CompressedXContent;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.lucene.Lucene;
@@ -2214,7 +2215,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 final MappingLookup mappingLookup = mapperService.mappingLookup();
 
                 final byte[] batchData = batch.batchData();
-                final RowDocumentBatch rowBatch = new RowDocumentBatch(batchData);
+                final RowDocumentBatch rowBatch = new RowDocumentBatch(new BytesArray(batchData));
                 // Build IndexRequests from DocMeta for the row parser
                 final List<Translog.Batch.DocMeta> metas = batch.docMetas();
                 final java.util.List<org.elasticsearch.action.index.IndexRequest> indexRequests = new java.util.ArrayList<>(metas.size());

@@ -10,12 +10,10 @@
 package org.elasticsearch.action.bulk;
 
 import org.apache.lucene.util.Accountable;
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.core.Releasable;
 
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -36,51 +34,46 @@ public final class RowDocumentBatch implements Releasable, Accountable {
     public static final int MAGIC = 0x45534452; // "ESDR"
     public static final int VERSION = 1;
 
-    private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
-
-    private final byte[] data;
+    private final BytesReference data;
     private final int docCount;
     private final DocBatchSchema schema;
     private final int docIndexOffset;
     private final int dataOffset;
 
-    public RowDocumentBatch(BytesReference bytesRef) {
-        this(BytesReference.toBytes(bytesRef));
-    }
-
-    public RowDocumentBatch(byte[] data) {
+    public RowDocumentBatch(BytesReference data) {
         this.data = data;
 
         // Parse header (32 bytes)
-        int magic = (int) INT_HANDLE.get(data, 0);
+        int magic = data.getInt(0);
         if (magic != MAGIC) {
             throw new IllegalArgumentException(
                 "Invalid magic: 0x" + Integer.toHexString(magic) + ", expected 0x" + Integer.toHexString(MAGIC)
             );
         }
-        int version = (int) INT_HANDLE.get(data, 4);
+        int version = data.getInt(4);
         if (version != VERSION) {
             throw new IllegalArgumentException("Unsupported version: " + version);
         }
         // flags at offset 8 (reserved, ignored for now)
-        this.docCount = (int) INT_HANDLE.get(data, 12);
-        int schemaOffset = (int) INT_HANDLE.get(data, 16);
-        this.docIndexOffset = (int) INT_HANDLE.get(data, 20);
-        this.dataOffset = (int) INT_HANDLE.get(data, 24);
+        this.docCount = data.getInt(12);
+        int schemaOffset = data.getInt(16);
+        this.docIndexOffset = data.getInt(20);
+        this.dataOffset = data.getInt(24);
         // total_size at offset 28
 
         // Parse schema
         this.schema = parseSchema(data, schemaOffset);
     }
 
-    private static DocBatchSchema parseSchema(byte[] data, int offset) {
-        int columnCount = (int) INT_HANDLE.get(data, offset);
+    private static DocBatchSchema parseSchema(BytesReference data, int offset) {
+        int columnCount = data.getInt(offset);
         offset += 4;
         List<String> names = new ArrayList<>(columnCount);
         for (int i = 0; i < columnCount; i++) {
-            int nameLen = (int) INT_HANDLE.get(data, offset);
+            int nameLen = data.getInt(offset);
             offset += 4;
-            names.add(new String(data, offset, nameLen, StandardCharsets.UTF_8));
+            BytesRef bytesRef = data.slice(offset, nameLen).toBytesRef();
+            names.add(new String(bytesRef.bytes, bytesRef.offset, bytesRef.length, StandardCharsets.UTF_8));
             offset += nameLen;
         }
         return new DocBatchSchema(names);
@@ -99,7 +92,7 @@ public final class RowDocumentBatch implements Releasable, Accountable {
     }
 
     public byte[] getRawData() {
-        return data;
+        return BytesReference.toBytes(data);
     }
 
     public DocBatchRowReader getRowReader(int docIndex) {
@@ -107,8 +100,8 @@ public final class RowDocumentBatch implements Releasable, Accountable {
             throw new IndexOutOfBoundsException("docIndex " + docIndex + " out of range [0, " + docCount + ")");
         }
         int entryOffset = docIndexOffset + docIndex * 8;
-        int rowDataOffset = (int) INT_HANDLE.get(data, entryOffset);
-        int rowDataLength = (int) INT_HANDLE.get(data, entryOffset + 4);
+        int rowDataOffset = data.getInt(entryOffset);
+        int rowDataLength = data.getInt(entryOffset + 4);
         return new DocBatchRowReader(data, dataOffset + rowDataOffset, rowDataLength, schema);
     }
 
@@ -119,6 +112,6 @@ public final class RowDocumentBatch implements Releasable, Accountable {
 
     @Override
     public long ramBytesUsed() {
-        return data.length + 64; // estimate overhead
+        return data.length() + 64; // estimate overhead
     }
 }
