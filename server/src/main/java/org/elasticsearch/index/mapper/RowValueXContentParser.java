@@ -39,6 +39,13 @@ import java.nio.CharBuffer;
 public class RowValueXContentParser extends AbstractXContentParser {
 
     /**
+     * Create a parser for a null value. Returns VALUE_NULL on the first nextToken() call and null thereafter.
+     */
+    public static RowValueXContentParser forNullValue() {
+        return new RowValueXContentParser();
+    }
+
+    /**
      * Create a parser for a leaf scalar value using a {@link DocBatchRowIterator} positioned at the target column.
      * The iterator's cursor must remain stable while this parser is in use.
      */
@@ -53,7 +60,7 @@ public class RowValueXContentParser extends AbstractXContentParser {
     public static XContentParser forBinary(DocBatchRowIterator iterator, XContentType xContentType) throws IOException {
         byte[] bytes = iterator.binaryValue();
         if (bytes == null || bytes.length == 0) {
-            return ColumnValueXContentParser.forNullValue();
+            return forNullValue();
         }
         return xContentType.xContent()
             .createParser(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, new java.io.ByteArrayInputStream(bytes));
@@ -72,7 +79,7 @@ public class RowValueXContentParser extends AbstractXContentParser {
     public static XContentParser forBinary(DocBatchRowReader reader, int col, XContentType xContentType) throws IOException {
         byte[] bytes = reader.getBinaryValue(col);
         if (bytes == null || bytes.length == 0) {
-            return ColumnValueXContentParser.forNullValue();
+            return forNullValue();
         }
         return xContentType.xContent()
             .createParser(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, new java.io.ByteArrayInputStream(bytes));
@@ -106,8 +113,21 @@ public class RowValueXContentParser extends AbstractXContentParser {
         this.closed = false;
     }
 
+    private RowValueXContentParser() {
+        super(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, RestApiVersion.current());
+        this.iterator = null;
+        this.reader = null;
+        this.col = -1;
+        this.currentToken = null;
+        this.closed = false;
+    }
+
     private byte baseType() {
         return iterator != null ? iterator.baseType() : reader.getBaseType(col);
+    }
+
+    private boolean isNullMode() {
+        return iterator == null && reader == null;
     }
 
     @Override
@@ -115,7 +135,7 @@ public class RowValueXContentParser extends AbstractXContentParser {
         if (closed) return null;
 
         if (currentToken == null) {
-            currentToken = leafToken();
+            currentToken = isNullMode() ? Token.VALUE_NULL : leafToken();
             return currentToken;
         }
         currentToken = null;

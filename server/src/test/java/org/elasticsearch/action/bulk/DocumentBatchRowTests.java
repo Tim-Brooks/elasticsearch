@@ -265,6 +265,64 @@ public class DocumentBatchRowTests extends ESTestCase {
         batch.close();
     }
 
+    public void testRowsHaveDifferentColumnCounts() throws IOException {
+        // Doc 0 introduces "name" and "age" (2 columns)
+        // Doc 1 introduces "email" (3 columns total, but only has email)
+        // Doc 2 has "name" only (schema still 3 columns, row covers 3)
+        List<IndexRequest> requests = new ArrayList<>();
+        requests.add(new IndexRequest("test").id("1").source("{\"name\":\"alice\",\"age\":30}", XContentType.JSON));
+        requests.add(new IndexRequest("test").id("2").source("{\"email\":\"b@c.com\"}", XContentType.JSON));
+        requests.add(new IndexRequest("test").id("3").source("{\"name\":\"charlie\"}", XContentType.JSON));
+
+        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(requests);
+
+        assertEquals(3, batch.docCount());
+        assertEquals(3, batch.columnCount()); // name, age, email
+
+        DocBatchSchema schema = batch.schema();
+        assertEquals("name", schema.getColumnName(0));
+        assertEquals("age", schema.getColumnName(1));
+        assertEquals("email", schema.getColumnName(2));
+
+        // Doc 0: rowColumnCount=2 (email not yet in schema), but reader returns NULL for col 2
+        DocBatchRowReader row0 = batch.getRowReader(0);
+        assertEquals(2, row0.columnCount());
+        assertEquals("alice", row0.getStringValue(0));
+        assertEquals(30L, row0.getLongValue(1));
+        assertTrue(row0.isNull(2)); // email column didn't exist yet
+
+        // Doc 1: rowColumnCount=3 (email added), name and age are NULL
+        DocBatchRowReader row1 = batch.getRowReader(1);
+        assertEquals(3, row1.columnCount());
+        assertTrue(row1.isNull(0)); // name absent
+        assertTrue(row1.isNull(1)); // age absent
+        assertEquals("b@c.com", row1.getStringValue(2));
+
+        // Doc 2: rowColumnCount=3, only name set
+        DocBatchRowReader row2 = batch.getRowReader(2);
+        assertEquals(3, row2.columnCount());
+        assertEquals("charlie", row2.getStringValue(0));
+        assertTrue(row2.isNull(1));
+        assertTrue(row2.isNull(2));
+
+        // Verify iterator skips null columns correctly
+        DocBatchRowIterator it0 = batch.getRowReader(0).iterator();
+        List<Integer> cols0 = new ArrayList<>();
+        while (it0.next()) {
+            if (!it0.isNull()) cols0.add(it0.column());
+        }
+        assertEquals(List.of(0, 1), cols0);
+
+        DocBatchRowIterator it1 = batch.getRowReader(1).iterator();
+        List<Integer> cols1 = new ArrayList<>();
+        while (it1.next()) {
+            if (!it1.isNull()) cols1.add(it1.column());
+        }
+        assertEquals(List.of(2), cols1);
+
+        batch.close();
+    }
+
     public void testMixedTypeSameField() throws IOException {
         List<IndexRequest> requests = new ArrayList<>();
         requests.add(new IndexRequest("test").id("1").source("{\"val\":42}", XContentType.JSON));

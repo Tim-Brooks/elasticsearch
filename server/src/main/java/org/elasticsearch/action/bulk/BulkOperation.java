@@ -44,10 +44,12 @@ import org.elasticsearch.cluster.routing.IndexRouting;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.collect.Iterators;
+import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.util.concurrent.AtomicArray;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.core.Releasables;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexNotFoundException;
@@ -74,6 +76,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 import static org.elasticsearch.action.bulk.TransportBulkAction.LAZY_ROLLOVER_ORIGIN;
 import static org.elasticsearch.cluster.metadata.IndexNameExpressionResolver.EXCLUDED_DATA_STREAMS_KEY;
@@ -108,6 +111,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     private final FailureStoreMetrics failureStoreMetrics;
     private final DataStreamFailureStoreSettings dataStreamFailureStoreSettings;
     private final boolean clusterHasFailureStoreFeature;
+    private final Supplier<RecyclerBytesStreamOutput> refRecycler;
 
     BulkOperation(
         Task task,
@@ -124,7 +128,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         ActionListener<BulkResponse> listener,
         FailureStoreMetrics failureStoreMetrics,
         DataStreamFailureStoreSettings dataStreamFailureStoreSettings,
-        boolean clusterHasFailureStoreFeature
+        boolean clusterHasFailureStoreFeature,
+        Supplier<RecyclerBytesStreamOutput> refRecycler
     ) {
         this(
             task,
@@ -143,7 +148,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             new FailureStoreDocumentConverter(),
             failureStoreMetrics,
             dataStreamFailureStoreSettings,
-            clusterHasFailureStoreFeature
+            clusterHasFailureStoreFeature,
+            refRecycler
         );
     }
 
@@ -164,7 +170,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         FailureStoreDocumentConverter failureStoreDocumentConverter,
         FailureStoreMetrics failureStoreMetrics,
         DataStreamFailureStoreSettings dataStreamFailureStoreSettings,
-        boolean clusterHasFailureStoreFeature
+        boolean clusterHasFailureStoreFeature,
+        Supplier<RecyclerBytesStreamOutput> refRecycler
     ) {
         super(listener);
         this.task = task;
@@ -182,6 +189,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         this.observer = observer;
         this.failureStoreDocumentConverter = failureStoreDocumentConverter;
         this.rolloverClient = new OriginSettingClient(client, LAZY_ROLLOVER_ORIGIN);
+        this.refRecycler = refRecycler;
         this.shortCircuitShardFailures.putAll(bulkRequest.incrementalState().shardLevelFailures());
         this.failureStoreMetrics = failureStoreMetrics;
         this.dataStreamFailureStoreSettings = dataStreamFailureStoreSettings;
@@ -428,13 +436,15 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                 }
 
                 // Try to encode as a batch for the batch execution path
+                Releasable releasable = null;
                 if (isBatchEligible(indexMetadata, requests)) {
                     try {
                         List<IndexRequest> indexRequests = new ArrayList<>(requests.size());
                         for (BulkItemRequest r : requests) {
                             indexRequests.add((IndexRequest) r.request());
                         }
-                        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(indexRequests);
+                        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(indexRequests, refRecycler);
+                        releasable = batch;
                         bulkShardRequest.setRowDocumentBatch(batch);
                     } catch (IOException e) {
                         // Encoding failed — leave batch null, serial path will be used on the primary
@@ -442,7 +452,12 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                     }
                 }
 
-                executeBulkShardRequest(bulkShardRequest, project.id(), bulkItemRequestCompleteRefCount.acquire());
+                Releasable finalReleasable = releasable;
+                executeBulkShardRequest(
+                    bulkShardRequest,
+                    project.id(),
+                    () -> Releasables.close(bulkItemRequestCompleteRefCount.acquire(), finalReleasable)
+                );
             }
         }
     }

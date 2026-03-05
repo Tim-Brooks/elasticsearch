@@ -10,7 +10,10 @@
 package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.bytes.CompositeBytesReference;
+import org.elasticsearch.common.bytes.ReleasableBytesReference;
 import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.transport.BytesRefRecycler;
@@ -20,58 +23,104 @@ import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.XContentString;
 import org.elasticsearch.xcontent.XContentType;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * Encodes a list of {@link IndexRequest}s into a row-oriented {@link RowDocumentBatch}.
- * Each document becomes a self-contained row with per-field type bytes.
- *
- * <p>Two-phase approach:
- * <ol>
- *   <li>Phase 1: Parse all docs, build schema incrementally, collect field entries per doc</li>
- *   <li>Phase 2: Serialize batch with final schema so all rows use final column count</li>
- * </ol>
+ * Single-pass streaming: each row is written immediately after parsing, with reusable scratch buffers.
+ * The header (schema + doc index) is built last and combined with row data via {@link CompositeBytesReference}.
  */
 public class DocumentBatchRowEncoder {
 
     private static final int HEADER_SIZE = 32;
+    private static final int INITIAL_CAPACITY = 16;
 
     private DocumentBatchRowEncoder() {}
 
-    /**
-     * Encode a list of IndexRequests into a row-oriented RowDocumentBatch.
-     */
     public static RowDocumentBatch encode(List<IndexRequest> requests) throws IOException {
+        return encode(requests, () -> new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE));
+    }
+
+    public static RowDocumentBatch encode(List<IndexRequest> requests, Supplier<RecyclerBytesStreamOutput> supplier) throws IOException {
         int docCount = requests.size();
         DocBatchSchema schema = new DocBatchSchema();
-        List<List<FieldEntry>> allDocFields = new ArrayList<>(docCount);
+        ScratchBuffers scratch = new ScratchBuffers(INITIAL_CAPACITY);
 
-        // Phase 1: Parse all documents, build schema, collect field entries
-        for (int docIdx = 0; docIdx < docCount; docIdx++) {
-            IndexRequest request = requests.get(docIdx);
-            BytesReference source = request.source();
-            XContentType xContentType = request.getContentType();
-            if (xContentType == null) {
-                xContentType = XContentType.JSON;
+        int[] rowOffsets = new int[docCount];
+        int[] rowLengths = new int[docCount];
+
+        try (RecyclerBytesStreamOutput rowOutput = supplier.get()) {
+            for (int docIdx = 0; docIdx < docCount; docIdx++) {
+                IndexRequest request = requests.get(docIdx);
+                BytesReference source = request.source();
+                XContentType xContentType = request.getContentType();
+                if (xContentType == null) {
+                    xContentType = XContentType.JSON;
+                }
+
+                // Zero scratch buffers for columns known so far
+                int columnCountBefore = schema.columnCount();
+                Arrays.fill(scratch.typeBytes, 0, columnCountBefore, (byte) 0);
+                Arrays.fill(scratch.varData, 0, columnCountBefore, null);
+
+                // Parse document, populating scratch buffers
+                try (
+                    XContentParser parser = XContentHelper.createParserNotCompressed(
+                        XContentParserConfiguration.EMPTY,
+                        source,
+                        xContentType
+                    )
+                ) {
+                    parser.allowDuplicateKeys(true);
+                    parser.nextToken(); // START_OBJECT
+                    flattenObject(parser, "", 0, schema, scratch, xContentType);
+                }
+
+                // Write row to output
+                int columnCount = schema.columnCount();
+                int rowStart = (int) rowOutput.position();
+                rowOffsets[docIdx] = rowStart;
+                writeRow(rowOutput, columnCount, scratch);
+                rowLengths[docIdx] = (int) rowOutput.position() - rowStart;
             }
 
-            List<FieldEntry> fields = new ArrayList<>();
-            try (
-                XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)
-            ) {
-                parser.allowDuplicateKeys(true);
-                parser.nextToken(); // START_OBJECT
-                flattenObject(parser, "", 0, schema, fields, xContentType);
-            }
-            allDocFields.add(fields);
+            ReleasableBytesReference rowBytes = rowOutput.moveToBytesReference();
+            BytesReference headerBytes = buildHeader(schema, docCount, rowOffsets, rowLengths, rowBytes.length());
+            BytesReference combined = CompositeBytesReference.of(headerBytes, rowBytes);
+            return new RowDocumentBatch(combined, rowBytes);
+        }
+    }
+
+    /**
+     * Mutable holder for scratch buffers that survives growth across recursive calls.
+     */
+    static final class ScratchBuffers {
+        byte[] typeBytes;
+        byte[] fixedData;
+        Object[] varData; // XContentString.UTF8Bytes or BytesReference
+
+        ScratchBuffers(int capacity) {
+            this.typeBytes = new byte[capacity];
+            this.fixedData = new byte[capacity * 8];
+            this.varData = new Object[capacity];
         }
 
-        // Phase 2: Serialize with final schema
-        return serialize(schema, allDocFields, docCount);
+        void ensureCapacity(int needed) {
+            if (needed <= typeBytes.length) return;
+            int cap = typeBytes.length;
+            while (cap <= needed) {
+                cap <<= 1;
+            }
+            typeBytes = Arrays.copyOf(typeBytes, cap);
+            fixedData = Arrays.copyOf(fixedData, cap * 8);
+            varData = Arrays.copyOf(varData, cap);
+        }
     }
 
     private static void flattenObject(
@@ -79,7 +128,7 @@ public class DocumentBatchRowEncoder {
         String prefix,
         int objectDepth,
         DocBatchSchema schema,
-        List<FieldEntry> fields,
+        ScratchBuffers scratch,
         XContentType xContentType
     ) throws IOException {
         XContentParser.Token token;
@@ -92,53 +141,48 @@ public class DocumentBatchRowEncoder {
 
             token = parser.nextToken(); // value token
 
+            if (token == XContentParser.Token.START_OBJECT) {
+                flattenObject(parser, fieldPath, objectDepth + 1, schema, scratch, xContentType);
+                continue;
+            }
+
+            int colIdx = schema.appendColumn(fieldPath);
+            scratch.ensureCapacity(colIdx + 1);
+
             switch (token) {
-                case START_OBJECT -> {
-                    flattenObject(parser, fieldPath, objectDepth + 1, schema, fields, xContentType);
-                }
                 case START_ARRAY -> {
-                    int colIdx = schema.appendColumn(fieldPath);
                     BytesReference rawBytes = captureRawXContent(parser, xContentType);
-                    byte typeByte = objectDepth > 0 ? (byte) (RowType.ARRAY | RowType.OBJECT_FLAG) : RowType.ARRAY;
-                    fields.add(new FieldEntry(colIdx, typeByte, null, 0, 0, rawBytes));
+                    scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.ARRAY | RowType.OBJECT_FLAG) : RowType.ARRAY;
+                    scratch.varData[colIdx] = rawBytes;
                 }
                 case VALUE_STRING -> {
-                    int colIdx = schema.appendColumn(fieldPath);
-                    byte typeByte = objectDepth > 0 ? (byte) (RowType.STRING | RowType.OBJECT_FLAG) : RowType.STRING;
-                    XContentString.UTF8Bytes strBytes = parser.optimizedText().bytes();
-                    fields.add(new FieldEntry(colIdx, typeByte, strBytes, 0, 0, null));
+                    scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.STRING | RowType.OBJECT_FLAG) : RowType.STRING;
+                    scratch.varData[colIdx] = parser.optimizedText().bytes();
                 }
                 case VALUE_NUMBER -> {
-                    int colIdx = schema.appendColumn(fieldPath);
                     XContentParser.NumberType numType = parser.numberType();
                     switch (numType) {
                         case INT, LONG -> {
-                            byte typeByte = objectDepth > 0 ? (byte) (RowType.LONG | RowType.OBJECT_FLAG) : RowType.LONG;
-                            fields.add(new FieldEntry(colIdx, typeByte, null, parser.longValue(), 0, null));
+                            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.LONG | RowType.OBJECT_FLAG) : RowType.LONG;
+                            writeLongToFixed(scratch.fixedData, colIdx, parser.longValue());
                         }
                         case FLOAT, DOUBLE -> {
-                            byte typeByte = objectDepth > 0 ? (byte) (RowType.DOUBLE | RowType.OBJECT_FLAG) : RowType.DOUBLE;
-                            fields.add(new FieldEntry(colIdx, typeByte, null, 0, parser.doubleValue(), null));
+                            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.DOUBLE | RowType.OBJECT_FLAG) : RowType.DOUBLE;
+                            writeLongToFixed(scratch.fixedData, colIdx, Double.doubleToRawLongBits(parser.doubleValue()));
                         }
                         default -> {
-                            // BIG_INTEGER, BIG_DECIMAL -> store as string
-                            byte typeByte = objectDepth > 0 ? (byte) (RowType.STRING | RowType.OBJECT_FLAG) : RowType.STRING;
-                            XContentString.UTF8Bytes strBytes = parser.optimizedText().bytes();
-                            fields.add(new FieldEntry(colIdx, typeByte, strBytes, 0, 0, null));
+                            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.STRING | RowType.OBJECT_FLAG) : RowType.STRING;
+                            scratch.varData[colIdx] = parser.optimizedText().bytes();
                         }
                     }
                 }
                 case VALUE_BOOLEAN -> {
-                    int colIdx = schema.appendColumn(fieldPath);
                     boolean val = parser.booleanValue();
                     byte base = val ? RowType.TRUE : RowType.FALSE;
-                    byte typeByte = objectDepth > 0 ? (byte) (base | RowType.OBJECT_FLAG) : base;
-                    fields.add(new FieldEntry(colIdx, typeByte, null, 0, 0, null));
+                    scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (base | RowType.OBJECT_FLAG) : base;
                 }
                 case VALUE_NULL -> {
-                    int colIdx = schema.appendColumn(fieldPath);
-                    byte typeByte = objectDepth > 0 ? (byte) (RowType.NULL | RowType.OBJECT_FLAG) : RowType.NULL;
-                    fields.add(new FieldEntry(colIdx, typeByte, null, 0, 0, null));
+                    scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.NULL | RowType.OBJECT_FLAG) : RowType.NULL;
                 }
                 default -> throw new IllegalStateException("Unexpected token: " + token);
             }
@@ -146,154 +190,118 @@ public class DocumentBatchRowEncoder {
     }
 
     private static BytesReference captureRawXContent(XContentParser parser, XContentType xContentType) throws IOException {
-        // TODO: Currently broken
         try (var builder = XContentFactory.jsonBuilder()) {
             builder.copyCurrentStructure(parser);
             return BytesReference.bytes(builder);
         }
     }
 
-    private static RowDocumentBatch serialize(DocBatchSchema schema, List<List<FieldEntry>> allDocFields, int docCount) throws IOException {
-        int columnCount = schema.columnCount();
+    private static void writeRow(RecyclerBytesStreamOutput output, int columnCount, ScratchBuffers scratch) throws IOException {
+        byte[] typeBytes = scratch.typeBytes;
+        byte[] fixedData = scratch.fixedData;
+        Object[] varData = scratch.varData;
 
-        try (RecyclerBytesStreamOutput output = new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE)) {
-            // --- Write header with placeholder values (32 bytes) ---
-            output.writeInt(RowDocumentBatch.MAGIC);  // 0: magic
-            output.writeInt(RowDocumentBatch.VERSION); // 4: version (now int)
-            output.writeInt(0);                        // 8: flags (now int)
-            output.writeInt(docCount);                 // 12: doc_count
-            output.writeInt(0);                        // 16: schema_offset (placeholder)
-            output.writeInt(0);                        // 20: doc_index_offset (placeholder)
-            output.writeInt(0);                        // 24: data_offset (placeholder)
-            output.writeInt(0);                        // 28: total_size (placeholder)
-
-            // --- Write schema section ---
-            int schemaOffset = (int) output.position();
-            output.writeInt(columnCount);
-            for (int i = 0; i < columnCount; i++) {
-                byte[] nameBytes = schema.getColumnName(i).getBytes(StandardCharsets.UTF_8);
-                output.writeInt(nameBytes.length);
-                output.writeBytes(nameBytes, 0, nameBytes.length);
-            }
-
-            // --- Reserve doc index section (docCount * 8 bytes) ---
-            int docIndexOffset = (int) output.position();
-            int docIndexSize = docCount * 8;
-            output.skip(docIndexSize);
-
-            // --- Write each row inline ---
-            int dataOffset = (int) output.position();
-            int[] rowOffsets = new int[docCount];
-            int[] rowLengths = new int[docCount];
-
-            for (int docIdx = 0; docIdx < docCount; docIdx++) {
-                int rowStart = (int) output.position();
-                rowOffsets[docIdx] = rowStart - dataOffset;
-
-                List<FieldEntry> fields = allDocFields.get(docIdx);
-                writeRow(output, columnCount, fields);
-
-                rowLengths[docIdx] = (int) output.position() - rowStart;
-            }
-
-            int totalSize = (int) output.position();
-
-            // --- Seek back and fill in header offsets ---
-            output.seek(16);
-            output.writeInt(schemaOffset);
-            output.writeInt(docIndexOffset);
-            output.writeInt(dataOffset);
-            output.writeInt(totalSize);
-
-            // --- Fill in doc index entries ---
-            output.seek(docIndexOffset);
-            for (int docIdx = 0; docIdx < docCount; docIdx++) {
-                output.writeInt(rowOffsets[docIdx]);
-                output.writeInt(rowLengths[docIdx]);
-            }
-
-            // Seek back to end so bytes() returns correct size
-            output.seek(totalSize);
-
-            BytesReference bytes = output.bytes();
-            return new RowDocumentBatch(bytes);
-        }
-    }
-
-    private static void writeRow(RecyclerBytesStreamOutput output, int columnCount, List<FieldEntry> fields) throws IOException {
-        // Build type bytes array (NULL for absent columns)
-        byte[] typeBytes = new byte[columnCount];
-
-        // Index field entries by column for quick lookup
-        FieldEntry[] fieldByCol = new FieldEntry[columnCount];
-        for (FieldEntry fe : fields) {
-            fieldByCol[fe.columnIndex] = fe;
-            typeBytes[fe.columnIndex] = fe.typeByte;
-        }
-
-        // Compute fixed section size
-        int fixedSize = 0;
-        for (int col = 0; col < columnCount; col++) {
-            fixedSize += RowType.fixedSize(typeBytes[col]);
-        }
-
-        // Collect variable data
-        ByteArrayOutputStream varOut = new ByteArrayOutputStream();
-        int[] varOffsets = new int[columnCount];
-        int[] varLengths = new int[columnCount];
-
-        for (int col = 0; col < columnCount; col++) {
-            FieldEntry fe = fieldByCol[col];
-            if (fe == null) continue;
-            byte baseType = RowType.baseType(fe.typeByte);
-            if (baseType == RowType.STRING) {
-                varOffsets[col] = varOut.size();
-                varLengths[col] = fe.stringBytes.length();
-                varOut.write(fe.stringBytes.bytes(), fe.stringBytes.offset(), fe.stringBytes.length());
-            } else if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
-                byte[] raw = BytesReference.toBytes(fe.binaryValue);
-                varOffsets[col] = varOut.size();
-                varLengths[col] = raw.length;
-                varOut.write(raw, 0, raw.length);
-            }
-        }
-        byte[] varData = varOut.toByteArray();
-
-        // Write row: column_count(4) + type_bytes + fixed_section + var_section
+        // Write: column_count(4) + type_bytes + fixed_section + var_section
         output.writeInt(columnCount);
         output.writeBytes(typeBytes, 0, columnCount);
 
-        // fixed section
+        // Fixed section: compute var offsets inline
+        int varOffset = 0;
         for (int col = 0; col < columnCount; col++) {
             byte typeByte = typeBytes[col];
             int fs = RowType.fixedSize(typeByte);
             if (fs == 0) continue;
 
             byte baseType = RowType.baseType(typeByte);
-            FieldEntry fe = fieldByCol[col];
-            if (baseType == RowType.LONG) {
-                output.writeLong(fe.longValue);
-            } else if (baseType == RowType.DOUBLE) {
-                output.writeLong(Double.doubleToRawLongBits(fe.doubleValue));
-            } else if (baseType == RowType.STRING || baseType == RowType.BINARY || baseType == RowType.ARRAY) {
-                output.writeInt(varOffsets[col]);
-                output.writeInt(varLengths[col]);
+            if (baseType == RowType.LONG || baseType == RowType.DOUBLE) {
+                output.writeBytes(fixedData, col * 8, 8);
+            } else if (baseType == RowType.STRING) {
+                XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) varData[col];
+                output.writeInt(varOffset);
+                output.writeInt(str.length());
+                varOffset += str.length();
+            } else if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
+                BytesReference ref = (BytesReference) varData[col];
+                output.writeInt(varOffset);
+                output.writeInt(ref.length());
+                varOffset += ref.length();
             }
         }
 
-        // var section
-        output.writeBytes(varData, 0, varData.length);
+        // Var section: write actual bytes
+        for (int col = 0; col < columnCount; col++) {
+            byte baseType = RowType.baseType(typeBytes[col]);
+            if (baseType == RowType.STRING) {
+                XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) varData[col];
+                output.writeBytes(str.bytes(), str.offset(), str.length());
+            } else if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
+                BytesReference ref = (BytesReference) varData[col];
+                ref.writeTo(output);
+            }
+        }
     }
 
-    /**
-     * Internal representation of a single field value collected during Phase 1.
-     */
-    private record FieldEntry(
-        int columnIndex,
-        byte typeByte,
-        XContentString.UTF8Bytes stringBytes,
-        long longValue,
-        double doubleValue,
-        BytesReference binaryValue
-    ) {}
+    private static BytesReference buildHeader(DocBatchSchema schema, int docCount, int[] rowOffsets, int[] rowLengths, int rowDataSize) {
+        int columnCount = schema.columnCount();
+
+        // Compute schema section size
+        int schemaSize = 4; // column_count int
+        byte[][] nameBytes = new byte[columnCount][];
+        for (int i = 0; i < columnCount; i++) {
+            nameBytes[i] = schema.getColumnName(i).getBytes(StandardCharsets.UTF_8);
+            schemaSize += 4 + nameBytes[i].length;
+        }
+
+        int docIndexSize = docCount * 8;
+        int headerTotal = HEADER_SIZE + schemaSize + docIndexSize;
+
+        byte[] header = new byte[headerTotal];
+        ByteBuffer buf = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN);
+
+        int schemaOffset = HEADER_SIZE;
+        int docIndexOffset = schemaOffset + schemaSize;
+        int dataOffset = headerTotal;
+        int totalSize = headerTotal + rowDataSize;
+
+        // Header fields
+        buf.putInt(0, RowDocumentBatch.MAGIC);
+        buf.putInt(4, RowDocumentBatch.VERSION);
+        buf.putInt(8, 0); // flags
+        buf.putInt(12, docCount);
+        buf.putInt(16, schemaOffset);
+        buf.putInt(20, docIndexOffset);
+        buf.putInt(24, dataOffset);
+        buf.putInt(28, totalSize);
+
+        // Schema section
+        int pos = schemaOffset;
+        buf.putInt(pos, columnCount);
+        pos += 4;
+        for (int i = 0; i < columnCount; i++) {
+            buf.putInt(pos, nameBytes[i].length);
+            pos += 4;
+            System.arraycopy(nameBytes[i], 0, header, pos, nameBytes[i].length);
+            pos += nameBytes[i].length;
+        }
+
+        // Doc index section
+        for (int i = 0; i < docCount; i++) {
+            buf.putInt(docIndexOffset + i * 8, rowOffsets[i]);
+            buf.putInt(docIndexOffset + i * 8 + 4, rowLengths[i]);
+        }
+
+        return new BytesArray(header);
+    }
+
+    private static void writeLongToFixed(byte[] fixedData, int colIdx, long value) {
+        int offset = colIdx * 8;
+        fixedData[offset] = (byte) (value >>> 56);
+        fixedData[offset + 1] = (byte) (value >>> 48);
+        fixedData[offset + 2] = (byte) (value >>> 40);
+        fixedData[offset + 3] = (byte) (value >>> 32);
+        fixedData[offset + 4] = (byte) (value >>> 24);
+        fixedData[offset + 5] = (byte) (value >>> 16);
+        fixedData[offset + 6] = (byte) (value >>> 8);
+        fixedData[offset + 7] = (byte) value;
+    }
 }

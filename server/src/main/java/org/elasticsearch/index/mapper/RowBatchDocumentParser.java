@@ -440,9 +440,9 @@ public final class RowBatchDocumentParser {
                 dynamicRuntimeFields
             );
             // Create a no-op parser as default. The real parser is set per-field via setParser().
-            // ColumnValueXContentParser.forNullValue() provides a minimal parser that satisfies
-            // the non-null requirement for metadata preParse/postParse calls.
-            this.parser = ColumnValueXContentParser.forNullValue();
+            // forNullValue() provides a minimal parser that satisfies the non-null requirement
+            // for metadata preParse/postParse calls.
+            this.parser = RowValueXContentParser.forNullValue();
             this.document = new LuceneDocument();
             this.documents.add(document);
             this.maxAllowedNumNestedDocs = mappingParserContext.getIndexSettings().getMappingNestedDocsLimit();

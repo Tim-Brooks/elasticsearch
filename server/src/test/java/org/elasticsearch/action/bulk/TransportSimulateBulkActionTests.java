@@ -90,7 +90,7 @@ public class TransportSimulateBulkActionTests extends ESTestCase {
         TestTransportSimulateBulkAction() {
             super(
                 TransportSimulateBulkActionTests.this.threadPool,
-                transportService,
+                TransportSimulateBulkActionTests.this.transportService,
                 TransportSimulateBulkActionTests.this.clusterService,
                 null,
                 new ActionFilters(Set.of()),

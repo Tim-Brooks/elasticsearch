@@ -44,6 +44,7 @@ import org.elasticsearch.cluster.metadata.Template;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.project.TestProjectResolvers;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.AtomicArray;
@@ -59,6 +60,7 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.test.client.NoOpNodeClient;
 import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentParseException;
 import org.junit.After;
 import org.junit.Before;
@@ -1246,7 +1248,8 @@ public class BulkOperationTests extends ESTestCase {
             failureStoreDocumentConverter,
             FailureStoreMetrics.NOOP,
             dataStreamFailureStoreSettings,
-            failureStoreNodeFeatureEnabled
+            failureStoreNodeFeatureEnabled,
+            () -> new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE)
         );
     }
 

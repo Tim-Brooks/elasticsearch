@@ -84,6 +84,7 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
         }
     };
 
+    protected final TransportService transportService;
     protected final ThreadPool threadPool;
     protected final ClusterService clusterService;
     protected final IndexingPressure indexingPressure;
@@ -112,6 +113,7 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
         FeatureService featureService
     ) {
         super(action.name(), transportService, actionFilters, requestReader, EsExecutors.DIRECT_EXECUTOR_SERVICE);
+        this.transportService = transportService;
         this.threadPool = threadPool;
         this.clusterService = clusterService;
         this.ingestService = ingestService;

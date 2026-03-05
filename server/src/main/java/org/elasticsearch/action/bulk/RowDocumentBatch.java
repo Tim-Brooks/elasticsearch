@@ -35,13 +35,19 @@ public final class RowDocumentBatch implements Releasable, Accountable {
     public static final int VERSION = 1;
 
     private final BytesReference data;
+    private final Releasable releasable;
     private final int docCount;
     private final DocBatchSchema schema;
     private final int docIndexOffset;
     private final int dataOffset;
 
     public RowDocumentBatch(BytesReference data) {
+        this(data, () -> {});
+    }
+
+    public RowDocumentBatch(BytesReference data, Releasable releasable) {
         this.data = data;
+        this.releasable = releasable;
 
         // Parse header (32 bytes)
         int magic = data.getInt(0);
@@ -107,7 +113,7 @@ public final class RowDocumentBatch implements Releasable, Accountable {
 
     @Override
     public void close() {
-        // no-op for byte array backed batch
+        releasable.close();
     }
 
     @Override
