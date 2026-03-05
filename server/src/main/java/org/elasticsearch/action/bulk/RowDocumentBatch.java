@@ -10,6 +10,7 @@
 package org.elasticsearch.action.bulk;
 
 import org.apache.lucene.util.Accountable;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.core.Releasable;
 
 import java.lang.invoke.MethodHandles;
@@ -22,10 +23,10 @@ import java.util.List;
 /**
  * Immutable reader for a row-oriented document batch.
  *
- * <p>Binary layout (28-byte header):
+ * <p>Binary layout (32-byte header):
  * <pre>
- * magic(4) version(2) flags(2) doc_count(4) schema_offset(4) doc_index_offset(4) data_offset(4) total_size(4)
- * [Schema]    column_count(2) + entries: name_length(2) + name_bytes
+ * magic(4) version(4) flags(4) doc_count(4) schema_offset(4) doc_index_offset(4) data_offset(4) total_size(4)
+ * [Schema]    column_count(4) + entries: name_length(4) + name_bytes
  * [Doc Index] entries[doc_count]: data_offset(4) + data_length(4)
  * [Row Data]  rows back-to-back
  * </pre>
@@ -33,10 +34,9 @@ import java.util.List;
 public final class RowDocumentBatch implements Releasable, Accountable {
 
     public static final int MAGIC = 0x45534452; // "ESDR"
-    public static final short VERSION = 1;
+    public static final int VERSION = 1;
 
     private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
-    private static final VarHandle SHORT_HANDLE = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.BIG_ENDIAN);
 
     private final byte[] data;
     private final int docCount;
@@ -44,38 +44,42 @@ public final class RowDocumentBatch implements Releasable, Accountable {
     private final int docIndexOffset;
     private final int dataOffset;
 
+    public RowDocumentBatch(BytesReference bytesRef) {
+        this(BytesReference.toBytes(bytesRef));
+    }
+
     public RowDocumentBatch(byte[] data) {
         this.data = data;
 
-        // Parse header
+        // Parse header (32 bytes)
         int magic = (int) INT_HANDLE.get(data, 0);
         if (magic != MAGIC) {
             throw new IllegalArgumentException(
                 "Invalid magic: 0x" + Integer.toHexString(magic) + ", expected 0x" + Integer.toHexString(MAGIC)
             );
         }
-        short version = (short) SHORT_HANDLE.get(data, 4);
+        int version = (int) INT_HANDLE.get(data, 4);
         if (version != VERSION) {
             throw new IllegalArgumentException("Unsupported version: " + version);
         }
-        // flags at offset 6 (reserved, ignored for now)
-        this.docCount = (int) INT_HANDLE.get(data, 8);
-        int schemaOffset = (int) INT_HANDLE.get(data, 12);
-        this.docIndexOffset = (int) INT_HANDLE.get(data, 16);
-        this.dataOffset = (int) INT_HANDLE.get(data, 20);
-        // total_size at offset 24
+        // flags at offset 8 (reserved, ignored for now)
+        this.docCount = (int) INT_HANDLE.get(data, 12);
+        int schemaOffset = (int) INT_HANDLE.get(data, 16);
+        this.docIndexOffset = (int) INT_HANDLE.get(data, 20);
+        this.dataOffset = (int) INT_HANDLE.get(data, 24);
+        // total_size at offset 28
 
         // Parse schema
         this.schema = parseSchema(data, schemaOffset);
     }
 
     private static DocBatchSchema parseSchema(byte[] data, int offset) {
-        int columnCount = Short.toUnsignedInt((short) SHORT_HANDLE.get(data, offset));
-        offset += 2;
+        int columnCount = (int) INT_HANDLE.get(data, offset);
+        offset += 4;
         List<String> names = new ArrayList<>(columnCount);
         for (int i = 0; i < columnCount; i++) {
-            int nameLen = Short.toUnsignedInt((short) SHORT_HANDLE.get(data, offset));
-            offset += 2;
+            int nameLen = (int) INT_HANDLE.get(data, offset);
+            offset += 4;
             names.add(new String(data, offset, nameLen, StandardCharsets.UTF_8));
             offset += nameLen;
         }

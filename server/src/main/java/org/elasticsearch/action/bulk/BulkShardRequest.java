@@ -20,6 +20,7 @@ import org.elasticsearch.action.support.replication.ReplicationRequest;
 import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.cluster.metadata.InferenceFieldMetadata;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.util.set.Sets;
@@ -60,7 +61,7 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
             if (hasBatch) {
                 boolean isRowBatch = in.readBoolean();
                 if (isRowBatch) {
-                    this.rowDocumentBatch = new RowDocumentBatch(in.readByteArray());
+                    this.rowDocumentBatch = new RowDocumentBatch(in.readBytesReference());
                 } else {
                     this.documentBatch = new DocumentBatch(in.readByteArray());
                     boolean hasTsids = in.readBoolean();
@@ -197,7 +198,7 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
             if (rowDocumentBatch != null) {
                 out.writeBoolean(true);  // hasBatch
                 out.writeBoolean(true);  // isRowBatch
-                out.writeByteArray(rowDocumentBatch.getRawData());
+                out.writeBytesReference(new BytesArray(rowDocumentBatch.getRawData()));
             } else if (documentBatch != null) {
                 out.writeBoolean(true);  // hasBatch
                 out.writeBoolean(false); // isRowBatch

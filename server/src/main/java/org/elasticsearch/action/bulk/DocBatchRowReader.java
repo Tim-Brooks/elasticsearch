@@ -19,14 +19,13 @@ import java.nio.charset.StandardCharsets;
  *
  * <p>Row layout:
  * <pre>
- * row_column_count(2) | type_bytes[row_column_count] | fixed_section | var_section
+ * row_column_count(4) | type_bytes[row_column_count] | fixed_section | var_section
  * </pre>
  */
 public final class DocBatchRowReader {
 
     private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.BIG_ENDIAN);
-    private static final VarHandle SHORT_HANDLE = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.BIG_ENDIAN);
 
     private final byte[] data;
     private final int rowOffset;
@@ -42,8 +41,8 @@ public final class DocBatchRowReader {
         this.rowOffset = rowOffset;
         this.rowLength = rowLength;
         this.schema = schema;
-        this.rowColumnCount = Short.toUnsignedInt((short) SHORT_HANDLE.get(data, rowOffset));
-        this.typeBytesOffset = rowOffset + 2;
+        this.rowColumnCount = (int) INT_HANDLE.get(data, rowOffset);
+        this.typeBytesOffset = rowOffset + 4;
         this.fixedSectionOffset = typeBytesOffset + rowColumnCount;
 
         // Compute var section offset by summing fixed sizes of all columns

@@ -11,7 +11,9 @@ package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.xcontent.XContentHelper;
+import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
@@ -20,9 +22,6 @@ import org.elasticsearch.xcontent.XContentType;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -39,9 +38,7 @@ import java.util.List;
  */
 public class DocumentBatchRowEncoder {
 
-    private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
-    private static final VarHandle SHORT_HANDLE = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.BIG_ENDIAN);
-    private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.BIG_ENDIAN);
+    private static final int HEADER_SIZE = 32;
 
     private DocumentBatchRowEncoder() {}
 
@@ -155,71 +152,76 @@ public class DocumentBatchRowEncoder {
         }
     }
 
-    private static RowDocumentBatch serialize(DocBatchSchema schema, List<List<FieldEntry>> allDocFields, int docCount) {
+    private static RowDocumentBatch serialize(DocBatchSchema schema, List<List<FieldEntry>> allDocFields, int docCount) throws IOException {
         int columnCount = schema.columnCount();
 
-        // --- Encode schema section ---
-        ByteArrayOutputStream schemaOut = new ByteArrayOutputStream();
-        writeShort(schemaOut, (short) columnCount);
-        for (int i = 0; i < columnCount; i++) {
-            byte[] nameBytes = schema.getColumnName(i).getBytes(StandardCharsets.UTF_8);
-            writeShort(schemaOut, (short) nameBytes.length);
-            schemaOut.write(nameBytes, 0, nameBytes.length);
+        try (RecyclerBytesStreamOutput output = new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE)) {
+            // --- Write header with placeholder values (32 bytes) ---
+            output.writeInt(RowDocumentBatch.MAGIC);  // 0: magic
+            output.writeInt(RowDocumentBatch.VERSION); // 4: version (now int)
+            output.writeInt(0);                        // 8: flags (now int)
+            output.writeInt(docCount);                 // 12: doc_count
+            output.writeInt(0);                        // 16: schema_offset (placeholder)
+            output.writeInt(0);                        // 20: doc_index_offset (placeholder)
+            output.writeInt(0);                        // 24: data_offset (placeholder)
+            output.writeInt(0);                        // 28: total_size (placeholder)
+
+            // --- Write schema section ---
+            int schemaOffset = (int) output.position();
+            output.writeInt(columnCount);
+            for (int i = 0; i < columnCount; i++) {
+                byte[] nameBytes = schema.getColumnName(i).getBytes(StandardCharsets.UTF_8);
+                output.writeInt(nameBytes.length);
+                output.writeBytes(nameBytes, 0, nameBytes.length);
+            }
+
+            // --- Reserve doc index section (docCount * 8 bytes) ---
+            int docIndexOffset = (int) output.position();
+            int docIndexSize = docCount * 8;
+            output.skip(docIndexSize);
+
+            // --- Write each row inline ---
+            int dataOffset = (int) output.position();
+            int[] rowOffsets = new int[docCount];
+            int[] rowLengths = new int[docCount];
+
+            for (int docIdx = 0; docIdx < docCount; docIdx++) {
+                int rowStart = (int) output.position();
+                rowOffsets[docIdx] = rowStart - dataOffset;
+
+                List<FieldEntry> fields = allDocFields.get(docIdx);
+                writeRow(output, columnCount, fields);
+
+                rowLengths[docIdx] = (int) output.position() - rowStart;
+            }
+
+            int totalSize = (int) output.position();
+
+            // --- Seek back and fill in header offsets ---
+            output.seek(16);
+            output.writeInt(schemaOffset);
+            output.writeInt(docIndexOffset);
+            output.writeInt(dataOffset);
+            output.writeInt(totalSize);
+
+            // --- Fill in doc index entries ---
+            output.seek(docIndexOffset);
+            for (int docIdx = 0; docIdx < docCount; docIdx++) {
+                output.writeInt(rowOffsets[docIdx]);
+                output.writeInt(rowLengths[docIdx]);
+            }
+
+            // Seek back to end so bytes() returns correct size
+            output.seek(totalSize);
+
+            BytesReference bytes = output.bytes();
+            return new RowDocumentBatch(bytes);
         }
-        byte[] schemaBytes = schemaOut.toByteArray();
-
-        // --- Encode each row ---
-        byte[][] rowDataArray = new byte[docCount][];
-        for (int docIdx = 0; docIdx < docCount; docIdx++) {
-            rowDataArray[docIdx] = encodeRow(columnCount, allDocFields.get(docIdx));
-        }
-
-        // --- Compute offsets ---
-        int headerSize = 28;
-        int schemaOffset = headerSize;
-        int docIndexOffset = schemaOffset + schemaBytes.length;
-        int docIndexSize = docCount * 8; // each entry: offset(4) + length(4)
-        int dataOffset = docIndexOffset + docIndexSize;
-
-        int totalRowData = 0;
-        for (byte[] row : rowDataArray) {
-            totalRowData += row.length;
-        }
-        int totalSize = dataOffset + totalRowData;
-
-        // --- Assemble final byte array ---
-        byte[] result = new byte[totalSize];
-
-        // Header
-        INT_HANDLE.set(result, 0, RowDocumentBatch.MAGIC);
-        SHORT_HANDLE.set(result, 4, RowDocumentBatch.VERSION);
-        SHORT_HANDLE.set(result, 6, (short) 0); // flags
-        INT_HANDLE.set(result, 8, docCount);
-        INT_HANDLE.set(result, 12, schemaOffset);
-        INT_HANDLE.set(result, 16, docIndexOffset);
-        INT_HANDLE.set(result, 20, dataOffset);
-        INT_HANDLE.set(result, 24, totalSize);
-
-        // Schema
-        System.arraycopy(schemaBytes, 0, result, schemaOffset, schemaBytes.length);
-
-        // Doc index + row data
-        int currentRowOffset = 0;
-        for (int docIdx = 0; docIdx < docCount; docIdx++) {
-            int entryOffset = docIndexOffset + docIdx * 8;
-            INT_HANDLE.set(result, entryOffset, currentRowOffset);
-            INT_HANDLE.set(result, entryOffset + 4, rowDataArray[docIdx].length);
-            System.arraycopy(rowDataArray[docIdx], 0, result, dataOffset + currentRowOffset, rowDataArray[docIdx].length);
-            currentRowOffset += rowDataArray[docIdx].length;
-        }
-
-        return new RowDocumentBatch(result);
     }
 
-    private static byte[] encodeRow(int columnCount, List<FieldEntry> fields) {
+    private static void writeRow(RecyclerBytesStreamOutput output, int columnCount, List<FieldEntry> fields) throws IOException {
         // Build type bytes array (NULL for absent columns)
         byte[] typeBytes = new byte[columnCount];
-        // typeBytes are already 0x00 (NULL) by default
 
         // Index field entries by column for quick lookup
         FieldEntry[] fieldByCol = new FieldEntry[columnCount];
@@ -234,7 +236,7 @@ public class DocumentBatchRowEncoder {
             fixedSize += RowType.fixedSize(typeBytes[col]);
         }
 
-        // First pass: collect variable data and compute var offsets
+        // Collect variable data
         ByteArrayOutputStream varOut = new ByteArrayOutputStream();
         int[] varOffsets = new int[columnCount];
         int[] varLengths = new int[columnCount];
@@ -256,18 +258,9 @@ public class DocumentBatchRowEncoder {
         }
         byte[] varData = varOut.toByteArray();
 
-        // Assemble row: column_count(2) + type_bytes + fixed_section + var_section
-        int rowSize = 2 + columnCount + fixedSize + varData.length;
-        byte[] row = new byte[rowSize];
-        int pos = 0;
-
-        // row_column_count
-        SHORT_HANDLE.set(row, pos, (short) columnCount);
-        pos += 2;
-
-        // type bytes
-        System.arraycopy(typeBytes, 0, row, pos, columnCount);
-        pos += columnCount;
+        // Write row: column_count(4) + type_bytes + fixed_section + var_section
+        output.writeInt(columnCount);
+        output.writeBytes(typeBytes, 0, columnCount);
 
         // fixed section
         for (int col = 0; col < columnCount; col++) {
@@ -278,25 +271,17 @@ public class DocumentBatchRowEncoder {
             byte baseType = RowType.baseType(typeByte);
             FieldEntry fe = fieldByCol[col];
             if (baseType == RowType.LONG) {
-                LONG_HANDLE.set(row, pos, fe.longValue);
+                output.writeLong(fe.longValue);
             } else if (baseType == RowType.DOUBLE) {
-                LONG_HANDLE.set(row, pos, Double.doubleToRawLongBits(fe.doubleValue));
+                output.writeLong(Double.doubleToRawLongBits(fe.doubleValue));
             } else if (baseType == RowType.STRING || baseType == RowType.BINARY || baseType == RowType.ARRAY) {
-                INT_HANDLE.set(row, pos, varOffsets[col]);
-                INT_HANDLE.set(row, pos + 4, varLengths[col]);
+                output.writeInt(varOffsets[col]);
+                output.writeInt(varLengths[col]);
             }
-            pos += fs;
         }
 
         // var section
-        System.arraycopy(varData, 0, row, pos, varData.length);
-
-        return row;
-    }
-
-    private static void writeShort(ByteArrayOutputStream out, short value) {
-        out.write((value >>> 8) & 0xFF);
-        out.write(value & 0xFF);
+        output.writeBytes(varData, 0, varData.length);
     }
 
     /**

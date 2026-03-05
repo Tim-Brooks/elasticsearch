@@ -46,7 +46,7 @@ public final class DocBatchRowIterator {
 
     DocBatchRowIterator(byte[] data, int rowOffset, int rowColumnCount, int fixedSectionOffset, int varSectionOffset) {
         this.data = data;
-        this.typeBytesOffset = rowOffset + 2;
+        this.typeBytesOffset = rowOffset + 4;
         this.varSectionOffset = varSectionOffset;
         this.rowColumnCount = rowColumnCount;
         this.col = -1;
