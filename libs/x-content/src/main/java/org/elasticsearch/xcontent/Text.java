@@ -104,6 +104,14 @@ public final class Text implements XContentString, Comparable<Text>, ToXContentF
         return stringLength;
     }
 
+    @Override
+    public boolean isMoreCharsThan(int n) {
+        if (hasString() == false && bytes.length() <= n) {
+            return false;
+        }
+        return stringLength() > n;
+    }
+
     private int countCharsUtf8(UTF8Bytes bytes) {
         int count = 0;
         int offset = bytes.offset();

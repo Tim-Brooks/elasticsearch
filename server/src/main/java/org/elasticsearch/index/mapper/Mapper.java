@@ -205,7 +205,7 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
 
         public boolean isIgnored(final XContentString s) {
             if (s == null) return false;
-            return lengthExceedsIgnoreAbove(s.stringLength());
+            return s.isMoreCharsThan(get());
         }
 
         private boolean lengthExceedsIgnoreAbove(int strLength) {

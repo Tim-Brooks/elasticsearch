@@ -13,6 +13,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 public interface XContentString {
+
     record UTF8Bytes(byte[] bytes, int offset, int length) implements Comparable<UTF8Bytes> {
         public UTF8Bytes(byte[] bytes) {
             this(bytes, 0, bytes.length);
@@ -59,4 +60,6 @@ public interface XContentString {
      * Returns the number of characters in the represented string.
      */
     int stringLength();
+
+    boolean isMoreCharsThan(int n);
 }
