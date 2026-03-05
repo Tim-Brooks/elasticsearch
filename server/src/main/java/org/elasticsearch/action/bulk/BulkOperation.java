@@ -62,7 +62,6 @@ import org.elasticsearch.node.NodeClosedException;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.threadpool.ThreadPool;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -446,15 +445,18 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                         RowDocumentBatch batch = DocumentBatchRowEncoder.encode(indexRequests, refRecycler);
                         releasable = batch;
                         bulkShardRequest.setRowDocumentBatch(batch);
-                    } catch (IOException e) {
+                    } catch (Exception e) {
                         // Encoding failed — leave batch null, serial path will be used on the primary
                         logger.debug("Failed to encode document batch, falling back to serial path", e);
+                        bulkShardRequest.setRowDocumentBatch(null);
                     }
                 }
 
                 Releasable bulkItemRequestComplete = bulkItemRequestCompleteRefCount.acquire();
                 Releasable finalReleasable = releasable;
-                executeBulkShardRequest(bulkShardRequest, project.id(), () -> Releasables.close(bulkItemRequestComplete, finalReleasable));
+                executeBulkShardRequest(bulkShardRequest, project.id(), () -> {
+                    Releasables.close(bulkItemRequestComplete, finalReleasable);
+                });
             }
         }
     }
