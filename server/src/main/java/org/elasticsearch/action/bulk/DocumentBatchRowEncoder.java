@@ -63,6 +63,7 @@ public class DocumentBatchRowEncoder {
             try (
                 XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)
             ) {
+                parser.allowDuplicateKeys(true);
                 parser.nextToken(); // START_OBJECT
                 flattenObject(parser, "", 0, schema, fields, xContentType);
             }
