@@ -190,6 +190,7 @@ public class DocumentBatchRowEncoder {
     }
 
     private static BytesReference captureRawXContent(XContentParser parser, XContentType xContentType) throws IOException {
+        // TODO: Broken currently
         try (var builder = XContentFactory.jsonBuilder()) {
             builder.copyCurrentStructure(parser);
             return BytesReference.bytes(builder);
@@ -217,13 +218,11 @@ public class DocumentBatchRowEncoder {
                 output.writeBytes(fixedData, col * 8, 8);
             } else if (baseType == RowType.STRING) {
                 XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) varData[col];
-                output.writeInt(varOffset);
-                output.writeInt(str.length());
+                output.writeLong(((long) varOffset << 32) | (str.length() & 0xFFFFFFFFL));
                 varOffset += str.length();
             } else if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
                 BytesReference ref = (BytesReference) varData[col];
-                output.writeInt(varOffset);
-                output.writeInt(ref.length());
+                output.writeLong(((long) varOffset << 32) | (ref.length() & 0xFFFFFFFFL));
                 varOffset += ref.length();
             }
         }
