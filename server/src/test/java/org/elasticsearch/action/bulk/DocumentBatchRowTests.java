@@ -10,6 +10,7 @@
 package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.cluster.metadata.DataStream;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xcontent.XContentType;
 
@@ -319,6 +320,100 @@ public class DocumentBatchRowTests extends ESTestCase {
             if (!it1.isNull()) cols1.add(it1.column());
         }
         assertEquals(List.of(2), cols1);
+
+        batch.close();
+    }
+
+    public void testNeedsLogsTimestampGeneratesTimestamp() throws IOException {
+        List<IndexRequest> requests = new ArrayList<>();
+        // Doc 0: needs timestamp, no @timestamp in source -> should generate one
+        IndexRequest req0 = new IndexRequest("test").id("1").source("{\"name\":\"alice\"}", XContentType.JSON);
+        req0.setNeedsLogsTimestamp(true);
+        requests.add(req0);
+
+        // Doc 1: needs timestamp, @timestamp already in source -> should keep existing
+        IndexRequest req1 = new IndexRequest("test").id("2")
+            .source("{\"name\":\"bob\",\"@timestamp\":\"2024-01-01T00:00:00Z\"}", XContentType.JSON);
+        req1.setNeedsLogsTimestamp(true);
+        requests.add(req1);
+
+        // Doc 2: does NOT need timestamp, no @timestamp -> should not add one
+        IndexRequest req2 = new IndexRequest("test").id("3").source("{\"name\":\"charlie\"}", XContentType.JSON);
+        requests.add(req2);
+
+        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(requests);
+
+        DocBatchSchema schema = batch.schema();
+        int tsColIdx = schema.getColumnIndex(DataStream.TIMESTAMP_FIELD_NAME);
+        assertTrue("@timestamp column should exist in schema", tsColIdx >= 0);
+
+        // Doc 0: @timestamp was generated
+        DocBatchRowReader row0 = batch.getRowReader(0);
+        assertFalse(row0.isNull(tsColIdx));
+        assertEquals(RowType.STRING, row0.getBaseType(tsColIdx));
+        String generatedTs = row0.getStringValue(tsColIdx);
+        assertNotNull(generatedTs);
+        assertFalse(generatedTs.isEmpty());
+        // rawTimestamp should be set
+        assertNotNull(req0.getRawTimestamp());
+        assertEquals(generatedTs, req0.getRawTimestamp());
+
+        // Doc 1: @timestamp was parsed from source
+        DocBatchRowReader row1 = batch.getRowReader(1);
+        assertFalse(row1.isNull(tsColIdx));
+        assertEquals(RowType.STRING, row1.getBaseType(tsColIdx));
+        assertEquals("2024-01-01T00:00:00Z", row1.getStringValue(tsColIdx));
+        assertEquals("2024-01-01T00:00:00Z", req1.getRawTimestamp());
+
+        // Doc 2: does not need timestamp, @timestamp column should be null for this row
+        DocBatchRowReader row2 = batch.getRowReader(2);
+        assertTrue(row2.isNull(tsColIdx));
+        assertNull(req2.getRawTimestamp());
+
+        batch.close();
+    }
+
+    public void testNeedsLogsTimestampWithLongValue() throws IOException {
+        List<IndexRequest> requests = new ArrayList<>();
+        IndexRequest req = new IndexRequest("test").id("1").source("{\"@timestamp\":1704067200000}", XContentType.JSON);
+        req.setNeedsLogsTimestamp(true);
+        requests.add(req);
+
+        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(requests);
+
+        DocBatchSchema schema = batch.schema();
+        int tsColIdx = schema.getColumnIndex(DataStream.TIMESTAMP_FIELD_NAME);
+        assertTrue(tsColIdx >= 0);
+
+        DocBatchRowReader row0 = batch.getRowReader(0);
+        assertEquals(RowType.LONG, row0.getBaseType(tsColIdx));
+        assertEquals(1704067200000L, row0.getLongValue(tsColIdx));
+        assertEquals(1704067200000L, req.getRawTimestamp());
+
+        batch.close();
+    }
+
+    public void testNeedsLogsTimestampSharedAcrossBatch() throws IOException {
+        List<IndexRequest> requests = new ArrayList<>();
+        IndexRequest req0 = new IndexRequest("test").id("1").source("{\"name\":\"alice\"}", XContentType.JSON);
+        req0.setNeedsLogsTimestamp(true);
+        requests.add(req0);
+
+        IndexRequest req1 = new IndexRequest("test").id("2").source("{\"name\":\"bob\"}", XContentType.JSON);
+        req1.setNeedsLogsTimestamp(true);
+        requests.add(req1);
+
+        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(requests);
+
+        DocBatchSchema schema = batch.schema();
+        int tsColIdx = schema.getColumnIndex(DataStream.TIMESTAMP_FIELD_NAME);
+
+        // Both generated timestamps should be the same (shared within batch)
+        String ts0 = batch.getRowReader(0).getStringValue(tsColIdx);
+        String ts1 = batch.getRowReader(1).getStringValue(tsColIdx);
+        assertEquals(ts0, ts1);
+        assertEquals(ts0, req0.getRawTimestamp());
+        assertEquals(ts1, req1.getRawTimestamp());
 
         batch.close();
     }

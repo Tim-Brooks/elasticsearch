@@ -286,7 +286,7 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
                     );
                     IngestService.setPipelineOnRequest(indexRequest, pipeline);
                 }
-                hasIndexRequestsWithPipelines |= IngestService.hasPipeline(indexRequest);
+                hasIndexRequestsWithPipelines |= indexRequest.isNeedsLogsTimestamp() == false && IngestService.hasPipeline(indexRequest);
             }
 
             if (actionRequest instanceof IndexRequest ir) {

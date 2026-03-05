@@ -10,6 +10,7 @@
 package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.cluster.metadata.DataStream;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.bytes.CompositeBytesReference;
@@ -27,6 +28,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Supplier;
@@ -55,6 +59,10 @@ public class DocumentBatchRowEncoder {
         int[] rowOffsets = new int[docCount];
         int[] rowLengths = new int[docCount];
 
+        // Lazily generated timestamp bytes, shared across all docs in the batch that need it
+        XContentString.UTF8Bytes generatedTimestampBytes = null;
+        String generatedTimestampString = null;
+
         try (RecyclerBytesStreamOutput rowOutput = supplier.get()) {
             for (int docIdx = 0; docIdx < docCount; docIdx++) {
                 IndexRequest request = requests.get(docIdx);
@@ -69,6 +77,14 @@ public class DocumentBatchRowEncoder {
                 Arrays.fill(scratch.typeBytes, 0, columnCountBefore, (byte) 0);
                 Arrays.fill(scratch.varData, 0, columnCountBefore, null);
 
+                // If this request needs a logs timestamp, ensure the @timestamp column exists before parsing
+                boolean needsLogsTimestamp = request.isNeedsLogsTimestamp();
+                int tsColIdx = -1;
+                if (needsLogsTimestamp) {
+                    tsColIdx = schema.appendColumn(DataStream.TIMESTAMP_FIELD_NAME);
+                    scratch.ensureCapacity(tsColIdx + 1);
+                }
+
                 // Parse document, populating scratch buffers
                 try (
                     XContentParser parser = XContentHelper.createParserNotCompressed(
@@ -80,6 +96,32 @@ public class DocumentBatchRowEncoder {
                     parser.allowDuplicateKeys(true);
                     parser.nextToken(); // START_OBJECT
                     flattenObject(parser, "", 0, schema, scratch, xContentType);
+                }
+
+                // Handle @timestamp for logs: generate if missing, then set rawTimestamp on the request
+                if (needsLogsTimestamp) {
+                    byte tsType = scratch.typeBytes[tsColIdx];
+                    if (tsType == RowType.NULL) {
+                        // No @timestamp in the document, generate one
+                        if (generatedTimestampBytes == null) {
+                            generatedTimestampString = DateTimeFormatter.ISO_INSTANT.format(ZonedDateTime.now(ZoneOffset.UTC));
+                            generatedTimestampBytes = new XContentString.UTF8Bytes(
+                                generatedTimestampString.getBytes(StandardCharsets.UTF_8)
+                            );
+                        }
+                        scratch.typeBytes[tsColIdx] = RowType.STRING;
+                        scratch.varData[tsColIdx] = generatedTimestampBytes;
+                        request.setRawTimestamp(generatedTimestampString);
+                    } else {
+                        // @timestamp was parsed from the doc, extract its value for rawTimestamp
+                        byte baseType = RowType.baseType(tsType);
+                        if (baseType == RowType.STRING) {
+                            XContentString.UTF8Bytes bytes = (XContentString.UTF8Bytes) scratch.varData[tsColIdx];
+                            request.setRawTimestamp(new String(bytes.bytes(), bytes.offset(), bytes.length(), StandardCharsets.UTF_8));
+                        } else if (baseType == RowType.LONG) {
+                            request.setRawTimestamp(readLongFromFixed(scratch.fixedData, tsColIdx));
+                        }
+                    }
                 }
 
                 // Write row to output
@@ -302,5 +344,13 @@ public class DocumentBatchRowEncoder {
         fixedData[offset + 5] = (byte) (value >>> 16);
         fixedData[offset + 6] = (byte) (value >>> 8);
         fixedData[offset + 7] = (byte) value;
+    }
+
+    private static long readLongFromFixed(byte[] fixedData, int colIdx) {
+        int offset = colIdx * 8;
+        return ((long) (fixedData[offset] & 0xFF) << 56) | ((long) (fixedData[offset + 1] & 0xFF) << 48) | ((long) (fixedData[offset + 2]
+            & 0xFF) << 40) | ((long) (fixedData[offset + 3] & 0xFF) << 32) | ((long) (fixedData[offset + 4] & 0xFF) << 24)
+            | ((long) (fixedData[offset + 5] & 0xFF) << 16) | ((long) (fixedData[offset + 6] & 0xFF) << 8) | ((long) (fixedData[offset + 7]
+                & 0xFF));
     }
 }

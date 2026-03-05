@@ -153,7 +153,16 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
      * rawTimestamp field is used on the coordinate node, it doesn't need to be serialised.
      */
     private Object rawTimestamp;
+    private boolean needsLogsTimestamp;
     private BytesRef tsid;
+
+    public void setNeedsLogsTimestamp(boolean needsLogsTimestamp) {
+        this.needsLogsTimestamp = needsLogsTimestamp;
+    }
+
+    public boolean isNeedsLogsTimestamp() {
+        return needsLogsTimestamp;
+    }
 
     public IndexRequest(StreamInput in) throws IOException {
         this(null, in);
