@@ -416,7 +416,8 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         }
         indexRequest.setFinalPipeline(resolvedPipelines.finalPipeline);
         indexRequest.isPipelineResolved(true);
-        if (resolvedPipelines.finalPipeline == null && "logs@default-pipeline".equals(resolvedPipelines.defaultPipeline)) {
+        if ((resolvedPipelines.finalPipeline == null || NOOP_PIPELINE_NAME.equals(resolvedPipelines.finalPipeline))
+            && "logs@default-pipeline".equals(resolvedPipelines.defaultPipeline)) {
             indexRequest.setNeedsLogsTimestamp(true);
         }
     }

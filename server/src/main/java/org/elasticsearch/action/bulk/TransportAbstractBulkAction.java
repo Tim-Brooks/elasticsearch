@@ -275,6 +275,7 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
         }
 
         Map<String, IngestService.Pipelines> resolvedPipelineCache = new HashMap<>();
+        boolean hasLogsCustomPipeline = ingestService.getPipeline(projectId, "logs@custom") != null;
         for (DocWriteRequest<?> actionRequest : bulkRequest.requests) {
             IndexRequest indexRequest = getIndexWriteRequest(actionRequest);
             if (indexRequest != null) {
@@ -285,6 +286,9 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
                         (index) -> IngestService.resolvePipelines(actionRequest, indexRequest, project, System.currentTimeMillis())
                     );
                     IngestService.setPipelineOnRequest(indexRequest, pipeline);
+                }
+                if (hasLogsCustomPipeline && indexRequest.isNeedsLogsTimestamp()) {
+                    indexRequest.setNeedsLogsTimestamp(false);
                 }
                 hasIndexRequestsWithPipelines |= indexRequest.isNeedsLogsTimestamp() == false && IngestService.hasPipeline(indexRequest);
             }
