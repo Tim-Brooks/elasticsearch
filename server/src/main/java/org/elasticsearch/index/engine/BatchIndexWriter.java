@@ -24,10 +24,10 @@ public class BatchIndexWriter {
 
     public void batchAddDocuments(Iterable<LuceneDocument> docs) throws IOException {
         // indexWriter.batchAddDocuments(docs);
-        // for (LuceneDocument doc : docs) {
-        // indexWriter.addDocument(doc);
-        // }
+        for (LuceneDocument doc : docs) {
+            indexWriter.addDocument(doc);
+        }
         // TODO: Breaks on index sort
-        indexWriter.addDocuments(docs);
+        // indexWriter.addDocuments(docs);
     }
 }

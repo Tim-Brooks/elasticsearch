@@ -154,6 +154,15 @@ public final class DocBatchRowReader {
         }
     }
 
+    /**
+     * Creates a forward-only iterator over this row's columns.
+     * The iterator tracks the fixed-section offset incrementally, avoiding O(col)
+     * recomputation on each value access.
+     */
+    public DocBatchRowIterator iterator() {
+        return new DocBatchRowIterator(data, rowOffset, rowColumnCount, fixedSectionOffset, varSectionOffset);
+    }
+
     @FunctionalInterface
     public interface FieldConsumer {
         void accept(int columnIndex, byte typeByte);

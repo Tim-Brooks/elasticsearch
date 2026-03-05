@@ -9,6 +9,7 @@
 
 package org.elasticsearch.index.mapper;
 
+import org.elasticsearch.action.bulk.DocBatchRowIterator;
 import org.elasticsearch.action.bulk.DocBatchRowReader;
 import org.elasticsearch.action.bulk.RowType;
 import org.elasticsearch.core.RestApiVersion;
@@ -25,8 +26,8 @@ import java.io.IOException;
 import java.nio.CharBuffer;
 
 /**
- * An XContentParser adapter that presents a single field value from a {@link DocBatchRowReader}
- * as an XContentParser. Parallel to {@link ColumnValueXContentParser} but for row-oriented data.
+ * An XContentParser adapter that presents a single field value from a row-oriented batch
+ * as an XContentParser.
  *
  * <p>Two modes of operation:</p>
  * <ul>
@@ -35,6 +36,27 @@ import java.nio.CharBuffer;
  * </ul>
  */
 public class RowValueXContentParser extends AbstractXContentParser {
+
+    /**
+     * Create a parser for a leaf scalar value using a {@link DocBatchRowIterator} positioned at the target column.
+     * The iterator's cursor must remain stable while this parser is in use.
+     */
+    public static RowValueXContentParser forLeafValue(DocBatchRowIterator iterator) {
+        return new RowValueXContentParser(iterator);
+    }
+
+    /**
+     * Create a parser that delegates to a standard XContentParser wrapping raw binary (array/nested) data,
+     * using a {@link DocBatchRowIterator} positioned at the target column.
+     */
+    public static XContentParser forBinary(DocBatchRowIterator iterator, XContentType xContentType) throws IOException {
+        byte[] bytes = iterator.binaryValue();
+        if (bytes == null || bytes.length == 0) {
+            return ColumnValueXContentParser.forNullValue();
+        }
+        return xContentType.xContent()
+            .createParser(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, new java.io.ByteArrayInputStream(bytes));
+    }
 
     /**
      * Create a parser for a leaf scalar value from a row column.
@@ -55,17 +77,36 @@ public class RowValueXContentParser extends AbstractXContentParser {
             .createParser(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, new java.io.ByteArrayInputStream(bytes));
     }
 
+    // Iterator-backed fields (used when iterator != null)
+    private final DocBatchRowIterator iterator;
+
+    // Reader-backed fields (used when iterator == null)
     private final DocBatchRowReader reader;
     private final int col;
+
     private Token currentToken;
     private boolean closed;
 
+    private RowValueXContentParser(DocBatchRowIterator iterator) {
+        super(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, RestApiVersion.current());
+        this.iterator = iterator;
+        this.reader = null;
+        this.col = -1;
+        this.currentToken = null;
+        this.closed = false;
+    }
+
     private RowValueXContentParser(DocBatchRowReader reader, int col) {
         super(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, RestApiVersion.current());
+        this.iterator = null;
         this.reader = reader;
         this.col = col;
         this.currentToken = null;
         this.closed = false;
+    }
+
+    private byte baseType() {
+        return iterator != null ? iterator.baseType() : reader.getBaseType(col);
     }
 
     @Override
@@ -81,7 +122,7 @@ public class RowValueXContentParser extends AbstractXContentParser {
     }
 
     private Token leafToken() {
-        byte baseType = reader.getBaseType(col);
+        byte baseType = baseType();
         return switch (baseType) {
             case RowType.NULL -> Token.VALUE_NULL;
             case RowType.TRUE, RowType.FALSE -> Token.VALUE_BOOLEAN;
@@ -89,7 +130,9 @@ public class RowValueXContentParser extends AbstractXContentParser {
             case RowType.DOUBLE -> Token.VALUE_NUMBER;
             case RowType.STRING -> Token.VALUE_STRING;
             case RowType.BINARY, RowType.ARRAY -> Token.VALUE_EMBEDDED_OBJECT;
-            default -> throw new IllegalStateException("Unsupported row type: " + RowType.name(reader.getTypeByte(col)));
+            default -> throw new IllegalStateException(
+                "Unsupported row type: " + RowType.name(iterator != null ? iterator.typeByte() : reader.getTypeByte(col))
+            );
         };
     }
 
@@ -110,7 +153,17 @@ public class RowValueXContentParser extends AbstractXContentParser {
 
     @Override
     public String text() throws IOException {
-        byte baseType = reader.getBaseType(col);
+        byte baseType = baseType();
+        if (iterator != null) {
+            return switch (baseType) {
+                case RowType.STRING -> iterator.stringValue();
+                case RowType.LONG -> Long.toString(iterator.longValue());
+                case RowType.DOUBLE -> Double.toString(iterator.doubleValue());
+                case RowType.TRUE -> "true";
+                case RowType.FALSE -> "false";
+                default -> null;
+            };
+        }
         return switch (baseType) {
             case RowType.STRING -> reader.getStringValue(col);
             case RowType.LONG -> Long.toString(reader.getLongValue(col));
@@ -123,7 +176,12 @@ public class RowValueXContentParser extends AbstractXContentParser {
 
     @Override
     public XContentString optimizedText() throws IOException {
-        if (reader.getBaseType(col) == RowType.STRING) {
+        if (baseType() == RowType.STRING) {
+            if (iterator != null) {
+                return new Text(
+                    new XContentString.UTF8Bytes(iterator.stringRawBytes(), iterator.stringRawOffset(), iterator.stringRawLength())
+                );
+            }
             return new Text(
                 new XContentString.UTF8Bytes(reader.getStringRawBytes(col), reader.getStringRawOffset(col), reader.getStringRawLength(col))
             );
@@ -161,7 +219,14 @@ public class RowValueXContentParser extends AbstractXContentParser {
 
     @Override
     public Number numberValue() throws IOException {
-        byte baseType = reader.getBaseType(col);
+        byte baseType = baseType();
+        if (iterator != null) {
+            return switch (baseType) {
+                case RowType.LONG -> iterator.longValue();
+                case RowType.DOUBLE -> iterator.doubleValue();
+                default -> null;
+            };
+        }
         return switch (baseType) {
             case RowType.LONG -> reader.getLongValue(col);
             case RowType.DOUBLE -> reader.getDoubleValue(col);
@@ -171,7 +236,7 @@ public class RowValueXContentParser extends AbstractXContentParser {
 
     @Override
     public NumberType numberType() throws IOException {
-        byte baseType = reader.getBaseType(col);
+        byte baseType = baseType();
         return switch (baseType) {
             case RowType.LONG -> NumberType.LONG;
             case RowType.DOUBLE -> NumberType.DOUBLE;
@@ -181,40 +246,40 @@ public class RowValueXContentParser extends AbstractXContentParser {
 
     @Override
     protected boolean doBooleanValue() throws IOException {
-        return reader.getBooleanValue(col);
+        return iterator != null ? iterator.booleanValue() : reader.getBooleanValue(col);
     }
 
     @Override
     protected short doShortValue() throws IOException {
-        return (short) reader.getLongValue(col);
+        return (short) (iterator != null ? iterator.longValue() : reader.getLongValue(col));
     }
 
     @Override
     protected int doIntValue() throws IOException {
-        return (int) reader.getLongValue(col);
+        return (int) (iterator != null ? iterator.longValue() : reader.getLongValue(col));
     }
 
     @Override
     protected long doLongValue() throws IOException {
-        return reader.getLongValue(col);
+        return iterator != null ? iterator.longValue() : reader.getLongValue(col);
     }
 
     @Override
     protected float doFloatValue() throws IOException {
-        byte baseType = reader.getBaseType(col);
+        byte baseType = baseType();
         if (baseType == RowType.DOUBLE) {
-            return (float) reader.getDoubleValue(col);
+            return (float) (iterator != null ? iterator.doubleValue() : reader.getDoubleValue(col));
         }
-        return (float) reader.getLongValue(col);
+        return (float) (iterator != null ? iterator.longValue() : reader.getLongValue(col));
     }
 
     @Override
     protected double doDoubleValue() throws IOException {
-        byte baseType = reader.getBaseType(col);
+        byte baseType = baseType();
         if (baseType == RowType.DOUBLE) {
-            return reader.getDoubleValue(col);
+            return iterator != null ? iterator.doubleValue() : reader.getDoubleValue(col);
         }
-        return reader.getLongValue(col);
+        return iterator != null ? iterator.longValue() : reader.getLongValue(col);
     }
 
     @Override
@@ -235,9 +300,9 @@ public class RowValueXContentParser extends AbstractXContentParser {
 
     @Override
     public byte[] binaryValue() throws IOException {
-        byte baseType = reader.getBaseType(col);
+        byte baseType = baseType();
         if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
-            return reader.getBinaryValue(col);
+            return iterator != null ? iterator.binaryValue() : reader.getBinaryValue(col);
         }
         return null;
     }

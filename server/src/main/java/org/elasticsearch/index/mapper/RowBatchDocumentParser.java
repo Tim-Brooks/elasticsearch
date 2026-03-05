@@ -12,6 +12,7 @@ package org.elasticsearch.index.mapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.action.bulk.DocBatchRowIterator;
 import org.elasticsearch.action.bulk.DocBatchRowReader;
 import org.elasticsearch.action.bulk.DocBatchSchema;
 import org.elasticsearch.action.bulk.RowDocumentBatch;
@@ -197,36 +198,35 @@ public final class RowBatchDocumentParser {
                     metadataMapper.preParse(contexts[i]);
                 }
 
-                // Step 4: Get row reader and parse fields
+                // Step 4: Get row iterator and parse fields
                 DocBatchRowReader rowReader = rowBatch.getRowReader(i);
-                final int docIdx = i;
-                final XContentType docXContentType = xContentType;
+                DocBatchRowIterator rowIterator = rowReader.iterator();
 
-                rowReader.forEachField((col, typeByte) -> {
-                    if (exceptions[docIdx] != null) return;
+                while (rowIterator.next()) {
+                    if (exceptions[i] != null) break;
+                    if (rowIterator.isNull()) continue;
+
+                    int col = rowIterator.column();
+                    Mapper mapper = columnMappers[col];
+                    if (mapper == null) {
+                        continue; // unmapped field, skip
+                    }
+
                     try {
-                        Mapper mapper = columnMappers[col];
-                        if (mapper == null) {
-                            return; // unmapped field, skip
-                        }
-
                         String[] parentSegments = columnParentSegments[col];
-                        byte baseType = RowType.baseType(typeByte);
+                        byte baseType = rowIterator.baseType();
 
                         if (mapper instanceof FieldMapper fieldMapper) {
-                            parseFieldForDocument(fieldMapper, rowReader, col, baseType, contexts[docIdx], parentSegments, docXContentType);
+                            parseFieldForDocument(fieldMapper, rowIterator, baseType, contexts[i], parentSegments, xContentType);
                         } else if (mapper instanceof ObjectMapper) {
                             if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
-                                parseBinaryObjectForDocument(rowReader, col, contexts[docIdx], mapper, parentSegments, docXContentType);
+                                parseBinaryObjectForDocument(rowIterator, contexts[i], mapper, parentSegments, xContentType);
                             }
                         }
                     } catch (Exception e) {
-                        // if (ThreadLocalRandom.current().nextInt(1000) < 10) {
-                        // logger.error("Exception parsing row " + indexRequest.source().utf8ToString(), e);
-                        // }
-                        exceptions[docIdx] = e;
+                        exceptions[i] = e;
                     }
-                });
+                }
 
                 if (exceptions[i] != null) continue;
 
@@ -266,8 +266,7 @@ public final class RowBatchDocumentParser {
 
     private static void parseFieldForDocument(
         FieldMapper fieldMapper,
-        DocBatchRowReader rowReader,
-        int col,
+        DocBatchRowIterator iterator,
         byte baseType,
         BatchDocumentParserContext context,
         String[] parentSegments,
@@ -279,7 +278,7 @@ public final class RowBatchDocumentParser {
                 // Array field where mapper expects individual scalar values.
                 // Iterate through array elements, calling parse() for each one,
                 // mimicking DocumentParser.parseNonDynamicArray().
-                XContentParser arrayParser = RowValueXContentParser.forBinary(rowReader, col, xContentType);
+                XContentParser arrayParser = RowValueXContentParser.forBinary(iterator, xContentType);
                 try {
                     XContentParser.Token token = arrayParser.nextToken(); // START_ARRAY
                     assert token == XContentParser.Token.START_ARRAY;
@@ -293,9 +292,9 @@ public final class RowBatchDocumentParser {
             } else {
                 XContentParser fieldParser;
                 if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
-                    fieldParser = RowValueXContentParser.forBinary(rowReader, col, xContentType);
+                    fieldParser = RowValueXContentParser.forBinary(iterator, xContentType);
                 } else {
-                    fieldParser = RowValueXContentParser.forLeafValue(rowReader, col);
+                    fieldParser = RowValueXContentParser.forLeafValue(iterator);
                 }
 
                 try {
@@ -312,8 +311,7 @@ public final class RowBatchDocumentParser {
     }
 
     private static void parseBinaryObjectForDocument(
-        DocBatchRowReader rowReader,
-        int col,
+        DocBatchRowIterator iterator,
         BatchDocumentParserContext context,
         Mapper mapper,
         String[] parentSegments,
@@ -321,7 +319,7 @@ public final class RowBatchDocumentParser {
     ) throws IOException {
         setPathForField(parentSegments, context.path());
         try {
-            XContentParser binaryParser = RowValueXContentParser.forBinary(rowReader, col, xContentType);
+            XContentParser binaryParser = RowValueXContentParser.forBinary(iterator, xContentType);
             try {
                 binaryParser.nextToken();
                 DocumentParserContext subContext = context.switchParser(binaryParser);
