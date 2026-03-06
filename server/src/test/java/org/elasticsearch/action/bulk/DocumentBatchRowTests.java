@@ -232,15 +232,19 @@ public class DocumentBatchRowTests extends ESTestCase {
         RowDocumentBatch batch = DocumentBatchRowEncoder.encode(requests);
 
         // Doc 0: both fields present
-        DocBatchRowReader row0 = batch.getRowReader(0);
+        DocBatchRowIterator it0 = batch.getRowReader(0).iterator();
         List<Integer> row0Cols = new ArrayList<>();
-        row0.forEachField((col, typeByte) -> row0Cols.add(col));
+        while (it0.next()) {
+            if (!it0.isNull()) row0Cols.add(it0.column());
+        }
         assertEquals(List.of(0, 1), row0Cols);
 
         // Doc 1: only 'b' present, 'a' is NULL
-        DocBatchRowReader row1 = batch.getRowReader(1);
+        DocBatchRowIterator it1 = batch.getRowReader(1).iterator();
         List<Integer> row1Cols = new ArrayList<>();
-        row1.forEachField((col, typeByte) -> row1Cols.add(col));
+        while (it1.next()) {
+            if (!it1.isNull()) row1Cols.add(it1.column());
+        }
         assertEquals(List.of(1), row1Cols);
 
         batch.close();
@@ -258,9 +262,12 @@ public class DocumentBatchRowTests extends ESTestCase {
         DocBatchRowReader row0 = batch.getRowReader(0);
         assertEquals(0, row0.columnCount());
 
-        // forEachField should not call the consumer
+        // iterator should produce no non-null columns
+        DocBatchRowIterator it0 = row0.iterator();
         List<Integer> cols = new ArrayList<>();
-        row0.forEachField((col, typeByte) -> cols.add(col));
+        while (it0.next()) {
+            if (!it0.isNull()) cols.add(it0.column());
+        }
         assertTrue(cols.isEmpty());
 
         batch.close();

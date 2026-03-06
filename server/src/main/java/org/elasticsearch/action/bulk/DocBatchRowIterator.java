@@ -31,23 +31,23 @@ import java.nio.charset.StandardCharsets;
 public final class DocBatchRowIterator {
 
     private final BytesReference data;
+    private final BytesReference fixedData;
+    private final BytesReference varData;
     private final int typeBytesOffset;
-    private final int varSectionOffset;
     private final int rowColumnCount;
 
     // Cursor state
-    private int col;
+    private int col = -1;
     private byte typeByte;
     private byte baseType;
-    private int fixedOffset;
+    private int fixedOffset = 0;
 
-    DocBatchRowIterator(BytesReference data, int rowOffset, int rowColumnCount, int fixedSectionOffset, int varSectionOffset) {
+    DocBatchRowIterator(BytesReference data, int rowColumnCount, int fixedSectionOffset, int varSectionOffset) {
         this.data = data;
-        this.typeBytesOffset = rowOffset + 4;
-        this.varSectionOffset = varSectionOffset;
+        this.fixedData = data.slice(fixedSectionOffset, varSectionOffset - fixedSectionOffset);
+        this.varData = data.slice(varSectionOffset, data.length() - varSectionOffset);
+        this.typeBytesOffset = 4;
         this.rowColumnCount = rowColumnCount;
-        this.col = -1;
-        this.fixedOffset = fixedSectionOffset;
     }
 
     /**
@@ -93,7 +93,7 @@ public final class DocBatchRowIterator {
     }
 
     public long longValue() {
-        return data.getLong(fixedOffset);
+        return fixedData.getLong(fixedOffset);
     }
 
     public double doubleValue() {
@@ -101,23 +101,23 @@ public final class DocBatchRowIterator {
     }
 
     public String stringValue() {
-        int varOffset = data.getInt(fixedOffset);
-        int varLength = data.getInt(fixedOffset + 4);
-        BytesRef bytesRef = data.slice(varSectionOffset + varOffset, varLength).toBytesRef();
+        int varOffset = fixedData.getInt(fixedOffset);
+        int varLength = fixedData.getInt(fixedOffset + 4);
+        BytesRef bytesRef = varData.slice(varOffset, varLength).toBytesRef();
         return new String(bytesRef.bytes, bytesRef.offset, bytesRef.length, StandardCharsets.UTF_8);
     }
 
     public XContentString.UTF8Bytes stringUTF8Bytes() {
-        int varOffset = data.getInt(fixedOffset);
-        int varLength = data.getInt(fixedOffset + 4);
-        BytesRef bytesRef = data.slice(varSectionOffset + varOffset, varLength).toBytesRef();
+        int varOffset = fixedData.getInt(fixedOffset);
+        int varLength = fixedData.getInt(fixedOffset + 4);
+        BytesRef bytesRef = varData.slice(varOffset, varLength).toBytesRef();
         return new XContentString.UTF8Bytes(bytesRef.bytes, bytesRef.offset, bytesRef.length);
     }
 
     public byte[] binaryValue() {
-        int varOffset = data.getInt(fixedOffset);
-        int varLength = data.getInt(fixedOffset + 4);
-        BytesRef bytesRef = data.slice(varSectionOffset + varOffset, varLength).toBytesRef();
+        int varOffset = fixedData.getInt(fixedOffset);
+        int varLength = fixedData.getInt(fixedOffset + 4);
+        BytesRef bytesRef = varData.slice(varOffset, varLength).toBytesRef();
         byte[] result = new byte[varLength];
         System.arraycopy(bytesRef.bytes, bytesRef.offset, result, 0, varLength);
         return result;

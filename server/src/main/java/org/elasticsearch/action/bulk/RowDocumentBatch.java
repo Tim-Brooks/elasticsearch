@@ -108,7 +108,7 @@ public final class RowDocumentBatch implements Releasable, Accountable {
         int entryOffset = docIndexOffset + docIndex * 8;
         int rowDataOffset = data.getInt(entryOffset);
         int rowDataLength = data.getInt(entryOffset + 4);
-        return new DocBatchRowReader(data, dataOffset + rowDataOffset, rowDataLength, schema);
+        return new DocBatchRowReader(data.slice(dataOffset + rowDataOffset, rowDataLength), schema);
     }
 
     @Override
