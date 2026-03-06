@@ -182,27 +182,28 @@ public class DocumentBatchRowEncoder {
             }
             String fieldName = parser.currentName();
 
-            String columnPath;
-            int fieldPathLen;
-            if (prefixLen == 0) {
-                columnPath = fieldName;
-                fieldPathLen = fieldName.length();
-                pathBuilder.setLength(0);
-                pathBuilder.append(fieldName);
-            } else {
-                pathBuilder.setLength(prefixLen);
-                pathBuilder.append('.').append(fieldName);
-                fieldPathLen = pathBuilder.length();
-                columnPath = pathBuilder.toString();
-            }
-
             token = parser.nextToken(); // value token
 
             if (token == XContentParser.Token.START_OBJECT) {
-                flattenObject(parser, fieldPathLen, objectDepth + 1, schema, scratch, xContentType);
+                if (prefixLen == 0) {
+                    pathBuilder.setLength(0);
+                    pathBuilder.append(fieldName);
+                } else {
+                    pathBuilder.setLength(prefixLen);
+                    pathBuilder.append('.').append(fieldName);
+                }
+                flattenObject(parser, pathBuilder.length(), objectDepth + 1, schema, scratch, xContentType);
                 continue;
             }
 
+            String columnPath;
+            if (prefixLen == 0) {
+                columnPath = fieldName;
+            } else {
+                pathBuilder.setLength(prefixLen);
+                pathBuilder.append('.').append(fieldName);
+                columnPath = pathBuilder.toString();
+            }
             int colIdx = schema.appendColumn(columnPath);
             scratch.ensureCapacity(colIdx + 1);
 
