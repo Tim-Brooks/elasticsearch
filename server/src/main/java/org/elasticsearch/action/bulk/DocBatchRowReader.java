@@ -24,7 +24,7 @@ import java.nio.charset.StandardCharsets;
  */
 public final class DocBatchRowReader {
 
-    private static final int TYPE_BYTES_OFFSET = 4;
+    public static final int TYPE_BYTES_OFFSET = 4;
 
     private final DocBatchSchema schema;
     private final BytesReference rowData;

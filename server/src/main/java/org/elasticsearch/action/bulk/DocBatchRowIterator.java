@@ -11,6 +11,7 @@ package org.elasticsearch.action.bulk;
 
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.xcontent.XContentString;
 
 import java.nio.charset.StandardCharsets;
@@ -33,7 +34,8 @@ public final class DocBatchRowIterator {
     private final BytesReference data;
     private final BytesReference fixedData;
     private final BytesReference varData;
-    private final int typeBytesOffset;
+    private final boolean fixedDataHasArray;
+    private final boolean varDataHasArray;
     private final int rowColumnCount;
 
     // Cursor state
@@ -46,7 +48,8 @@ public final class DocBatchRowIterator {
         this.data = data;
         this.fixedData = data.slice(fixedSectionOffset, varSectionOffset - fixedSectionOffset);
         this.varData = data.slice(varSectionOffset, data.length() - varSectionOffset);
-        this.typeBytesOffset = 4;
+        this.fixedDataHasArray = fixedData.hasArray();
+        this.varDataHasArray = varData.hasArray();
         this.rowColumnCount = rowColumnCount;
     }
 
@@ -61,7 +64,7 @@ public final class DocBatchRowIterator {
         if (col >= rowColumnCount) {
             return false;
         }
-        typeByte = data.get(typeBytesOffset + col);
+        typeByte = data.get(DocBatchRowReader.TYPE_BYTES_OFFSET + col);
         baseType = RowType.baseType(typeByte);
         return true;
     }
@@ -93,7 +96,7 @@ public final class DocBatchRowIterator {
     }
 
     public long longValue() {
-        return fixedData.getLong(fixedOffset);
+        return readFixedLong();
     }
 
     public double doubleValue() {
@@ -101,25 +104,42 @@ public final class DocBatchRowIterator {
     }
 
     public String stringValue() {
-        int varOffset = fixedData.getInt(fixedOffset);
-        int varLength = fixedData.getInt(fixedOffset + 4);
-        BytesRef bytesRef = varData.slice(varOffset, varLength).toBytesRef();
+        long packed = readFixedLong();
+        int varOffset = (int) (packed >>> 32);
+        int varLength = (int) packed;
+        BytesRef bytesRef = getBytesRef(varOffset, varLength);
         return new String(bytesRef.bytes, bytesRef.offset, bytesRef.length, StandardCharsets.UTF_8);
     }
 
     public XContentString.UTF8Bytes stringUTF8Bytes() {
-        int varOffset = fixedData.getInt(fixedOffset);
-        int varLength = fixedData.getInt(fixedOffset + 4);
-        BytesRef bytesRef = varData.slice(varOffset, varLength).toBytesRef();
+        long packed = readFixedLong();
+        int varOffset = (int) (packed >>> 32);
+        int varLength = (int) packed;
+        BytesRef bytesRef = getBytesRef(varOffset, varLength);
         return new XContentString.UTF8Bytes(bytesRef.bytes, bytesRef.offset, bytesRef.length);
     }
 
     public byte[] binaryValue() {
-        int varOffset = fixedData.getInt(fixedOffset);
-        int varLength = fixedData.getInt(fixedOffset + 4);
-        BytesRef bytesRef = varData.slice(varOffset, varLength).toBytesRef();
+        long packed = readFixedLong();
+        int varOffset = (int) (packed >>> 32);
+        int varLength = (int) packed;
+        BytesRef bytesRef = getBytesRef(varOffset, varLength);
         byte[] result = new byte[varLength];
         System.arraycopy(bytesRef.bytes, bytesRef.offset, result, 0, varLength);
         return result;
+    }
+
+    private long readFixedLong() {
+        if (fixedDataHasArray) {
+            return ByteUtils.readLongBE(fixedData.array(), fixedData.arrayOffset() + fixedOffset);
+        }
+        return fixedData.getLong(fixedOffset);
+    }
+
+    private BytesRef getBytesRef(int varOffset, int varLength) {
+        if (varDataHasArray) {
+            return new BytesRef(varData.array(), varData.arrayOffset() + varOffset, varLength);
+        }
+        return varData.slice(varOffset, varLength).toBytesRef();
     }
 }
