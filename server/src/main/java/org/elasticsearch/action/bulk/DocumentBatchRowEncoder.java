@@ -16,6 +16,7 @@ import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.bytes.CompositeBytesReference;
 import org.elasticsearch.common.bytes.ReleasableBytesReference;
 import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
+import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentFactory;
@@ -25,8 +26,6 @@ import org.elasticsearch.xcontent.XContentString;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
@@ -193,9 +192,7 @@ public class DocumentBatchRowEncoder {
 
             switch (token) {
                 case START_ARRAY -> {
-                    BytesReference rawBytes = captureRawXContent(parser, xContentType);
-                    scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.ARRAY | RowType.OBJECT_FLAG) : RowType.ARRAY;
-                    scratch.varData[colIdx] = rawBytes;
+                    encodeArray(parser, xContentType, colIdx, objectDepth, scratch);
                 }
                 case VALUE_STRING -> {
                     scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.STRING | RowType.OBJECT_FLAG) : RowType.STRING;
@@ -231,11 +228,181 @@ public class DocumentBatchRowEncoder {
         }
     }
 
-    private static BytesReference captureRawXContent(XContentParser parser, XContentType xContentType) throws IOException {
-        // TODO: Broken currently
-        try (var builder = XContentFactory.jsonBuilder()) {
-            builder.copyCurrentStructure(parser);
+    /**
+     * Encodes an array value. Attempts to produce a compact typed array (≤8 leaf elements).
+     * Falls back to raw x-content if the array has more than 8 elements or contains non-leaf values.
+     */
+    private static void encodeArray(XContentParser parser, XContentType xContentType, int colIdx, int objectDepth, ScratchBuffers scratch)
+        throws IOException {
+        // Buffer up to MAX_SMALL_ARRAY_SIZE leaf elements
+        int maxSmall = RowType.MAX_SMALL_ARRAY_SIZE;
+        byte[] elemTypes = new byte[maxSmall];
+        long[] elemFixed = new long[maxSmall];
+        XContentString.UTF8Bytes[] elemStrings = new XContentString.UTF8Bytes[maxSmall];
+        int count = 0;
+        boolean fallback = false;
+
+        XContentParser.Token token;
+        while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
+            if (count >= maxSmall || token == XContentParser.Token.START_OBJECT || token == XContentParser.Token.START_ARRAY) {
+                fallback = true;
+                break;
+            }
+            switch (token) {
+                case VALUE_STRING -> {
+                    elemTypes[count] = RowType.STRING;
+                    elemStrings[count] = parser.optimizedText().bytes();
+                }
+                case VALUE_NUMBER -> {
+                    XContentParser.NumberType numType = parser.numberType();
+                    switch (numType) {
+                        case INT, LONG -> {
+                            elemTypes[count] = RowType.LONG;
+                            elemFixed[count] = parser.longValue();
+                        }
+                        case FLOAT, DOUBLE -> {
+                            elemTypes[count] = RowType.DOUBLE;
+                            elemFixed[count] = Double.doubleToRawLongBits(parser.doubleValue());
+                        }
+                        default -> {
+                            elemTypes[count] = RowType.STRING;
+                            elemStrings[count] = parser.optimizedText().bytes();
+                        }
+                    }
+                }
+                case VALUE_BOOLEAN -> elemTypes[count] = parser.booleanValue() ? RowType.TRUE : RowType.FALSE;
+                case VALUE_NULL -> elemTypes[count] = RowType.NULL;
+                default -> throw new IllegalStateException("Unexpected token in array: " + token);
+            }
+            count++;
+        }
+
+        if (fallback) {
+            // Write buffered elements + remaining tokens as raw x-content
+            BytesReference rawBytes = buildXContentArrayFallback(parser, xContentType, elemTypes, elemFixed, elemStrings, count, token);
+            byte base = RowType.XCONTENT_ARRAY;
+            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (base | RowType.OBJECT_FLAG) : base;
+            scratch.varData[colIdx] = rawBytes;
+        } else {
+            // Serialize as compact typed array
+            byte[] packed = packSmallArray(elemTypes, elemFixed, elemStrings, count);
+            byte base = RowType.ARRAY;
+            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (base | RowType.OBJECT_FLAG) : base;
+            scratch.varData[colIdx] = new BytesArray(packed);
+        }
+    }
+
+    /**
+     * Packs a small array (≤8 leaf elements) into a compact byte format:
+     * count(1) | for each element: type(1) + data
+     * where data is: nothing for NULL/TRUE/FALSE, 8 bytes for LONG/DOUBLE, 4 bytes length + UTF-8 for STRING.
+     */
+    private static byte[] packSmallArray(byte[] elemTypes, long[] elemFixed, XContentString.UTF8Bytes[] elemStrings, int count) {
+        // Compute total size
+        int size = 1; // count byte
+        for (int i = 0; i < count; i++) {
+            size += 1; // type byte
+            switch (elemTypes[i]) {
+                case RowType.LONG, RowType.DOUBLE -> size += 8;
+                case RowType.STRING -> size += 4 + elemStrings[i].length();
+                // NULL, TRUE, FALSE: no data
+            }
+        }
+
+        byte[] packed = new byte[size];
+        packed[0] = (byte) count;
+        int pos = 1;
+        for (int i = 0; i < count; i++) {
+            packed[pos++] = elemTypes[i];
+            switch (elemTypes[i]) {
+                case RowType.LONG, RowType.DOUBLE -> {
+                    ByteUtils.writeLongBE(elemFixed[i], packed, pos);
+                    pos += 8;
+                }
+                case RowType.STRING -> {
+                    XContentString.UTF8Bytes str = elemStrings[i];
+                    int len = str.length();
+                    ByteUtils.writeIntBE(len, packed, pos);
+                    pos += 4;
+                    System.arraycopy(str.bytes(), str.offset(), packed, pos, len);
+                    pos += len;
+                }
+                // NULL, TRUE, FALSE: no additional data
+            }
+        }
+        return packed;
+    }
+
+    /**
+     * Builds a raw x-content array from already-consumed leaf elements plus the remaining parser tokens.
+     * Called when the small array buffer overflows or a non-leaf element is encountered.
+     */
+    private static BytesReference buildXContentArrayFallback(
+        XContentParser parser,
+        XContentType xContentType,
+        byte[] elemTypes,
+        long[] elemFixed,
+        XContentString.UTF8Bytes[] elemStrings,
+        int bufferedCount,
+        XContentParser.Token currentToken
+    ) throws IOException {
+        try (var builder = XContentFactory.contentBuilder(xContentType)) {
+            builder.startArray();
+            // Write buffered elements
+            for (int i = 0; i < bufferedCount; i++) {
+                switch (elemTypes[i]) {
+                    case RowType.STRING -> {
+                        XContentString.UTF8Bytes str = elemStrings[i];
+                        builder.utf8Value(str.bytes(), str.offset(), str.length());
+                    }
+                    case RowType.LONG -> builder.value(elemFixed[i]);
+                    case RowType.DOUBLE -> builder.value(Double.longBitsToDouble(elemFixed[i]));
+                    case RowType.TRUE -> builder.value(true);
+                    case RowType.FALSE -> builder.value(false);
+                    case RowType.NULL -> builder.nullValue();
+                }
+            }
+            // Write the current token and remaining tokens
+            if (currentToken != null && currentToken != XContentParser.Token.END_ARRAY) {
+                if (currentToken == XContentParser.Token.START_OBJECT || currentToken == XContentParser.Token.START_ARRAY) {
+                    builder.copyCurrentStructure(parser);
+                } else {
+                    writeLeafToken(builder, parser, currentToken);
+                }
+                // Continue with remaining tokens
+                while ((currentToken = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
+                    if (currentToken == XContentParser.Token.START_OBJECT || currentToken == XContentParser.Token.START_ARRAY) {
+                        builder.copyCurrentStructure(parser);
+                    } else {
+                        writeLeafToken(builder, parser, currentToken);
+                    }
+                }
+            }
+            builder.endArray();
             return BytesReference.bytes(builder);
+        }
+    }
+
+    private static void writeLeafToken(
+        org.elasticsearch.xcontent.XContentBuilder builder,
+        XContentParser parser,
+        XContentParser.Token token
+    ) throws IOException {
+        switch (token) {
+            case VALUE_STRING -> builder.value(parser.text());
+            case VALUE_NUMBER -> {
+                XContentParser.NumberType numType = parser.numberType();
+                switch (numType) {
+                    case INT -> builder.value(parser.intValue());
+                    case LONG -> builder.value(parser.longValue());
+                    case FLOAT -> builder.value(parser.floatValue());
+                    case DOUBLE -> builder.value(parser.doubleValue());
+                    default -> builder.value(parser.text());
+                }
+            }
+            case VALUE_BOOLEAN -> builder.value(parser.booleanValue());
+            case VALUE_NULL -> builder.nullValue();
+            default -> throw new IllegalStateException("Unexpected token: " + token);
         }
     }
 
@@ -262,10 +429,14 @@ public class DocumentBatchRowEncoder {
                 XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) varData[col];
                 output.writeLong(((long) varOffset << 32) | (str.length() & 0xFFFFFFFFL));
                 varOffset += str.length();
-            } else if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
+            } else if (baseType == RowType.BINARY || baseType == RowType.XCONTENT_ARRAY) {
                 BytesReference ref = (BytesReference) varData[col];
                 output.writeLong(((long) varOffset << 32) | (ref.length() & 0xFFFFFFFFL));
                 varOffset += ref.length();
+            } else if (baseType == RowType.ARRAY) {
+                BytesArray arr = (BytesArray) varData[col];
+                output.writeLong(((long) varOffset << 32) | (arr.length() & 0xFFFFFFFFL));
+                varOffset += arr.length();
             }
         }
 
@@ -275,9 +446,12 @@ public class DocumentBatchRowEncoder {
             if (baseType == RowType.STRING) {
                 XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) varData[col];
                 output.writeBytes(str.bytes(), str.offset(), str.length());
-            } else if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
+            } else if (baseType == RowType.BINARY || baseType == RowType.XCONTENT_ARRAY) {
                 BytesReference ref = (BytesReference) varData[col];
                 ref.writeTo(output);
+            } else if (baseType == RowType.ARRAY) {
+                BytesArray arr = (BytesArray) varData[col];
+                output.writeBytes(arr.array(), arr.arrayOffset(), arr.length());
             }
         }
     }
@@ -297,7 +471,6 @@ public class DocumentBatchRowEncoder {
         int headerTotal = HEADER_SIZE + schemaSize + docIndexSize;
 
         byte[] header = new byte[headerTotal];
-        ByteBuffer buf = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN);
 
         int schemaOffset = HEADER_SIZE;
         int docIndexOffset = schemaOffset + schemaSize;
@@ -305,21 +478,21 @@ public class DocumentBatchRowEncoder {
         int totalSize = headerTotal + rowDataSize;
 
         // Header fields
-        buf.putInt(0, RowDocumentBatch.MAGIC);
-        buf.putInt(4, RowDocumentBatch.VERSION);
-        buf.putInt(8, 0); // flags
-        buf.putInt(12, docCount);
-        buf.putInt(16, schemaOffset);
-        buf.putInt(20, docIndexOffset);
-        buf.putInt(24, dataOffset);
-        buf.putInt(28, totalSize);
+        ByteUtils.writeIntBE(RowDocumentBatch.MAGIC, header, 0);
+        ByteUtils.writeIntBE(RowDocumentBatch.VERSION, header, 4);
+        ByteUtils.writeIntBE(0, header, 8); // flags
+        ByteUtils.writeIntBE(docCount, header, 12);
+        ByteUtils.writeIntBE(schemaOffset, header, 16);
+        ByteUtils.writeIntBE(docIndexOffset, header, 20);
+        ByteUtils.writeIntBE(dataOffset, header, 24);
+        ByteUtils.writeIntBE(totalSize, header, 28);
 
         // Schema section
         int pos = schemaOffset;
-        buf.putInt(pos, columnCount);
+        ByteUtils.writeIntBE(columnCount, header, pos);
         pos += 4;
         for (int i = 0; i < columnCount; i++) {
-            buf.putInt(pos, nameBytes[i].length);
+            ByteUtils.writeIntBE(nameBytes[i].length, header, pos);
             pos += 4;
             System.arraycopy(nameBytes[i], 0, header, pos, nameBytes[i].length);
             pos += nameBytes[i].length;
@@ -327,30 +500,18 @@ public class DocumentBatchRowEncoder {
 
         // Doc index section
         for (int i = 0; i < docCount; i++) {
-            buf.putInt(docIndexOffset + i * 8, rowOffsets[i]);
-            buf.putInt(docIndexOffset + i * 8 + 4, rowLengths[i]);
+            ByteUtils.writeIntBE(rowOffsets[i], header, docIndexOffset + i * 8);
+            ByteUtils.writeIntBE(rowLengths[i], header, docIndexOffset + i * 8 + 4);
         }
 
         return new BytesArray(header);
     }
 
     private static void writeLongToFixed(byte[] fixedData, int colIdx, long value) {
-        int offset = colIdx * 8;
-        fixedData[offset] = (byte) (value >>> 56);
-        fixedData[offset + 1] = (byte) (value >>> 48);
-        fixedData[offset + 2] = (byte) (value >>> 40);
-        fixedData[offset + 3] = (byte) (value >>> 32);
-        fixedData[offset + 4] = (byte) (value >>> 24);
-        fixedData[offset + 5] = (byte) (value >>> 16);
-        fixedData[offset + 6] = (byte) (value >>> 8);
-        fixedData[offset + 7] = (byte) value;
+        ByteUtils.writeLongBE(value, fixedData, colIdx * 8);
     }
 
     private static long readLongFromFixed(byte[] fixedData, int colIdx) {
-        int offset = colIdx * 8;
-        return ((long) (fixedData[offset] & 0xFF) << 56) | ((long) (fixedData[offset + 1] & 0xFF) << 48) | ((long) (fixedData[offset + 2]
-            & 0xFF) << 40) | ((long) (fixedData[offset + 3] & 0xFF) << 32) | ((long) (fixedData[offset + 4] & 0xFF) << 24)
-            | ((long) (fixedData[offset + 5] & 0xFF) << 16) | ((long) (fixedData[offset + 6] & 0xFF) << 8) | ((long) (fixedData[offset + 7]
-                & 0xFF));
+        return ByteUtils.readLongBE(fixedData, colIdx * 8);
     }
 }

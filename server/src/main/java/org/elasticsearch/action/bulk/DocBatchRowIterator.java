@@ -129,6 +129,13 @@ public final class DocBatchRowIterator {
         return result;
     }
 
+    /**
+     * Returns a {@link SmallArrayReader} for the current column (must be ARRAY type).
+     */
+    public SmallArrayReader smallArrayReader() {
+        return new SmallArrayReader(binaryValue());
+    }
+
     private long readFixedLong() {
         if (fixedDataHasArray) {
             return ByteUtils.readLongBE(fixedData.array(), fixedData.arrayOffset() + fixedOffset);

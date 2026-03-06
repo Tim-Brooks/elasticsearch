@@ -85,7 +85,7 @@ public class DocumentBatchRowTests extends ESTestCase {
         batch.close();
     }
 
-    public void testRoundTripWithArrays() throws IOException {
+    public void testRoundTripWithSmallArrays() throws IOException {
         List<IndexRequest> requests = new ArrayList<>();
         requests.add(new IndexRequest("test").id("1").source("{\"name\":\"alice\",\"tags\":[\"a\",\"b\"]}", XContentType.JSON));
         requests.add(new IndexRequest("test").id("2").source("{\"name\":\"bob\",\"tags\":[\"c\"]}", XContentType.JSON));
@@ -103,11 +103,118 @@ public class DocumentBatchRowTests extends ESTestCase {
         assertEquals(RowType.STRING, row0.getBaseType(0));
         assertEquals(RowType.ARRAY, row0.getBaseType(1));
         assertEquals("alice", row0.getStringValue(0));
-        // Array value is raw JSON bytes
+
+        // Small array: read via SmallArrayReader
         byte[] arrayBytes = row0.getArrayValue(1);
+        SmallArrayReader reader = new SmallArrayReader(arrayBytes);
+        assertEquals(2, reader.count());
+        assertTrue(reader.next());
+        assertEquals(RowType.STRING, reader.type());
+        assertEquals("a", reader.stringValue());
+        assertTrue(reader.next());
+        assertEquals(RowType.STRING, reader.type());
+        assertEquals("b", reader.stringValue());
+        assertFalse(reader.next());
+
+        batch.close();
+    }
+
+    public void testSmallArrayWithMixedTypes() throws IOException {
+        List<IndexRequest> requests = new ArrayList<>();
+        requests.add(new IndexRequest("test").id("1").source("{\"data\":[42,\"hello\",true,null,3.14]}", XContentType.JSON));
+
+        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(requests);
+
+        assertEquals(1, batch.docCount());
+        DocBatchRowReader row0 = batch.getRowReader(0);
+        assertEquals(RowType.ARRAY, row0.getBaseType(0));
+
+        byte[] arrayBytes = row0.getArrayValue(0);
+        SmallArrayReader reader = new SmallArrayReader(arrayBytes);
+        assertEquals(5, reader.count());
+
+        assertTrue(reader.next());
+        assertEquals(RowType.LONG, reader.type());
+        assertEquals(42L, reader.longValue());
+
+        assertTrue(reader.next());
+        assertEquals(RowType.STRING, reader.type());
+        assertEquals("hello", reader.stringValue());
+
+        assertTrue(reader.next());
+        assertEquals(RowType.TRUE, reader.type());
+        assertTrue(reader.booleanValue());
+
+        assertTrue(reader.next());
+        assertEquals(RowType.NULL, reader.type());
+        assertTrue(reader.isNull());
+
+        assertTrue(reader.next());
+        assertEquals(RowType.DOUBLE, reader.type());
+        assertEquals(3.14, reader.doubleValue(), 0.001);
+
+        assertFalse(reader.next());
+
+        batch.close();
+    }
+
+    public void testLargeArrayFallsBackToXContent() throws IOException {
+        // Array with >8 elements should fall back to XCONTENT_ARRAY
+        StringBuilder json = new StringBuilder("{\"nums\":[");
+        for (int i = 0; i < 10; i++) {
+            if (i > 0) json.append(",");
+            json.append(i);
+        }
+        json.append("]}");
+
+        List<IndexRequest> requests = new ArrayList<>();
+        requests.add(new IndexRequest("test").id("1").source(json.toString(), XContentType.JSON));
+
+        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(requests);
+
+        DocBatchRowReader row0 = batch.getRowReader(0);
+        assertEquals(RowType.XCONTENT_ARRAY, row0.getBaseType(0));
+
+        // XContent array: raw JSON bytes
+        byte[] arrayBytes = row0.getArrayValue(0);
         String arrayJson = new String(arrayBytes, java.nio.charset.StandardCharsets.UTF_8);
-        assertTrue(arrayJson.contains("\"a\""));
-        assertTrue(arrayJson.contains("\"b\""));
+        assertTrue(arrayJson.startsWith("["));
+        assertTrue(arrayJson.endsWith("]"));
+        assertTrue(arrayJson.contains("0"));
+        assertTrue(arrayJson.contains("9"));
+
+        batch.close();
+    }
+
+    public void testArrayWithNestedObjectFallsBackToXContent() throws IOException {
+        List<IndexRequest> requests = new ArrayList<>();
+        requests.add(new IndexRequest("test").id("1").source("{\"items\":[{\"name\":\"a\"},{\"name\":\"b\"}]}", XContentType.JSON));
+
+        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(requests);
+
+        DocBatchRowReader row0 = batch.getRowReader(0);
+        assertEquals(RowType.XCONTENT_ARRAY, row0.getBaseType(0));
+
+        byte[] arrayBytes = row0.getArrayValue(0);
+        String arrayJson = new String(arrayBytes, java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(arrayJson.contains("\"name\""));
+
+        batch.close();
+    }
+
+    public void testEmptySmallArray() throws IOException {
+        List<IndexRequest> requests = new ArrayList<>();
+        requests.add(new IndexRequest("test").id("1").source("{\"tags\":[]}", XContentType.JSON));
+
+        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(requests);
+
+        DocBatchRowReader row0 = batch.getRowReader(0);
+        assertEquals(RowType.ARRAY, row0.getBaseType(0));
+
+        byte[] arrayBytes = row0.getArrayValue(0);
+        SmallArrayReader reader = new SmallArrayReader(arrayBytes);
+        assertEquals(0, reader.count());
+        assertFalse(reader.next());
 
         batch.close();
     }

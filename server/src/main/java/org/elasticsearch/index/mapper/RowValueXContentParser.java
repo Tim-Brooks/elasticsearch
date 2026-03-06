@@ -11,6 +11,7 @@ package org.elasticsearch.index.mapper;
 
 import org.elasticsearch.action.bulk.DocBatchRowIterator;
 import org.elasticsearch.action.bulk.RowType;
+import org.elasticsearch.action.bulk.SmallArrayReader;
 import org.elasticsearch.core.RestApiVersion;
 import org.elasticsearch.xcontent.DeprecationHandler;
 import org.elasticsearch.xcontent.NamedXContentRegistry;
@@ -52,7 +53,7 @@ public class RowValueXContentParser extends AbstractXContentParser {
     }
 
     /**
-     * Create a parser that delegates to a standard XContentParser wrapping raw binary (array/nested) data,
+     * Create a parser that delegates to a standard XContentParser wrapping raw binary (xcontent array/nested) data,
      * using a {@link DocBatchRowIterator} positioned at the target column.
      */
     public static XContentParser forBinary(DocBatchRowIterator iterator, XContentType xContentType) throws IOException {
@@ -62,6 +63,14 @@ public class RowValueXContentParser extends AbstractXContentParser {
         }
         return xContentType.xContent()
             .createParser(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, new java.io.ByteArrayInputStream(bytes));
+    }
+
+    /**
+     * Create a parser that presents a compact typed array (from a {@link SmallArrayReader}) as
+     * START_ARRAY, element tokens, END_ARRAY.
+     */
+    public static XContentParser forSmallArray(DocBatchRowIterator iterator) {
+        return new SmallArrayXContentParser(iterator.smallArrayReader());
     }
 
     private final DocBatchRowIterator iterator;
@@ -111,7 +120,7 @@ public class RowValueXContentParser extends AbstractXContentParser {
             case RowType.LONG -> Token.VALUE_NUMBER;
             case RowType.DOUBLE -> Token.VALUE_NUMBER;
             case RowType.STRING -> Token.VALUE_STRING;
-            case RowType.BINARY, RowType.ARRAY -> Token.VALUE_EMBEDDED_OBJECT;
+            case RowType.BINARY, RowType.ARRAY, RowType.XCONTENT_ARRAY -> Token.VALUE_EMBEDDED_OBJECT;
             default -> throw new IllegalStateException("Unsupported row type: " + RowType.name(iterator.typeByte()));
         };
     }
@@ -253,7 +262,7 @@ public class RowValueXContentParser extends AbstractXContentParser {
     @Override
     public byte[] binaryValue() throws IOException {
         byte baseType = baseType();
-        if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
+        if (baseType == RowType.BINARY || baseType == RowType.ARRAY || baseType == RowType.XCONTENT_ARRAY) {
             return iterator.binaryValue();
         }
         return null;

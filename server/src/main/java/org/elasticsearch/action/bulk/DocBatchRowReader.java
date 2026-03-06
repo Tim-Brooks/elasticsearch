@@ -113,6 +113,17 @@ public final class DocBatchRowReader {
         return result;
     }
 
+    /**
+     * Returns raw x-content bytes for an XCONTENT_ARRAY column.
+     */
+    public byte[] getXContentArrayValue(int col) {
+        return getBinaryValue(col);
+    }
+
+    /**
+     * Returns raw bytes for a small (typed) ARRAY column.
+     * Use {@link SmallArrayReader} to iterate the elements.
+     */
     public byte[] getArrayValue(int col) {
         return getBinaryValue(col);
     }

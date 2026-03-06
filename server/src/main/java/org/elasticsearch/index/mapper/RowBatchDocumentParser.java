@@ -219,7 +219,7 @@ public final class RowBatchDocumentParser {
                         if (mapper instanceof FieldMapper fieldMapper) {
                             parseFieldForDocument(fieldMapper, rowIterator, baseType, contexts[i], parentSegments, xContentType);
                         } else if (mapper instanceof ObjectMapper) {
-                            if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
+                            if (baseType == RowType.BINARY || baseType == RowType.XCONTENT_ARRAY) {
                                 parseBinaryObjectForDocument(rowIterator, contexts[i], mapper, parentSegments, xContentType);
                             }
                         }
@@ -274,29 +274,20 @@ public final class RowBatchDocumentParser {
     ) throws IOException {
         setPathForField(parentSegments, context.path());
         try {
-            if (baseType == RowType.ARRAY && fieldMapper.parsesArrayValue() == false) {
-                // Array field where mapper expects individual scalar values.
-                // Iterate through array elements, calling parse() for each one,
-                // mimicking DocumentParser.parseNonDynamicArray().
-                XContentParser arrayParser = RowValueXContentParser.forBinary(iterator, xContentType);
-                try {
-                    XContentParser.Token token = arrayParser.nextToken(); // START_ARRAY
-                    assert token == XContentParser.Token.START_ARRAY;
-                    while ((token = arrayParser.nextToken()) != XContentParser.Token.END_ARRAY) {
-                        context.setParser(arrayParser);
-                        fieldMapper.parse(context);
-                    }
-                } finally {
-                    arrayParser.close();
-                }
+            if (baseType == RowType.ARRAY) {
+                // Small typed array
+                parseSmallArrayField(fieldMapper, iterator, context);
+            } else if (baseType == RowType.XCONTENT_ARRAY) {
+                // Raw x-content array (fallback)
+                parseXContentArrayField(fieldMapper, iterator, context, xContentType);
             } else {
+                // Scalar or binary leaf
                 XContentParser fieldParser;
-                if (baseType == RowType.BINARY || baseType == RowType.ARRAY) {
+                if (baseType == RowType.BINARY) {
                     fieldParser = RowValueXContentParser.forBinary(iterator, xContentType);
                 } else {
                     fieldParser = RowValueXContentParser.forLeafValue(iterator);
                 }
-
                 try {
                     fieldParser.nextToken();
                     context.setParser(fieldParser);
@@ -307,6 +298,45 @@ public final class RowBatchDocumentParser {
             }
         } finally {
             resetPath(parentSegments.length, context.path());
+        }
+    }
+
+    private static void parseSmallArrayField(FieldMapper fieldMapper, DocBatchRowIterator iterator, BatchDocumentParserContext context)
+        throws IOException {
+        XContentParser arrayParser = RowValueXContentParser.forSmallArray(iterator);
+        try {
+            parseArrayElements(fieldMapper, arrayParser, context);
+        } finally {
+            arrayParser.close();
+        }
+    }
+
+    private static void parseXContentArrayField(
+        FieldMapper fieldMapper,
+        DocBatchRowIterator iterator,
+        BatchDocumentParserContext context,
+        XContentType xContentType
+    ) throws IOException {
+        XContentParser arrayParser = RowValueXContentParser.forBinary(iterator, xContentType);
+        try {
+            parseArrayElements(fieldMapper, arrayParser, context);
+        } finally {
+            arrayParser.close();
+        }
+    }
+
+    private static void parseArrayElements(FieldMapper fieldMapper, XContentParser arrayParser, BatchDocumentParserContext context)
+        throws IOException {
+        if (fieldMapper.parsesArrayValue()) {
+            arrayParser.nextToken(); // START_ARRAY
+            context.setParser(arrayParser);
+            fieldMapper.parse(context);
+        } else {
+            assert arrayParser.nextToken() == XContentParser.Token.START_ARRAY;
+            while (arrayParser.nextToken() != XContentParser.Token.END_ARRAY) {
+                context.setParser(arrayParser);
+                fieldMapper.parse(context);
+            }
         }
     }
 
