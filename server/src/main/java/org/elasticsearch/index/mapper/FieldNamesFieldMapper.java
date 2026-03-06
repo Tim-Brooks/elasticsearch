@@ -188,7 +188,7 @@ public class FieldNamesFieldMapper extends MetadataFieldMapper {
             return;
         }
         // TODO: Can fix
-//        assert noDocValues(field, context) : "Field " + field + " should not have docvalues";
+        // assert noDocValues(field, context) : "Field " + field + " should not have docvalues";
         context.doc().add(new StringField(NAME, new BytesRef(field.bytes(), field.offset(), field.length()), Field.Store.NO));
     }
 

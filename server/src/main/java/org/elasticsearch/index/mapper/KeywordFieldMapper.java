@@ -1345,34 +1345,12 @@ public final class KeywordFieldMapper extends FieldMapper {
 
         // if the value's length exceeds ignore_above, then don't index it
         if (fieldType().ignoreAbove().isIgnored(value)) {
-            context.addIgnoredField(fullPath());
-
-            // if synthetic source is enabled, then store a copy of the value so that synthetic source be load it
-            if (storeIgnoredValuesForSyntheticSource()) {
-                var utfBytes = value.bytes();
-                var bytesRef = new BytesRef(utfBytes.bytes(), utfBytes.offset(), utfBytes.length());
-                final String fieldName = fieldType().syntheticSourceFallbackFieldName();
-
-                if (storeIgnoredKeywordFieldsInBinaryDocValuesIndexVersionCheck()) {
-                    // store the value in a binary doc values field, create one if it doesn't exist
-                    MultiValuedBinaryDocValuesField field = (MultiValuedBinaryDocValuesField) context.doc().getByKey(fieldName);
-                    if (field == null) {
-                        field = new MultiValuedBinaryDocValuesField.IntegratedCount(fieldName, keepDuplicatesInBinaryDocValues());
-                        context.doc().addWithKey(fieldName, field);
-                    }
-                    field.add(bytesRef);
-                } else {
-                    // otherwise for bwc, store the value in a stored fields like we used to
-                    context.doc().add(new StoredField(fieldName, bytesRef));
-                }
-            }
-
+            handleIgnoredValue(context, value);
             return false;
         }
 
         if (fieldType().normalizer() != Lucene.KEYWORD_ANALYZER) {
-            String normalizedString = normalizeValue(fieldType().normalizer(), fullPath(), value.string());
-            value = new Text(normalizedString);
+            value = applyNormalizer(value);
         }
 
         var utfBytes = value.bytes();
@@ -1381,26 +1359,60 @@ public final class KeywordFieldMapper extends FieldMapper {
             context.getRoutingFields().addString(fieldType().name(), binaryValue);
         }
 
-        // If the UTF8 encoding of the field value is bigger than the max length 32766, Lucene fill fail the indexing request and, to
-        // roll back the changes, will mark the (possibly partially indexed) document as deleted. This results in deletes, even in an
-        // append-only workload, which in turn leads to slower merges, as these will potentially have to fall back to MergeStrategy.DOC
-        // instead of MergeStrategy.BULK. To avoid this, we do a preflight check here before indexing the document into Lucene.
         if (binaryValue.length > MAX_TERM_LENGTH) {
-            byte[] prefix = new byte[30];
-            System.arraycopy(binaryValue.bytes, binaryValue.offset, prefix, 0, 30);
-            String msg = "Document contains at least one immense term in field=\""
-                + fieldType().name()
-                + "\" (whose "
-                + "UTF8 encoding is longer than the max length "
-                + MAX_TERM_LENGTH
-                + "), all of which were "
-                + "skipped. Please correct the analyzer to not produce such terms. The prefix of the first immense "
-                + "term is: '"
-                + Arrays.toString(prefix)
-                + "...'";
-            throw new IllegalArgumentException(msg);
+            throwImmenseTermError(binaryValue);
         }
 
+        indexBinaryValue(context, binaryValue);
+        return true;
+    }
+
+    private void handleIgnoredValue(DocumentParserContext context, XContentString value) {
+        context.addIgnoredField(fullPath());
+
+        // if synthetic source is enabled, then store a copy of the value so that synthetic source can load it
+        if (storeIgnoredValuesForSyntheticSource()) {
+            var utfBytes = value.bytes();
+            var bytesRef = new BytesRef(utfBytes.bytes(), utfBytes.offset(), utfBytes.length());
+            final String fieldName = fieldType().syntheticSourceFallbackFieldName();
+
+            if (storeIgnoredKeywordFieldsInBinaryDocValuesIndexVersionCheck()) {
+                // store the value in a binary doc values field, create one if it doesn't exist
+                MultiValuedBinaryDocValuesField field = (MultiValuedBinaryDocValuesField) context.doc().getByKey(fieldName);
+                if (field == null) {
+                    field = new MultiValuedBinaryDocValuesField.IntegratedCount(fieldName, keepDuplicatesInBinaryDocValues());
+                    context.doc().addWithKey(fieldName, field);
+                }
+                field.add(bytesRef);
+            } else {
+                // otherwise for bwc, store the value in a stored fields like we used to
+                context.doc().add(new StoredField(fieldName, bytesRef));
+            }
+        }
+    }
+
+    private XContentString applyNormalizer(XContentString value) {
+        String normalizedString = normalizeValue(fieldType().normalizer(), fullPath(), value.string());
+        return new Text(normalizedString);
+    }
+
+    private void throwImmenseTermError(BytesRef binaryValue) {
+        byte[] prefix = new byte[30];
+        System.arraycopy(binaryValue.bytes, binaryValue.offset, prefix, 0, 30);
+        String msg = "Document contains at least one immense term in field=\""
+            + fieldType().name()
+            + "\" (whose "
+            + "UTF8 encoding is longer than the max length "
+            + MAX_TERM_LENGTH
+            + "), all of which were "
+            + "skipped. Please correct the analyzer to not produce such terms. The prefix of the first immense "
+            + "term is: '"
+            + Arrays.toString(prefix)
+            + "...'";
+        throw new IllegalArgumentException(msg);
+    }
+
+    private void indexBinaryValue(DocumentParserContext context, BytesRef binaryValue) {
         if (fieldType().usesBinaryDocValues()) {
             assert fieldType.docValuesType() == DocValuesType.NONE;
             MultiValuedBinaryDocValuesField.SeparateCount.addToSeparateCountMultiBinaryFieldInDoc(
@@ -1421,8 +1433,6 @@ public final class KeywordFieldMapper extends FieldMapper {
         if (fieldType().hasDocValues() == false && fieldType.omitNorms()) {
             context.addToFieldNames(fieldType().nameBytes());
         }
-
-        return true;
     }
 
     private boolean storeIgnoredKeywordFieldsInBinaryDocValuesIndexVersionCheck() {

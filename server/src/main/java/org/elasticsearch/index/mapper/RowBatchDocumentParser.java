@@ -286,6 +286,7 @@ public final class RowBatchDocumentParser {
                 if (baseType == RowType.BINARY) {
                     fieldParser = RowValueXContentParser.forBinary(iterator, xContentType);
                 } else {
+                    // TODO: major allocation point
                     fieldParser = RowValueXContentParser.forLeafValue(iterator);
                 }
                 try {
