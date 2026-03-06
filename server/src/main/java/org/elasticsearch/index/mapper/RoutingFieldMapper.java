@@ -117,7 +117,7 @@ public class RoutingFieldMapper extends MetadataFieldMapper {
         String routing = context.routing();
         if (routing != null) {
             context.doc().add(new StringField(fieldType().name(), routing, Field.Store.YES));
-            context.addToFieldNames(fieldType().name());
+            context.addToFieldNames(fieldType().nameBytes());
         }
     }
 

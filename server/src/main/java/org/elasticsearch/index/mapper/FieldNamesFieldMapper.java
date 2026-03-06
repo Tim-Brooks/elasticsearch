@@ -12,12 +12,14 @@ package org.elasticsearch.index.mapper;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.Explicit;
 import org.elasticsearch.common.logging.DeprecationCategory;
 import org.elasticsearch.common.logging.DeprecationLogger;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.IndexVersions;
 import org.elasticsearch.index.query.SearchExecutionContext;
+import org.elasticsearch.xcontent.XContentString;
 
 import java.util.Collections;
 
@@ -179,6 +181,15 @@ public class FieldNamesFieldMapper extends MetadataFieldMapper {
         }
         assert noDocValues(field, context) : "Field " + field + " should not have docvalues";
         context.doc().add(new StringField(NAME, field, Field.Store.NO));
+    }
+
+    public void addFieldNames(DocumentParserContext context, XContentString.UTF8Bytes field) {
+        if (enabled.value() == false) {
+            return;
+        }
+        // TODO: Can fix
+//        assert noDocValues(field, context) : "Field " + field + " should not have docvalues";
+        context.doc().add(new StringField(NAME, new BytesRef(field.bytes(), field.offset(), field.length()), Field.Store.NO));
     }
 
     private static boolean noDocValues(String field, DocumentParserContext context) {

@@ -94,7 +94,8 @@ public class DocumentBatchRowEncoder {
                 ) {
                     parser.allowDuplicateKeys(true);
                     parser.nextToken(); // START_OBJECT
-                    flattenObject(parser, "", 0, schema, scratch, xContentType);
+                    scratch.pathBuilder.setLength(0);
+                    flattenObject(parser, 0, 0, schema, scratch, xContentType);
                 }
 
                 // Handle @timestamp for logs: generate if missing, then set rawTimestamp on the request
@@ -145,6 +146,7 @@ public class DocumentBatchRowEncoder {
         byte[] typeBytes;
         byte[] fixedData;
         Object[] varData; // XContentString.UTF8Bytes or BytesReference
+        final StringBuilder pathBuilder = new StringBuilder(64);
 
         ScratchBuffers(int capacity) {
             this.typeBytes = new byte[capacity];
@@ -166,28 +168,34 @@ public class DocumentBatchRowEncoder {
 
     private static void flattenObject(
         XContentParser parser,
-        String prefix,
+        int prefixLen,
         int objectDepth,
         DocBatchSchema schema,
         ScratchBuffers scratch,
         XContentType xContentType
     ) throws IOException {
+        StringBuilder pathBuilder = scratch.pathBuilder;
         XContentParser.Token token;
         while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
             if (token != XContentParser.Token.FIELD_NAME) {
                 throw new IllegalStateException("Expected FIELD_NAME but got " + token);
             }
             String fieldName = parser.currentName();
-            String fieldPath = prefix.isEmpty() ? fieldName : prefix + "." + fieldName;
+            pathBuilder.setLength(prefixLen);
+            if (prefixLen > 0) {
+                pathBuilder.append('.');
+            }
+            pathBuilder.append(fieldName);
+            int fieldPathLen = pathBuilder.length();
 
             token = parser.nextToken(); // value token
 
             if (token == XContentParser.Token.START_OBJECT) {
-                flattenObject(parser, fieldPath, objectDepth + 1, schema, scratch, xContentType);
+                flattenObject(parser, fieldPathLen, objectDepth + 1, schema, scratch, xContentType);
                 continue;
             }
 
-            int colIdx = schema.appendColumn(fieldPath);
+            int colIdx = schema.appendColumn(pathBuilder.toString());
             scratch.ensureCapacity(colIdx + 1);
 
             switch (token) {

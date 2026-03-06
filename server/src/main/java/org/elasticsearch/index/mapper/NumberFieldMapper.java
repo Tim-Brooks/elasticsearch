@@ -2444,7 +2444,7 @@ public class NumberFieldMapper extends FieldMapper {
         }
 
         if (hasDocValues == false && (stored || indexed)) {
-            context.addToFieldNames(fieldType().name());
+            context.addToFieldNames(fieldType().nameBytes());
         }
     }
 

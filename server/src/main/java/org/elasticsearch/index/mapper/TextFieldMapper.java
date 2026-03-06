@@ -1718,7 +1718,7 @@ public final class TextFieldMapper extends FieldMapper {
             Field field = new Field(fieldType().name(), value, fieldType);
             context.doc().add(field);
             if (fieldType.omitNorms()) {
-                context.addToFieldNames(fieldType().name());
+                context.addToFieldNames(fieldType().nameBytes());
             }
             if (prefixFieldInfo != null) {
                 context.doc().add(new Field(prefixFieldInfo.field, value, prefixFieldInfo.fieldType));

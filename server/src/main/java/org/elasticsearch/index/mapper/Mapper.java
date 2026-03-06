@@ -13,10 +13,12 @@ import org.apache.lucene.document.FieldType;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.util.StringLiteralDeduplicator;
+import org.elasticsearch.common.util.UTF8StringLiteralDeduplicator;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.IndexVersions;
+import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.ToXContentFragment;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentString;
@@ -263,7 +265,7 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
         return Strings.toString(this);
     }
 
-    private static final StringLiteralDeduplicator fieldNameStringDeduplicator = new StringLiteralDeduplicator();
+    private static final UTF8StringLiteralDeduplicator fieldNameStringDeduplicator = new UTF8StringLiteralDeduplicator();
 
     /**
      * Interns the given field name string through a {@link StringLiteralDeduplicator}.
@@ -271,6 +273,10 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
      * @return interned field name string
      */
     public static String internFieldName(String fieldName) {
+        return fieldNameStringDeduplicator.deduplicate(fieldName).string();
+    }
+
+    public static Text internFieldNameGetText(String fieldName) {
         return fieldNameStringDeduplicator.deduplicate(fieldName);
     }
 

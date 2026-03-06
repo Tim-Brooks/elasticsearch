@@ -1419,7 +1419,7 @@ public final class KeywordFieldMapper extends FieldMapper {
         }
 
         if (fieldType().hasDocValues() == false && fieldType.omitNorms()) {
-            context.addToFieldNames(fieldType().name());
+            context.addToFieldNames(fieldType().nameBytes());
         }
 
         return true;

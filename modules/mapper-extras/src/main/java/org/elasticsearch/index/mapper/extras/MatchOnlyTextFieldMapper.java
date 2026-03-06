@@ -919,7 +919,7 @@ public class MatchOnlyTextFieldMapper extends FieldMapper {
             }
         } else {
             // only add to field names when doc_values are disabled (doc_values track field existence implicitly)
-            context.addToFieldNames(fieldType().name());
+            context.addToFieldNames(fieldType().nameBytes());
         }
 
         // match only text isn't stored, so if synthetic source needs to be supported, we must find an alternative way of loading the field

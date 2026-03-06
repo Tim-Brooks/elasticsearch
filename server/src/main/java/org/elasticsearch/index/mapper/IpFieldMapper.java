@@ -692,7 +692,7 @@ public class IpFieldMapper extends FieldMapper {
                 doc.add(new SortedSetDocValuesField(fieldType().name(), address.binaryValue()));
             }
         } else if (stored || indexed) {
-            context.addToFieldNames(fieldType().name());
+            context.addToFieldNames(fieldType().nameBytes());
         }
         if (stored) {
             doc.add(new StoredField(fieldType().name(), address.binaryValue()));

@@ -45,6 +45,8 @@ import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.fetch.subphase.FetchFieldsPhase;
 import org.elasticsearch.search.fetch.subphase.highlight.DefaultHighlighter;
 import org.elasticsearch.search.lookup.SearchLookup;
+import org.elasticsearch.xcontent.Text;
+import org.elasticsearch.xcontent.XContentString;
 
 import java.io.IOException;
 import java.time.ZoneId;
@@ -64,13 +66,13 @@ import static org.elasticsearch.search.SearchService.ALLOW_EXPENSIVE_QUERIES;
  */
 public abstract class MappedFieldType {
 
-    private final String name;
+    private final Text name;
     protected final IndexType indexType;
     private final boolean isStored;
     private final Map<String, String> meta;
 
     public MappedFieldType(String name, IndexType indexType, boolean isStored, Map<String, String> meta) {
-        this.name = Mapper.internFieldName(name);
+        this.name = Mapper.internFieldNameGetText(name);
         this.indexType = indexType;
         this.isStored = isStored;
         // meta should be sorted but for the one item or empty case we can fall back to immutable maps to save some memory since order is
@@ -117,7 +119,11 @@ public abstract class MappedFieldType {
     }
 
     public String name() {
-        return name;
+        return name.string();
+    }
+
+    public XContentString.UTF8Bytes nameBytes() {
+        return name.bytes();
     }
 
     public boolean hasDocValues() {

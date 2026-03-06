@@ -25,6 +25,7 @@ import org.elasticsearch.xcontent.FilterXContentParserWrapper;
 import org.elasticsearch.xcontent.FlatteningXContentParser;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xcontent.XContentString;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -454,6 +455,13 @@ public abstract class DocumentParserContext {
      * or norms.
      */
     public final void addToFieldNames(String field) {
+        FieldNamesFieldMapper fieldNamesFieldMapper = (FieldNamesFieldMapper) getMetadataMapper(FieldNamesFieldMapper.NAME);
+        if (fieldNamesFieldMapper != null) {
+            fieldNamesFieldMapper.addFieldNames(this, field);
+        }
+    }
+
+    public final void addToFieldNames(XContentString.UTF8Bytes field) {
         FieldNamesFieldMapper fieldNamesFieldMapper = (FieldNamesFieldMapper) getMetadataMapper(FieldNamesFieldMapper.NAME);
         if (fieldNamesFieldMapper != null) {
             fieldNamesFieldMapper.addFieldNames(this, field);
