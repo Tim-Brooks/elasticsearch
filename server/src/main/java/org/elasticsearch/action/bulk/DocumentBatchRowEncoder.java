@@ -181,12 +181,20 @@ public class DocumentBatchRowEncoder {
                 throw new IllegalStateException("Expected FIELD_NAME but got " + token);
             }
             String fieldName = parser.currentName();
-            pathBuilder.setLength(prefixLen);
-            if (prefixLen > 0) {
-                pathBuilder.append('.');
+
+            String columnPath;
+            int fieldPathLen;
+            if (prefixLen == 0) {
+                columnPath = fieldName;
+                fieldPathLen = fieldName.length();
+                pathBuilder.setLength(0);
+                pathBuilder.append(fieldName);
+            } else {
+                pathBuilder.setLength(prefixLen);
+                pathBuilder.append('.').append(fieldName);
+                fieldPathLen = pathBuilder.length();
+                columnPath = pathBuilder.toString();
             }
-            pathBuilder.append(fieldName);
-            int fieldPathLen = pathBuilder.length();
 
             token = parser.nextToken(); // value token
 
@@ -195,7 +203,7 @@ public class DocumentBatchRowEncoder {
                 continue;
             }
 
-            int colIdx = schema.appendColumn(pathBuilder.toString());
+            int colIdx = schema.appendColumn(columnPath);
             scratch.ensureCapacity(colIdx + 1);
 
             switch (token) {
