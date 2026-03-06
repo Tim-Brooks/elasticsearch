@@ -303,11 +303,8 @@ public final class RowBatchDocumentParser {
 
     private static void parseSmallArrayField(FieldMapper fieldMapper, DocBatchRowIterator iterator, BatchDocumentParserContext context)
         throws IOException {
-        XContentParser arrayParser = RowValueXContentParser.forSmallArray(iterator);
-        try {
+        try (XContentParser arrayParser = RowValueXContentParser.forSmallArray(iterator)) {
             parseArrayElements(fieldMapper, arrayParser, context);
-        } finally {
-            arrayParser.close();
         }
     }
 
@@ -332,7 +329,8 @@ public final class RowBatchDocumentParser {
             context.setParser(arrayParser);
             fieldMapper.parse(context);
         } else {
-            assert arrayParser.nextToken() == XContentParser.Token.START_ARRAY;
+            XContentParser.Token startToken = arrayParser.nextToken();
+            assert startToken == XContentParser.Token.START_ARRAY;
             while (arrayParser.nextToken() != XContentParser.Token.END_ARRAY) {
                 context.setParser(arrayParser);
                 fieldMapper.parse(context);

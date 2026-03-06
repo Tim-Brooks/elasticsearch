@@ -14,8 +14,10 @@ import org.elasticsearch.action.bulk.SmallArrayReader;
 import org.elasticsearch.core.RestApiVersion;
 import org.elasticsearch.xcontent.DeprecationHandler;
 import org.elasticsearch.xcontent.NamedXContentRegistry;
+import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentLocation;
 import org.elasticsearch.xcontent.XContentString;
+import org.elasticsearch.xcontent.XContentString.UTF8Bytes;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.support.AbstractXContentParser;
 
@@ -119,11 +121,9 @@ final class SmallArrayXContentParser extends AbstractXContentParser {
     @Override
     public XContentString optimizedText() throws IOException {
         if (reader.type() == RowType.STRING) {
-            return new org.elasticsearch.xcontent.Text(
-                new org.elasticsearch.xcontent.XContentString.UTF8Bytes(reader.stringBytes(), reader.stringOffset(), reader.stringLength())
-            );
+            return new Text(new UTF8Bytes(reader.stringBytes(), reader.stringOffset(), reader.stringLength()));
         }
-        return new org.elasticsearch.xcontent.Text(text());
+        return new Text(text());
     }
 
     @Override
