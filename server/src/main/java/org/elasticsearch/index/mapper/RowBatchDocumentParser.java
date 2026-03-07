@@ -131,7 +131,7 @@ public final class RowBatchDocumentParser {
      * @return a result containing parsed documents and per-document exceptions
      */
     public BatchResult parseRowBatch(RowDocumentBatch rowBatch, List<IndexRequest> indexRequests, MappingLookup mappingLookup) {
-        final int docCount = rowBatch.docCount();
+        final int docCount = indexRequests.size();
         final DocBatchSchema schema = rowBatch.schema();
         final MetadataFieldMapper[] metadataFieldMappers = mappingLookup.getMapping().getSortedMetadataMappers();
 
@@ -199,7 +199,8 @@ public final class RowBatchDocumentParser {
                 }
 
                 // Step 4: Get row iterator and parse fields
-                DocBatchRowReader rowReader = rowBatch.getRowReader(i);
+                int rowIndex = indexRequest.batchRowIndex() >= 0 ? indexRequest.batchRowIndex() : i;
+                DocBatchRowReader rowReader = rowBatch.getRowReader(rowIndex);
                 DocBatchRowIterator rowIterator = rowReader.iterator();
 
                 while (rowIterator.next()) {

@@ -48,6 +48,7 @@ import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.util.concurrent.AtomicArray;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
 import org.elasticsearch.core.TimeValue;
@@ -66,6 +67,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -110,6 +112,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     private final FailureStoreMetrics failureStoreMetrics;
     private final DataStreamFailureStoreSettings dataStreamFailureStoreSettings;
     private final boolean clusterHasFailureStoreFeature;
+    private final List<Releasable> sharedBatches = new ArrayList<>();
     private final Supplier<RecyclerBytesStreamOutput> refRecycler;
 
     BulkOperation(
@@ -203,7 +206,11 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             return;
         }
         Map<ShardId, List<BulkItemRequest>> requestsByShard = groupBulkRequestsByShards(clusterState);
-        executeBulkRequestsByShard(requestsByShard, clusterState, this::redirectFailuresOrCompleteBulkOperation);
+        executeBulkRequestsByShard(requestsByShard, clusterState, () -> {
+            Releasables.close(sharedBatches);
+            sharedBatches.clear();
+            redirectFailuresOrCompleteBulkOperation();
+        });
     }
 
     private void doRedirectFailures() {
@@ -285,11 +292,97 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     }
 
     private Map<ShardId, List<BulkItemRequest>> groupBulkRequestsByShards(ClusterState clusterState) {
-        return groupRequestsByShards(
-            clusterState,
-            Iterators.enumerate(bulkRequest.requests.iterator(), BulkItemRequest::new),
-            BulkOperation::validateWriteIndex
-        );
+        ProjectMetadata project = projectResolver.getProjectMetadata(clusterState);
+        final ConcreteIndices concreteIndices = new ConcreteIndices(project, indexNameExpressionResolver);
+
+        // Pass 1: Resolve indices, validate, collect validated requests per concrete index
+        Map<Index, List<BulkItemRequest>> requestsByIndex = new LinkedHashMap<>();
+
+        Iterator<BulkItemRequest> it = Iterators.enumerate(bulkRequest.requests.iterator(), BulkItemRequest::new);
+        while (it.hasNext()) {
+            BulkItemRequest bulkItemRequest = it.next();
+            DocWriteRequest<?> docWriteRequest = bulkItemRequest.request();
+
+            if (docWriteRequest == null) {
+                continue;
+            }
+            if (addFailureIfRequiresAliasAndAliasIsMissing(docWriteRequest, bulkItemRequest.id(), project)) {
+                continue;
+            }
+            if (addFailureIfRequiresDataStreamAndNoParentDataStream(docWriteRequest, bulkItemRequest.id(), project)) {
+                continue;
+            }
+            if (failedRolloverRequests.contains(bulkItemRequest.id())) {
+                continue;
+            }
+            IndexAbstraction ia = null;
+            try {
+                ia = concreteIndices.resolveIfAbsent(docWriteRequest);
+                BulkOperation.validateWriteIndex(ia, docWriteRequest);
+
+                TransportBulkAction.prohibitCustomRoutingOnDataStream(docWriteRequest, ia);
+                TransportBulkAction.prohibitAppendWritesInBackingIndices(docWriteRequest, ia);
+                docWriteRequest.routing(project.resolveWriteIndexRouting(docWriteRequest.routing(), docWriteRequest.index()));
+
+                final Index concreteIndex = docWriteRequest.getConcreteWriteIndex(ia, project);
+                if (addFailureIfIndexIsClosed(docWriteRequest, concreteIndex, bulkItemRequest.id(), project)) {
+                    continue;
+                }
+                requestsByIndex.computeIfAbsent(concreteIndex, k -> new ArrayList<>()).add(bulkItemRequest);
+            } catch (DataStream.TimestampError timestampError) {
+                IndexDocFailureStoreStatus failureStoreStatus = processFailure(bulkItemRequest, project, timestampError);
+                if (IndexDocFailureStoreStatus.USED.equals(failureStoreStatus) == false) {
+                    String name = ia != null ? ia.getName() : docWriteRequest.index();
+                    addFailureAndDiscardRequest(docWriteRequest, bulkItemRequest.id(), name, timestampError, failureStoreStatus);
+                }
+            } catch (ElasticsearchParseException | IllegalArgumentException | RoutingMissingException | ResourceNotFoundException e) {
+                String name = ia != null ? ia.getName() : docWriteRequest.index();
+                var failureStoreStatus = isFailureStoreRequest(docWriteRequest)
+                    ? IndexDocFailureStoreStatus.FAILED
+                    : IndexDocFailureStoreStatus.NOT_APPLICABLE_OR_UNKNOWN;
+                addFailureAndDiscardRequest(docWriteRequest, bulkItemRequest.id(), name, e, failureStoreStatus);
+            }
+        }
+
+        // Batch encode between passes: for each batch-eligible index, encode with routing metadata extraction
+        for (Map.Entry<Index, List<BulkItemRequest>> entry : requestsByIndex.entrySet()) {
+            Index concreteIndex = entry.getKey();
+            List<BulkItemRequest> requests = entry.getValue();
+            IndexMetadata indexMetadata = project.getIndexSafe(concreteIndex);
+            if (isBatchEligible(indexMetadata, requests)) {
+                IndexRouting indexRouting = concreteIndices.routing(concreteIndex);
+                RoutingMetadataExtractor extractor = createRoutingExtractor(indexRouting, indexMetadata);
+                try {
+                    List<IndexRequest> indexRequests = new ArrayList<>(requests.size());
+                    for (BulkItemRequest r : requests) {
+                        indexRequests.add((IndexRequest) r.request());
+                    }
+                    RowDocumentBatch batch = DocumentBatchRowEncoder.encode(indexRequests, refRecycler, extractor);
+                    sharedBatches.add(batch);
+                } catch (Exception e) {
+                    logger.debug("Failed to encode document batch for pre-routing, falling back to standard path", e);
+                }
+            }
+        }
+
+        // Pass 2: Route and assign to shards
+        Map<ShardId, List<BulkItemRequest>> requestsByShard = new HashMap<>();
+        for (Map.Entry<Index, List<BulkItemRequest>> entry : requestsByIndex.entrySet()) {
+            Index concreteIndex = entry.getKey();
+            IndexRouting indexRouting = concreteIndices.routing(concreteIndex);
+            for (BulkItemRequest bulkItemRequest : entry.getValue()) {
+                DocWriteRequest<?> docWriteRequest = bulkItemRequest.request();
+                docWriteRequest.preRoutingProcess(indexRouting);
+                int shardId = docWriteRequest.route(indexRouting);
+                docWriteRequest.postRoutingProcess(indexRouting);
+                List<BulkItemRequest> shardRequests = requestsByShard.computeIfAbsent(
+                    new ShardId(concreteIndex, shardId),
+                    shard -> new ArrayList<>()
+                );
+                shardRequests.add(bulkItemRequest);
+            }
+        }
+        return requestsByShard;
     }
 
     private Map<ShardId, List<BulkItemRequest>> drainAndGroupRedirectsByShards(ClusterState clusterState) {
@@ -434,9 +527,15 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                     bulkShardRequest.setParentTask(nodeId, task.getId());
                 }
 
-                // Try to encode as a batch for the batch execution path
+                // Check if requests were pre-encoded as a shared batch during routing
                 Releasable releasable = null;
-                if (isBatchEligible(indexMetadata, requests)) {
+                DocWriteRequest<?> firstReq = requests.get(0).request();
+                if (firstReq instanceof IndexRequest indexReq && indexReq.batchRef() != null) {
+                    // Use the shared batch from pre-routing encoding
+                    bulkShardRequest.setRowDocumentBatch(indexReq.batchRef());
+                    // Shared batch is released separately — don't set releasable here
+                } else if (isBatchEligible(indexMetadata, requests)) {
+                    // Fallback: encode per-shard if not pre-encoded
                     try {
                         List<IndexRequest> indexRequests = new ArrayList<>(requests.size());
                         for (BulkItemRequest r : requests) {
@@ -446,7 +545,6 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                         releasable = batch;
                         bulkShardRequest.setRowDocumentBatch(batch);
                     } catch (Exception e) {
-                        // Encoding failed — leave batch null, serial path will be used on the primary
                         logger.debug("Failed to encode document batch, falling back to serial path", e);
                         bulkShardRequest.setRowDocumentBatch(null);
                     }
@@ -492,6 +590,16 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             }
         }
         return true;
+    }
+
+    @Nullable
+    private static RoutingMetadataExtractor createRoutingExtractor(IndexRouting indexRouting, IndexMetadata indexMetadata) {
+        if (indexRouting instanceof IndexRouting.ExtractFromSource.ForRoutingPath forRoutingPath) {
+            return new SortFieldRoutingExtractor(forRoutingPath::matchesField);
+        } else if (indexRouting instanceof IndexRouting.ExtractFromSource.ForIndexDimensions) {
+            return new TsidRoutingExtractor(Set.copyOf(indexMetadata.getTimeSeriesDimensions()));
+        }
+        return null;
     }
 
     private void redirectFailuresOrCompleteBulkOperation() {

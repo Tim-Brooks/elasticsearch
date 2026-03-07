@@ -374,7 +374,11 @@ public abstract class IndexRouting {
         public int indexShard(IndexRequest indexRequest) {
             assert Transports.assertNotTransportThread("parsing the _source can get slow");
             checkNoRouting(indexRequest.routing());
-            hash = hashSource(indexRequest);
+            if (indexRequest.routingHash() != Integer.MAX_VALUE) {
+                hash = indexRequest.routingHash();
+            } else {
+                hash = hashSource(indexRequest);
+            }
             int shardId = hashToShardId(hash);
             return rerouteWritesIfResharding(shardId);
         }

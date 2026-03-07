@@ -17,6 +17,7 @@ import org.elasticsearch.TransportVersion;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.CompositeIndicesRequest;
 import org.elasticsearch.action.DocWriteRequest;
+import org.elasticsearch.action.bulk.RowDocumentBatch;
 import org.elasticsearch.action.support.replication.ReplicatedWriteRequest;
 import org.elasticsearch.action.support.replication.ReplicationRequest;
 import org.elasticsearch.client.internal.Requests;
@@ -155,6 +156,24 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
     private Object rawTimestamp;
     private boolean needsLogsTimestamp;
     private BytesRef tsid;
+
+    /**
+     * Coordinator-only: this request's row index in the shared batch.
+     * Set during batch encoding, used by shard-side parser to look up the correct row.
+     */
+    private int batchRowIndex = -1;
+
+    /**
+     * Coordinator-only: reference to the shared batch that contains this request's encoded data.
+     */
+    @Nullable
+    private RowDocumentBatch batchRef;
+
+    /**
+     * Coordinator-only: pre-computed routing hash for ForRoutingPath/LogsDB sort-field routing.
+     * Integer.MAX_VALUE means not yet computed.
+     */
+    private int routingHash = Integer.MAX_VALUE;
 
     public void setNeedsLogsTimestamp(boolean needsLogsTimestamp) {
         this.needsLogsTimestamp = needsLogsTimestamp;
@@ -375,6 +394,30 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
 
     public BytesRef tsid() {
         return this.tsid;
+    }
+
+    public int batchRowIndex() {
+        return batchRowIndex;
+    }
+
+    public void setBatchRowIndex(int batchRowIndex) {
+        this.batchRowIndex = batchRowIndex;
+    }
+
+    public RowDocumentBatch batchRef() {
+        return batchRef;
+    }
+
+    public void setBatchRef(RowDocumentBatch batchRef) {
+        this.batchRef = batchRef;
+    }
+
+    public int routingHash() {
+        return routingHash;
+    }
+
+    public void setRoutingHash(int routingHash) {
+        this.routingHash = routingHash;
     }
 
     /**
