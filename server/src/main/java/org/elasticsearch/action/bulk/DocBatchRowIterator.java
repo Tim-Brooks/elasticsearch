@@ -11,6 +11,7 @@ package org.elasticsearch.action.bulk;
 
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.core.RestApiVersion;
 import org.elasticsearch.xcontent.DeprecationHandler;
@@ -23,6 +24,7 @@ import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.support.AbstractXContentParser;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 
@@ -49,7 +51,7 @@ import java.nio.charset.StandardCharsets;
  */
 public final class DocBatchRowIterator extends AbstractXContentParser {
 
-    private final BytesReference data;
+    private final StreamInput typeData;
     private final BytesReference fixedData;
     private final BytesReference varData;
     private final boolean fixedDataHasArray;
@@ -68,7 +70,12 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
     DocBatchRowIterator(BytesReference data, int rowColumnCount, int fixedSectionOffset, int varSectionOffset) {
         super(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, RestApiVersion.current());
-        this.data = data.slice(0, fixedSectionOffset);
+        try {
+            this.typeData = data.slice(DocBatchRowReader.TYPE_BYTES_OFFSET, fixedSectionOffset - DocBatchRowReader.TYPE_BYTES_OFFSET)
+                .streamInput();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
         this.fixedData = data.slice(fixedSectionOffset, varSectionOffset - fixedSectionOffset);
         this.varData = data.slice(varSectionOffset, data.length() - varSectionOffset);
         this.fixedDataHasArray = fixedData.hasArray();
@@ -89,7 +96,11 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         if (col >= rowColumnCount) {
             return false;
         }
-        typeByte = data.get(DocBatchRowReader.TYPE_BYTES_OFFSET + col);
+        try {
+            typeByte = typeData.readByte();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
         baseType = RowType.baseType(typeByte);
         return true;
     }
@@ -98,20 +109,12 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         return col;
     }
 
-    public byte typeByte() {
-        return typeByte;
-    }
-
     public byte baseType() {
         return baseType;
     }
 
     public boolean isNull() {
         return baseType == RowType.NULL;
-    }
-
-    public boolean isFromObject() {
-        return RowType.isFromObject(typeByte);
     }
 
     public boolean rowBooleanValue() {
@@ -374,5 +377,6 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     @Override
     public void close() throws IOException {
         parserClosed = true;
+        typeData.close();
     }
 }
