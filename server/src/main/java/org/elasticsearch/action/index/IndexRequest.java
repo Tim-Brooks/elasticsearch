@@ -241,6 +241,8 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
         if (in.getTransportVersion().supports(INGEST_REQUEST_DYNAMIC_TEMPLATE_PARAMS)) {
             dynamicTemplateParams = in.readMap(StreamInput::readString, i -> i.readMap(StreamInput::readString));
         }
+
+        batchRowIndex = in.readVInt() - 1; // stored as +1 so -1 maps to 0
     }
 
     public IndexRequest() {
@@ -835,6 +837,8 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
         if (out.getTransportVersion().supports(INGEST_REQUEST_DYNAMIC_TEMPLATE_PARAMS)) {
             out.writeMap(dynamicTemplateParams, StreamOutput::writeString, (o, v) -> o.writeMap(v, StreamOutput::writeString));
         }
+
+        out.writeVInt(batchRowIndex + 1); // shift by +1 so -1 maps to 0
     }
 
     @Override
