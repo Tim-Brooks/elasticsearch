@@ -617,7 +617,7 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
             failureStoreMetrics,
             dataStreamFailureStoreSettings,
             clusterSupportsFailureStore,
-            transportService::newNetworkBytesStream
+            () -> transportService.newNetworkBytesStream(null)
         ).run();
     }
 

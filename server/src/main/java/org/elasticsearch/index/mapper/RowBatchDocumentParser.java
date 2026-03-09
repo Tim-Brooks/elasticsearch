@@ -131,7 +131,7 @@ public final class RowBatchDocumentParser {
      * @return a result containing parsed documents and per-document exceptions
      */
     public BatchResult parseRowBatch(RowDocumentBatch rowBatch, List<IndexRequest> indexRequests, MappingLookup mappingLookup) {
-        final int docCount = rowBatch.docCount();
+        final int docCount = indexRequests.size();
         final DocBatchSchema schema = rowBatch.schema();
         final MetadataFieldMapper[] metadataFieldMappers = mappingLookup.getMapping().getSortedMetadataMappers();
 
@@ -199,7 +199,8 @@ public final class RowBatchDocumentParser {
                 }
 
                 // Step 4: Get row iterator and parse fields
-                DocBatchRowReader rowReader = rowBatch.getRowReader(i);
+                int rowIndex = indexRequest.batchRowIndex() >= 0 ? indexRequest.batchRowIndex() : i;
+                DocBatchRowReader rowReader = rowBatch.getRowReader(rowIndex);
                 DocBatchRowIterator rowIterator = rowReader.iterator();
 
                 while (rowIterator.next()) {
@@ -280,15 +281,9 @@ public final class RowBatchDocumentParser {
             } else if (baseType == RowType.XCONTENT_ARRAY) {
                 // Raw x-content array (fallback)
                 parseXContentArrayField(fieldMapper, iterator, context, xContentType);
-            } else {
-                // Scalar or binary leaf
-                XContentParser fieldParser;
-                if (baseType == RowType.BINARY) {
-                    fieldParser = RowValueXContentParser.forBinary(iterator, xContentType);
-                } else {
-                    // TODO: major allocation point
-                    fieldParser = RowValueXContentParser.forLeafValue(iterator);
-                }
+            } else if (baseType == RowType.BINARY) {
+                // Binary leaf - needs its own xcontent parser
+                XContentParser fieldParser = RowValueXContentParser.forBinary(iterator, xContentType);
                 try {
                     fieldParser.nextToken();
                     context.setParser(fieldParser);
@@ -296,6 +291,12 @@ public final class RowBatchDocumentParser {
                 } finally {
                     fieldParser.close();
                 }
+            } else {
+                // Scalar leaf - use the iterator directly as the parser (no allocation)
+                iterator.resetParser();
+                iterator.nextToken();
+                context.setParser(iterator);
+                fieldMapper.parse(context);
             }
         } finally {
             resetPath(parentSegments.length, context.path());

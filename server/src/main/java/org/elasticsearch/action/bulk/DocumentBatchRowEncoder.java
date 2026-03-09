@@ -18,6 +18,7 @@ import org.elasticsearch.common.bytes.ReleasableBytesReference;
 import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.common.xcontent.XContentHelper;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentParser;
@@ -50,7 +51,23 @@ public class DocumentBatchRowEncoder {
         return encode(requests, () -> new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE));
     }
 
+    public static RowDocumentBatch encode(
+        List<IndexRequest> requests,
+        Supplier<RecyclerBytesStreamOutput> supplier,
+        @Nullable RoutingMetadataExtractor routingExtractor
+    ) throws IOException {
+        return doEncode(requests, supplier, routingExtractor);
+    }
+
     public static RowDocumentBatch encode(List<IndexRequest> requests, Supplier<RecyclerBytesStreamOutput> supplier) throws IOException {
+        return doEncode(requests, supplier, null);
+    }
+
+    private static RowDocumentBatch doEncode(
+        List<IndexRequest> requests,
+        Supplier<RecyclerBytesStreamOutput> supplier,
+        @Nullable RoutingMetadataExtractor routingExtractor
+    ) throws IOException {
         int docCount = requests.size();
         DocBatchSchema schema = new DocBatchSchema();
         ScratchBuffers scratch = new ScratchBuffers(INITIAL_CAPACITY);
@@ -98,6 +115,16 @@ public class DocumentBatchRowEncoder {
                     flattenObject(parser, 0, 0, schema, scratch, xContentType);
                 }
 
+                // Resolve any newly discovered columns for routing extraction
+                if (routingExtractor != null) {
+                    int columnCountAfter = schema.columnCount();
+                    for (int col = 0; col < columnCountAfter; col++) {
+                        if (routingExtractor.isColumnResolved(col) == false) {
+                            routingExtractor.resolveColumn(col, schema.getColumnName(col));
+                        }
+                    }
+                }
+
                 // Handle @timestamp for logs: generate if missing, then set rawTimestamp on the request
                 if (needsLogsTimestamp) {
                     byte tsType = scratch.typeBytes[tsColIdx];
@@ -124,6 +151,12 @@ public class DocumentBatchRowEncoder {
                     }
                 }
 
+                // Extract routing metadata from scratch buffers before writing the row
+                if (routingExtractor != null) {
+                    routingExtractor.extractFromScratch(scratch, request);
+                    routingExtractor.resetDocument();
+                }
+
                 // Write row to output
                 int columnCount = schema.columnCount();
                 int rowStart = (int) rowOutput.position();
@@ -135,7 +168,15 @@ public class DocumentBatchRowEncoder {
             ReleasableBytesReference rowBytes = rowOutput.moveToBytesReference();
             BytesReference headerBytes = buildHeader(schema, docCount, rowOffsets, rowLengths, rowBytes.length());
             BytesReference combined = CompositeBytesReference.of(headerBytes, rowBytes);
-            return new RowDocumentBatch(combined, rowBytes);
+            RowDocumentBatch batch = new RowDocumentBatch(combined, rowBytes);
+
+            // Set batch metadata on each request
+            for (int i = 0; i < docCount; i++) {
+                requests.get(i).setBatchRowIndex(i);
+                requests.get(i).setBatchRef(batch);
+            }
+
+            return batch;
         }
     }
 
