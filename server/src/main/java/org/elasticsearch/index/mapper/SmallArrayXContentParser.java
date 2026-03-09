@@ -237,6 +237,11 @@ final class SmallArrayXContentParser extends AbstractXContentParser {
     }
 
     @Override
+    public XContentLocation getCurrentLocation() {
+        return new XContentLocation(0, 0);
+    }
+
+    @Override
     public XContentType contentType() {
         return XContentType.JSON;
     }

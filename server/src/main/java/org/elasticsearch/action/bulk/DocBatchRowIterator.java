@@ -360,6 +360,11 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     }
 
     @Override
+    public XContentLocation getCurrentLocation() {
+        return new XContentLocation(0, 0);
+    }
+
+    @Override
     public XContentType contentType() {
         return XContentType.JSON;
     }
