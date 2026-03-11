@@ -552,10 +552,13 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
 
                 Releasable bulkItemRequestComplete = bulkItemRequestCompleteRefCount.acquire();
                 Releasable finalReleasable = releasable;
+                boolean redactSeqNo = IndexSettings.DISABLE_SEQUENCE_NUMBERS_FEATURE_FLAG
+                    && IndexSettings.DISABLE_SEQUENCE_NUMBERS.get(indexMetadata.getSettings());
                 executeBulkShardRequest(
                     bulkShardRequest,
                     project.id(),
-                    () -> { Releasables.close(bulkItemRequestComplete, finalReleasable); }
+                    () -> { Releasables.close(bulkItemRequestComplete, finalReleasable); },
+                    redactSeqNo
                 );
             }
         }
@@ -611,9 +614,10 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     }
 
     private void completeBulkOperation() {
+        BulkItemResponse[] bulkItemResponses = responses.toArray(new BulkItemResponse[responses.length()]);
         listener.onResponse(
             new BulkResponse(
-                responses.toArray(new BulkItemResponse[responses.length()]),
+                bulkItemResponses,
                 buildTookInMillis(startTimeNanos),
                 BulkResponse.NO_INGEST_TOOK,
                 new BulkRequest.IncrementalState(shortCircuitShardFailures, bulkRequest.incrementalState().indexingPressureAccounted())
@@ -645,7 +649,12 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         completeBulkOperation();
     }
 
-    private void executeBulkShardRequest(BulkShardRequest bulkShardRequest, ProjectId projectId, Releasable releaseOnFinish) {
+    private void executeBulkShardRequest(
+        BulkShardRequest bulkShardRequest,
+        ProjectId projectId,
+        Releasable releaseOnFinish,
+        boolean redactSeqNo
+    ) {
         ShardId shardId = bulkShardRequest.shardId();
 
         // Short circuit the shard level request with the existing shard failure.
@@ -667,6 +676,13 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                         projectMetadata = clusterService.state().metadata().getProject(projectId);
                     }
                     return projectMetadata;
+                }
+
+                private BulkItemResponse maybeRedactSequenceNumber(BulkItemResponse in) {
+                    if (redactSeqNo == false || in == null || in.isFailed()) {
+                        return in;
+                    }
+                    return BulkItemResponse.success(in.getItemId(), in.getOpType(), in.getResponse().withoutSequenceNumber());
                 }
 
                 @Override
@@ -691,7 +707,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                                 && bulkItemResponse.getResponse() instanceof IndexResponse ir) {
                                 ir.setFailureStoreStatus(IndexDocFailureStoreStatus.USED);
                             }
-                            responses.set(bulkItemResponse.getItemId(), bulkItemResponse);
+                            responses.set(bulkItemResponse.getItemId(), maybeRedactSequenceNumber(bulkItemResponse));
                         }
                     }
                     completeShardOperation();
