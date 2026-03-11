@@ -165,6 +165,7 @@ public final class RowBatchDocumentParser {
             }
         }
 
+        int fieldCountHint = columnMappers.length;
         for (int i = 0; i < docCount; i++) {
             try {
                 // Step 1: Create SourceToParse from IndexRequest metadata
@@ -190,7 +191,8 @@ public final class RowBatchDocumentParser {
                     sharedCopyToFields,
                     sharedDynamicMappers,
                     sharedDynamicObjectMappers,
-                    sharedDynamicRuntimeFields
+                    sharedDynamicRuntimeFields,
+                    fieldCountHint
                 );
 
                 // Step 3: metadata preParse
@@ -257,6 +259,7 @@ public final class RowBatchDocumentParser {
                         return idMapper.documentDescription(this);
                     }
                 };
+                fieldCountHint = Math.max(fieldCountHint, ctx.document.getFields().size());
             } catch (Exception e) {
                 exceptions[i] = e;
             }
@@ -420,18 +423,6 @@ public final class RowBatchDocumentParser {
             return exceptions[index] == null;
         }
 
-        /**
-         * Returns all successfully parsed documents.
-         */
-        public List<ParsedDocument> successfulDocuments() {
-            List<ParsedDocument> result = new ArrayList<>();
-            for (ParsedDocument document : documents) {
-                if (document != null) {
-                    result.add(document);
-                }
-            }
-            return result;
-        }
     }
 
     /**
@@ -456,7 +447,8 @@ public final class RowBatchDocumentParser {
             Set<String> copyToFields,
             Map<String, List<Mapper.Builder>> dynamicMappers,
             Map<String, ObjectMapper.Builder> dynamicObjectMappers,
-            Map<String, List<RuntimeField>> dynamicRuntimeFields
+            Map<String, List<RuntimeField>> dynamicRuntimeFields,
+            int fieldCountHint
         ) {
             super(
                 mappingLookup,
@@ -473,7 +465,7 @@ public final class RowBatchDocumentParser {
             // forNullValue() provides a minimal parser that satisfies the non-null requirement
             // for metadata preParse/postParse calls.
             this.parser = RowValueXContentParser.forNullValue();
-            this.document = new LuceneDocument();
+            this.document = new LuceneDocument(fieldCountHint);
             this.documents.add(document);
             this.maxAllowedNumNestedDocs = mappingParserContext.getIndexSettings().getMappingNestedDocsLimit();
             this.numNestedDocs = 0L;

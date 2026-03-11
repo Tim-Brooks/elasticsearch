@@ -141,6 +141,10 @@ public interface XContentParser extends Closeable {
 
     int textLength() throws IOException;
 
+    default boolean emptyText() throws IOException {
+        return textLength() == 0;
+    }
+
     int textOffset() throws IOException;
 
     Number numberValue() throws IOException;

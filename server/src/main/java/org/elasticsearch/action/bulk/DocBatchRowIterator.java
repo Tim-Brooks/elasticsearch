@@ -272,6 +272,12 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     }
 
     @Override
+    public boolean emptyText() throws IOException {
+        XContentString xContentString = optimizedTextOrNull();
+        return xContentString == null || xContentString.isMoreCharsThan(0) == false;
+    }
+
+    @Override
     public int textOffset() throws IOException {
         return 0;
     }
