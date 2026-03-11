@@ -192,7 +192,7 @@ public final class RowBatchDocumentParser {
                     sharedDynamicMappers,
                     sharedDynamicObjectMappers,
                     sharedDynamicRuntimeFields,
-                    fieldCountHint
+                    fieldCountHint + 2 // TODO: Unsure
                 );
 
                 // Step 3: metadata preParse
