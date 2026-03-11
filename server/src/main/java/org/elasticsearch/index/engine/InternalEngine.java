@@ -3017,6 +3017,7 @@ public class InternalEngine extends Engine {
         iwc.setCommitOnClose(false); // we by default don't commit on close
         iwc.setOpenMode(IndexWriterConfig.OpenMode.APPEND);
         iwc.setIndexDeletionPolicy(indexDeletionPolicy);
+        iwc.setCheckPendingFlushUpdate(false);
         iwc.setInfoStream(TESTS_VERBOSE ? InfoStream.getDefault() : new LoggerInfoStream(logger));
         iwc.setMergeScheduler(mergeScheduler.getMergeScheduler());
         // Give us the opportunity to upgrade old segments while performing
