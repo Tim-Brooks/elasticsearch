@@ -201,11 +201,21 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     @Override
     protected void doRun() {
         assert bulkRequest != null;
+        for (DocWriteRequest<?> r : bulkRequest.requests()) {
+            if (r instanceof IndexRequest ir) {
+            }
+        }
         final ClusterState clusterState = observer.setAndGetObservedState();
         if (handleBlockExceptions(clusterState, BulkOperation.this, this::onFailure)) {
             return;
         }
         Map<ShardId, List<BulkItemRequest>> requestsByShard = groupBulkRequestsByShards(clusterState);
+        for (List<BulkItemRequest> reqs : requestsByShard.values()) {
+            for (BulkItemRequest bir : reqs) {
+                if (bir.request() instanceof IndexRequest ir) {
+                }
+            }
+        }
         executeBulkRequestsByShard(requestsByShard, clusterState, () -> {
             Releasables.close(sharedBatches);
             sharedBatches.clear();
@@ -301,6 +311,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         Iterator<BulkItemRequest> it = Iterators.enumerate(bulkRequest.requests.iterator(), BulkItemRequest::new);
         while (it.hasNext()) {
             BulkItemRequest bulkItemRequest = it.next();
+            if (bulkItemRequest.request() instanceof IndexRequest ir) {
+            }
             DocWriteRequest<?> docWriteRequest = bulkItemRequest.request();
 
             if (docWriteRequest == null) {
@@ -344,23 +356,26 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             }
         }
 
-        // Batch encode between passes: for each batch-eligible index, encode with routing metadata extraction
-        for (Map.Entry<Index, List<BulkItemRequest>> entry : requestsByIndex.entrySet()) {
-            Index concreteIndex = entry.getKey();
-            List<BulkItemRequest> requests = entry.getValue();
-            IndexMetadata indexMetadata = project.getIndexSafe(concreteIndex);
-            if (isBatchEligible(indexMetadata, requests)) {
-                IndexRouting indexRouting = concreteIndices.routing(concreteIndex);
-                RoutingMetadataExtractor extractor = createRoutingExtractor(indexRouting, indexMetadata);
-                try {
-                    List<IndexRequest> indexRequests = new ArrayList<>(requests.size());
-                    for (BulkItemRequest r : requests) {
-                        indexRequests.add((IndexRequest) r.request());
+        // Batch encode between passes: for each batch-eligible index, encode with routing metadata extraction.
+        // Skip if the BulkRequest already has a pre-built batch (e.g., from OTEL direct row building).
+        if (bulkRequest.getRowDocumentBatch() == null) {
+            for (Map.Entry<Index, List<BulkItemRequest>> entry : requestsByIndex.entrySet()) {
+                Index concreteIndex = entry.getKey();
+                List<BulkItemRequest> requests = entry.getValue();
+                IndexMetadata indexMetadata = project.getIndexSafe(concreteIndex);
+                if (isBatchEligible(indexMetadata, requests)) {
+                    IndexRouting indexRouting = concreteIndices.routing(concreteIndex);
+                    RoutingMetadataExtractor extractor = createRoutingExtractor(indexRouting, indexMetadata);
+                    try {
+                        List<IndexRequest> indexRequests = new ArrayList<>(requests.size());
+                        for (BulkItemRequest r : requests) {
+                            indexRequests.add((IndexRequest) r.request());
+                        }
+                        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(indexRequests, refRecycler, extractor);
+                        sharedBatches.add(batch);
+                    } catch (Exception e) {
+                        logger.debug("Failed to encode document batch for pre-routing, falling back to standard path", e);
                     }
-                    RowDocumentBatch batch = DocumentBatchRowEncoder.encode(indexRequests, refRecycler, extractor);
-                    sharedBatches.add(batch);
-                } catch (Exception e) {
-                    logger.debug("Failed to encode document batch for pre-routing, falling back to standard path", e);
                 }
             }
         }
@@ -380,6 +395,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                     shard -> new ArrayList<>()
                 );
                 shardRequests.add(bulkItemRequest);
+                if (docWriteRequest instanceof IndexRequest ir3) {
+                }
             }
         }
         return requestsByShard;
@@ -509,6 +526,10 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                 var indexMetadata = project.getIndexSafe(shardId.getIndex());
                 SplitShardCountSummary reshardSplitShardCountSummary = SplitShardCountSummary.forIndexing(indexMetadata, shardId.getId());
 
+                for (BulkItemRequest bir : requests) {
+                    if (bir.request() instanceof IndexRequest ir2) {
+                    }
+                }
                 BulkShardRequest bulkShardRequest = new BulkShardRequest(
                     shardId,
                     reshardSplitShardCountSummary,
@@ -533,6 +554,10 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                 if (firstReq instanceof IndexRequest indexReq && indexReq.batchRef() != null) {
                     // Use the shared batch from pre-routing encoding
                     bulkShardRequest.setRowDocumentBatch(indexReq.batchRef());
+                    // Shared batch is released separately — don't set releasable here
+                } else if (bulkRequest.getRowDocumentBatch() != null) {
+                    // Use the pre-built batch from the BulkRequest (e.g., from OTEL direct row building)
+                    bulkShardRequest.setRowDocumentBatch(bulkRequest.getRowDocumentBatch());
                     // Shared batch is released separately — don't set releasable here
                 } else if (isBatchEligible(indexMetadata, requests)) {
                     // Fallback: encode per-shard if not pre-encoded

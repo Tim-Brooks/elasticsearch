@@ -895,6 +895,209 @@ public class BatchBulkIT extends ESIntegTestCase {
         );
     }
 
+    /**
+     * Tests the batch path with named dynamic templates and template parameters,
+     * replicating the OTEL metrics indexing scenario where:
+     * - A TSDB index has a passthrough "metrics" object with dynamic:true
+     * - Dynamic templates define metric types (gauge_long, gauge_double, counter_long, etc.)
+     *   without match patterns — they're referenced by name via IndexRequest.setDynamicTemplates()
+     * - Template parameters (e.g. {{unit}}) are substituted into the mapping
+     * - The batch path must detect dynamic columns, build a mapping update using the templates,
+     *   submit it, and then re-parse with the updated mappings
+     */
+    @SuppressWarnings("unchecked")
+    public void testBatchModeWithNamedDynamicTemplatesOtelStyle() throws IOException {
+        String index = "test-batch-otel-style";
+
+        // Create a TSDB index with passthrough metrics object and named dynamic templates
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            {
+                mapping.startObject("_source");
+                mapping.field("mode", "synthetic");
+                mapping.endObject();
+
+                mapping.startObject("properties");
+                {
+                    mapping.startObject("@timestamp").field("type", "date").endObject();
+                    mapping.startObject("unit").field("type", "keyword").field("time_series_dimension", true).endObject();
+                    mapping.startObject("resource_id").field("type", "keyword").field("time_series_dimension", true).endObject();
+                    mapping.startObject("metrics");
+                    {
+                        mapping.field("type", "passthrough");
+                        mapping.field("dynamic", true);
+                        mapping.field("priority", 10);
+                    }
+                    mapping.endObject();
+                }
+                mapping.endObject();
+
+                // Named dynamic templates — no match patterns, referenced by name
+                mapping.startArray("dynamic_templates");
+                {
+                    // gauge_long template
+                    mapping.startObject();
+                    mapping.startObject("gauge_long");
+                    mapping.startObject("mapping");
+                    mapping.field("type", "long");
+                    mapping.field("time_series_metric", "gauge");
+                    mapping.startObject("meta");
+                    mapping.field("unit", "{{unit}}");
+                    mapping.endObject();
+                    mapping.endObject();
+                    mapping.endObject();
+                    mapping.endObject();
+
+                    // gauge_double template
+                    mapping.startObject();
+                    mapping.startObject("gauge_double");
+                    mapping.startObject("mapping");
+                    mapping.field("type", "double");
+                    mapping.field("time_series_metric", "gauge");
+                    mapping.startObject("meta");
+                    mapping.field("unit", "{{unit}}");
+                    mapping.endObject();
+                    mapping.endObject();
+                    mapping.endObject();
+                    mapping.endObject();
+
+                    // counter_long template
+                    mapping.startObject();
+                    mapping.startObject("counter_long");
+                    mapping.startObject("mapping");
+                    mapping.field("type", "long");
+                    mapping.field("time_series_metric", "counter");
+                    mapping.startObject("meta");
+                    mapping.field("unit", "{{unit}}");
+                    mapping.endObject();
+                    mapping.endObject();
+                    mapping.endObject();
+                    mapping.endObject();
+                }
+                mapping.endArray();
+            }
+            mapping.endObject();
+        }
+        mapping.endObject();
+
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put(IndexSettings.MODE.getKey(), IndexMode.TIME_SERIES)
+                        .putList(IndexMetadata.INDEX_ROUTING_PATH.getKey(), List.of("resource_id"))
+                        .put(IndexSettings.TIME_SERIES_START_TIME.getKey(), "2000-01-01T00:00:00.000Z")
+                        .put(IndexSettings.TIME_SERIES_END_TIME.getKey(), "2100-01-01T00:00:00.000Z")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+
+        String coordinatingNode = findCoordinatingNode();
+        Instant baseTime = Instant.parse("2025-01-15T10:00:00.000Z");
+
+        // Build a bulk request where each doc has different metric fields requiring dynamic mapping via templates
+        int numDocs = 5;
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int i = 0; i < numDocs; i++) {
+            // Each doc has: @timestamp, resource_id, unit, and metric fields under "metrics.*"
+            XContentBuilder doc = JsonXContent.contentBuilder();
+            doc.startObject();
+            doc.field("@timestamp", baseTime.plusSeconds(i).toEpochMilli());
+            doc.field("resource_id", "host-1");
+            doc.field("unit", "By");
+            doc.startObject("metrics");
+            doc.field("cpu_usage", 42.5 + i);     // gauge_double
+            doc.field("memory_used", 1024L + i);   // gauge_long
+            doc.field("requests_total", 100L + i);  // counter_long
+            doc.endObject();
+            doc.endObject();
+
+            // Set named dynamic templates — these map field paths to template names
+            IndexRequest indexRequest = new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE).source(doc);
+            indexRequest.setDynamicTemplates(
+                Map.of("metrics.cpu_usage", "gauge_double", "metrics.memory_used", "gauge_long", "metrics.requests_total", "counter_long")
+            );
+            indexRequest.setDynamicTemplateParams(
+                Map.of(
+                    "metrics.cpu_usage",
+                    Map.of("unit", "percent"),
+                    "metrics.memory_used",
+                    Map.of("unit", "By"),
+                    "metrics.requests_total",
+                    Map.of("unit", "1")
+                )
+            );
+            bulkRequest.add(indexRequest);
+        }
+
+        BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+        assertNoFailures(bulkResponse);
+        assertThat(bulkResponse.getItems().length, equalTo(numDocs));
+
+        refresh(index);
+
+        // Verify dynamic mappings were created correctly via the templates
+        var mappingsResponse = client().admin().indices().prepareGetMappings(TimeValue.MAX_VALUE, index).get();
+        Map<String, Object> mappingMap = mappingsResponse.getMappings().get(index).sourceAsMap();
+        Map<String, Object> properties = (Map<String, Object>) mappingMap.get("properties");
+        Map<String, Object> metricsProps = (Map<String, Object>) ((Map<String, Object>) properties.get("metrics")).get("properties");
+
+        // cpu_usage should be mapped as double with gauge metric
+        Map<String, Object> cpuUsage = (Map<String, Object>) metricsProps.get("cpu_usage");
+        assertThat("cpu_usage type", cpuUsage.get("type"), equalTo("double"));
+        assertThat("cpu_usage metric", cpuUsage.get("time_series_metric"), equalTo("gauge"));
+        Map<String, Object> cpuMeta = (Map<String, Object>) cpuUsage.get("meta");
+        assertThat("cpu_usage unit", cpuMeta.get("unit"), equalTo("percent"));
+
+        // memory_used should be mapped as long with gauge metric
+        Map<String, Object> memoryUsed = (Map<String, Object>) metricsProps.get("memory_used");
+        assertThat("memory_used type", memoryUsed.get("type"), equalTo("long"));
+        assertThat("memory_used metric", memoryUsed.get("time_series_metric"), equalTo("gauge"));
+        Map<String, Object> memMeta = (Map<String, Object>) memoryUsed.get("meta");
+        assertThat("memory_used unit", memMeta.get("unit"), equalTo("By"));
+
+        // requests_total should be mapped as long with counter metric
+        Map<String, Object> requestsTotal = (Map<String, Object>) metricsProps.get("requests_total");
+        assertThat("requests_total type", requestsTotal.get("type"), equalTo("long"));
+        assertThat("requests_total metric", requestsTotal.get("time_series_metric"), equalTo("counter"));
+        Map<String, Object> reqMeta = (Map<String, Object>) requestsTotal.get("meta");
+        assertThat("requests_total unit", reqMeta.get("unit"), equalTo("1"));
+
+        // Verify all docs are indexed and retrievable
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+
+        // Verify field values via source reconstruction
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.matchAllQuery())
+                .setSize(numDocs)
+                .addSort("metrics.cpu_usage", SortOrder.ASC)
+                .setTrackTotalHits(true),
+            searchResponse -> {
+                assertNoFailures(searchResponse);
+                SearchHit[] hits = searchResponse.getHits().getHits();
+                for (int i = 0; i < numDocs; i++) {
+                    Map<String, Object> source = hits[i].getSourceAsMap();
+                    Map<String, Object> metrics = (Map<String, Object>) source.get("metrics");
+                    assertThat("cpu_usage mismatch at doc " + i, metrics.get("cpu_usage"), equalTo(42.5 + i));
+                    assertThat("memory_used mismatch at doc " + i, ((Number) metrics.get("memory_used")).longValue(), equalTo(1024L + i));
+                    assertThat(
+                        "requests_total mismatch at doc " + i,
+                        ((Number) metrics.get("requests_total")).longValue(),
+                        equalTo(100L + i)
+                    );
+                }
+            }
+        );
+    }
+
     public void testBatchModeWithDynamicRuntimeFields() throws IOException {
         String index = "test-batch-runtime";
 

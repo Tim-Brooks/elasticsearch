@@ -298,13 +298,35 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                             listener.onResponse(batchResult);
                             return;
                         }
+                    } catch (BatchDynamicMappingUpdateRequired mappingRequired) {
+                        // Batch needs a dynamic mapping update — submit async and retry
+                        final long initialMappingVersion = primary.mapperService().mappingVersion();
+                        mappingUpdater.updateMappings(mappingRequired.getMappingUpdate(), primary.shardId(), new ActionListener<>() {
+                            @Override
+                            public void onResponse(Void v) {
+                                // Mapping update accepted — wait for it to propagate, then re-execute
+                                waitForMappingUpdate.accept(onMappingUpdateDone, initialMappingVersion);
+                            }
+
+                            @Override
+                            public void onFailure(Exception e) {
+                                logger.warn("Row batch dynamic mapping update failed, falling back to serial path", e);
+                                // Re-execute — next doRun() will retry batch (and likely succeed
+                                // or fall through to serial path)
+                                onMappingUpdateDone.onResponse(null);
+                            }
+                        });
+                        return; // async — will re-enter via listener
                     } catch (Exception e) {
                         // Batch failed entirely — fall through to serial path
                         logger.warn("Row batch execution failed, falling back to serial path", e);
                     }
                 }
 
-                // Serial loop
+                runSerialLoop();
+            }
+
+            private void runSerialLoop() throws Exception {
                 while (context.hasMoreOperationsToExecute()) {
                     if (executeBulkItemRequest(
                         context,
@@ -410,12 +432,59 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             return null;
         }
 
-        // Check if any schema columns require dynamic mapping — if so, fall back to serial path
-        // which handles dynamic mapping creation via the standard mapping update flow.
+        for (IndexRequest ir : indexRequests) {
+        }
+        // Collect all field names that have named dynamic templates from any index request
+        java.util.Set<String> dynamicTemplateFields = new java.util.HashSet<>();
+        for (IndexRequest ir : indexRequests) {
+            if (ir.getDynamicTemplates() != null) {
+                dynamicTemplateFields.addAll(ir.getDynamicTemplates().keySet());
+            }
+        }
+
+        // Check if any schema columns require dynamic mapping
         DocBatchSchema schema = rowBatch.schema();
+        java.util.List<Integer> dynamicColumns = new java.util.ArrayList<>();
         for (int col = 0; col < schema.columnCount(); col++) {
-            if (RowBatchDocumentParser.requiresDynamicMapping(schema.getColumnName(col), mappingLookup)) {
-                return null;
+            String columnName = schema.getColumnName(col);
+            if (RowBatchDocumentParser.requiresDynamicMapping(columnName, mappingLookup)) {
+                dynamicColumns.add(col);
+            } else if (dynamicTemplateFields.contains(columnName)
+                && RowBatchDocumentParser.resolveMapper(columnName, mappingLookup) == null
+                && mappingLookup.getFieldType(columnName) == null) {
+                    // Field has a named dynamic template but the mapping hierarchy didn't flag it
+                    // (e.g. passthrough objects with subobjects:false may not be in objectMappers).
+                    dynamicColumns.add(col);
+                }
+        }
+
+        if (dynamicColumns.isEmpty() == false) {
+            // Build a dynamic mapping update from the batch data
+            var batchParser = mapperService.createRowBatchDocumentParser();
+            CompressedXContent mappingUpdate = batchParser.buildDynamicMappingUpdate(
+                rowBatch,
+                dynamicColumns,
+                indexRequests,
+                mappingLookup
+            );
+            if (mappingUpdate == null) {
+                return null; // couldn't determine types — fall back to serial
+            }
+
+            // Preflight merge to validate the mapping update
+            CompressedXContent mergedSource = mapperService.merge(
+                MapperService.SINGLE_MAPPING_NAME,
+                mappingUpdate,
+                MapperService.MergeReason.MAPPING_AUTO_UPDATE_PREFLIGHT
+            ).mappingSource();
+
+            DocumentMapper existingMapper = mapperService.documentMapper();
+            if (existingMapper != null && mergedSource.equals(existingMapper.mappingSource())) {
+                // Mapping already up to date (concurrent update?) — proceed with refreshed lookup
+                // Fall through to parse with the current mappingLookup which should now have the fields
+            } else {
+                // Mapping update required — return special marker to trigger async update
+                throw new BatchDynamicMappingUpdateRequired(mappingUpdate);
             }
         }
 
@@ -1042,5 +1111,22 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             );
         }
         return result;
+    }
+
+    /**
+     * Exception used to signal that the batch path requires a dynamic mapping update before it can proceed.
+     * Caught in doRun() to trigger the async mapping update flow.
+     */
+    static final class BatchDynamicMappingUpdateRequired extends RuntimeException {
+        private final CompressedXContent mappingUpdate;
+
+        BatchDynamicMappingUpdateRequired(CompressedXContent mappingUpdate) {
+            super("Batch path requires dynamic mapping update");
+            this.mappingUpdate = mappingUpdate;
+        }
+
+        CompressedXContent getMappingUpdate() {
+            return mappingUpdate;
+        }
     }
 }

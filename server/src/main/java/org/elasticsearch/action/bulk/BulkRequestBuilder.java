@@ -56,6 +56,8 @@ public class BulkRequestBuilder extends ActionRequestLazyBuilder<BulkRequest, Bu
     private String globalRouting;
     private WriteRequest.RefreshPolicy refreshPolicy;
     private boolean requestPreviouslyCalled = false;
+    @Nullable
+    private RowDocumentBatch rowDocumentBatch;
 
     public BulkRequestBuilder(ElasticsearchClient client, @Nullable String globalIndex) {
         super(client, TransportBulkAction.TYPE);
@@ -194,6 +196,11 @@ public class BulkRequestBuilder extends ActionRequestLazyBuilder<BulkRequest, Bu
         return this;
     }
 
+    public BulkRequestBuilder setRowDocumentBatch(RowDocumentBatch batch) {
+        this.rowDocumentBatch = batch;
+        return this;
+    }
+
     @Override
     public BulkRequest request() {
         assert requestPreviouslyCalled == false : "Cannot call request() multiple times on the same BulkRequestBuilder object";
@@ -234,6 +241,13 @@ public class BulkRequestBuilder extends ActionRequestLazyBuilder<BulkRequest, Bu
         }
         if (refreshPolicy != null) {
             request.setRefreshPolicy(refreshPolicy);
+        }
+        if (rowDocumentBatch != null) {
+            request.setRowDocumentBatch(rowDocumentBatch);
+        }
+        for (DocWriteRequest<?> r : request.requests()) {
+            if (r instanceof IndexRequest ir) {
+            }
         }
         return request;
     }

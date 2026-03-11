@@ -223,6 +223,8 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
         ifPrimaryTerm = in.readVLong();
         requireAlias = in.readBoolean();
         dynamicTemplates = in.readMap(StreamInput::readString);
+        if (dynamicTemplates != null && dynamicTemplates.isEmpty() == false) {
+        }
         this.listExecutedPipelines = in.readBoolean();
         if (listExecutedPipelines) {
             List<String> possiblyImmutableExecutedPipelines = in.readOptionalCollectionAsList(StreamInput::readString);
@@ -822,6 +824,8 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
         out.writeZLong(ifSeqNo);
         out.writeVLong(ifPrimaryTerm);
         out.writeBoolean(requireAlias);
+        if (dynamicTemplates != null && dynamicTemplates.isEmpty() == false) {
+        }
         out.writeMap(dynamicTemplates, StreamOutput::writeString);
         out.writeBoolean(listExecutedPipelines);
         if (listExecutedPipelines) {

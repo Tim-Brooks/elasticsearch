@@ -182,6 +182,7 @@ public class DocumentBatchRowEncoder {
 
     /**
      * Mutable holder for scratch buffers that survives growth across recursive calls.
+     * Package-private so that {@link DocumentBatchRowBuilder} can reuse it.
      */
     static final class ScratchBuffers {
         byte[] typeBytes;
@@ -464,7 +465,7 @@ public class DocumentBatchRowEncoder {
         }
     }
 
-    private static void writeRow(RecyclerBytesStreamOutput output, int columnCount, ScratchBuffers scratch) throws IOException {
+    static void writeRow(RecyclerBytesStreamOutput output, int columnCount, ScratchBuffers scratch) throws IOException {
         byte[] typeBytes = scratch.typeBytes;
         byte[] fixedData = scratch.fixedData;
         Object[] varData = scratch.varData;
@@ -514,7 +515,7 @@ public class DocumentBatchRowEncoder {
         }
     }
 
-    private static BytesReference buildHeader(DocBatchSchema schema, int docCount, int[] rowOffsets, int[] rowLengths, int rowDataSize) {
+    static BytesReference buildHeader(DocBatchSchema schema, int docCount, int[] rowOffsets, int[] rowLengths, int rowDataSize) {
         int columnCount = schema.columnCount();
 
         // Compute schema section size
@@ -565,7 +566,7 @@ public class DocumentBatchRowEncoder {
         return new BytesArray(header);
     }
 
-    private static void writeLongToFixed(byte[] fixedData, int colIdx, long value) {
+    static void writeLongToFixed(byte[] fixedData, int colIdx, long value) {
         ByteUtils.writeLongBE(value, fixedData, colIdx * 8);
     }
 

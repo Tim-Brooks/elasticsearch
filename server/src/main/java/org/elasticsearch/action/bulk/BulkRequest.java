@@ -93,6 +93,11 @@ public class BulkRequest extends LegacyActionRequest
     private boolean includeSourceOnError = true;
     private Set<String> paramsUsed = emptySet();
 
+    // Pre-built row document batch — when set, the bulk pipeline skips batch encoding.
+    // Coordinator-only state (not serialized over transport).
+    @Nullable
+    private RowDocumentBatch rowDocumentBatch;
+
     private long sizeInBytes = 0;
 
     public BulkRequest() {}
@@ -414,6 +419,15 @@ public class BulkRequest extends LegacyActionRequest
 
     public boolean includeSourceOnError() {
         return includeSourceOnError;
+    }
+
+    public void setRowDocumentBatch(RowDocumentBatch batch) {
+        this.rowDocumentBatch = batch;
+    }
+
+    @Nullable
+    public RowDocumentBatch getRowDocumentBatch() {
+        return rowDocumentBatch;
     }
 
     /**

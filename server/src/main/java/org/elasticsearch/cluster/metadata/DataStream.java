@@ -1772,6 +1772,16 @@ public final class DataStream implements SimpleDiffable<DataStream>, ToXContentO
         Object rawTimestamp = request.getRawTimestamp();
         if (rawTimestamp != null) {
             timestamp = getTimeStampFromRaw(rawTimestamp);
+        } else if (request.batchRef() != null && request.batchRowIndex() >= 0) {
+            // Fallback: extract timestamp from the row-oriented document batch
+            var batch = request.batchRef();
+            int tsCol = batch.schema().getColumnIndex("@timestamp");
+            if (tsCol < 0) {
+                throw new TimestampError("the document batch does not contain a @timestamp column");
+            }
+            var reader = batch.getRowReader(request.batchRowIndex());
+            long tsMillis = reader.getLongValue(tsCol);
+            timestamp = Instant.ofEpochMilli(tsMillis);
         } else {
             timestamp = getTimestampFromParser(request.source(), request.getContentType());
         }

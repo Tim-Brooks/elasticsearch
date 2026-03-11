@@ -15,26 +15,29 @@ import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.ActionType;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.bulk.BulkRequestBuilder;
+import org.elasticsearch.action.bulk.DocumentBatchRowBuilder;
+import org.elasticsearch.action.bulk.RowDocumentBatch;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.cluster.service.ClusterService;
-import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.injection.guice.Inject;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
-import org.elasticsearch.xcontent.XContentBuilder;
-import org.elasticsearch.xcontent.XContentFactory;
+import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.oteldata.OTelPlugin;
 import org.elasticsearch.xpack.oteldata.otlp.datapoint.DataPointGroupingContext;
 import org.elasticsearch.xpack.oteldata.otlp.docbuilder.MappingHints;
-import org.elasticsearch.xpack.oteldata.otlp.docbuilder.MetricDocumentBuilder;
+import org.elasticsearch.xpack.oteldata.otlp.docbuilder.MetricRowBuilder;
 import org.elasticsearch.xpack.oteldata.otlp.proto.BufferedByteStringAccessor;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Transport action for handling OpenTelemetry Protocol (OTLP) Metrics requests.
@@ -78,8 +81,43 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
         if (context.totalDataPoints() == 0) {
             return context;
         }
-        MetricDocumentBuilder metricDocumentBuilder = new MetricDocumentBuilder(byteStringAccessor, defaultMappingHints);
-        context.consume(dataPointGroup -> addIndexRequest(bulkRequestBuilder, metricDocumentBuilder, dataPointGroup));
+
+        DocumentBatchRowBuilder rowBuilder = new DocumentBatchRowBuilder();
+        MetricRowBuilder metricRowBuilder = new MetricRowBuilder(rowBuilder, byteStringAccessor, defaultMappingHints);
+        List<IndexRequest> indexRequests = new ArrayList<>();
+
+        context.consume(dataPointGroup -> {
+            rowBuilder.startDocument();
+            var dynamicTemplates = Maps.<String, String>newHashMapWithExpectedSize(dataPointGroup.dataPoints().size());
+            var dynamicTemplateParams = Maps.<String, Map<String, String>>newHashMapWithExpectedSize(dataPointGroup.dataPoints().size());
+            BytesRef tsid = metricRowBuilder.buildMetricRow(dataPointGroup, dynamicTemplates, dynamicTemplateParams);
+            rowBuilder.endDocument();
+
+            long timestampMillis = TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getTimestampUnixNano());
+            IndexRequest indexRequest = new IndexRequest(dataPointGroup.targetIndex().index()).opType(DocWriteRequest.OpType.CREATE)
+                .setRequireDataStream(true)
+                .source("{}", XContentType.JSON)
+                .tsid(tsid)
+                .setIncludeSourceOnError(false)
+                .setDynamicTemplates(dynamicTemplates)
+                .setDynamicTemplateParams(dynamicTemplateParams);
+            indexRequest.setRawTimestamp(timestampMillis);
+            indexRequests.add(indexRequest);
+            bulkRequestBuilder.add(indexRequest);
+        });
+
+        // Build the batch and wire it up
+        RowDocumentBatch batch = rowBuilder.build();
+        for (int i = 0; i < indexRequests.size(); i++) {
+            indexRequests.get(i).setBatchRowIndex(i);
+            indexRequests.get(i).setBatchRef(batch);
+        }
+        bulkRequestBuilder.setRowDocumentBatch(batch);
+
+        for (int i = 0; i < indexRequests.size(); i++) {
+            IndexRequest ir = indexRequests.get(i);
+        }
+
         return context;
     }
 
@@ -90,31 +128,5 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
             .setErrorMessage(message)
             .build();
         return ExportMetricsServiceResponse.newBuilder().setPartialSuccess(partialSuccess).build();
-    }
-
-    private void addIndexRequest(
-        BulkRequestBuilder bulkRequestBuilder,
-        MetricDocumentBuilder metricDocumentBuilder,
-        DataPointGroupingContext.DataPointGroup dataPointGroup
-    ) throws IOException {
-        try (XContentBuilder xContentBuilder = XContentFactory.cborBuilder(new BytesStreamOutput())) {
-            var dynamicTemplates = Maps.<String, String>newHashMapWithExpectedSize(dataPointGroup.dataPoints().size());
-            var dynamicTemplateParams = Maps.<String, Map<String, String>>newHashMapWithExpectedSize(dataPointGroup.dataPoints().size());
-            BytesRef tsid = metricDocumentBuilder.buildMetricDocument(
-                xContentBuilder,
-                dataPointGroup,
-                dynamicTemplates,
-                dynamicTemplateParams
-            );
-            bulkRequestBuilder.add(
-                new IndexRequest(dataPointGroup.targetIndex().index()).opType(DocWriteRequest.OpType.CREATE)
-                    .setRequireDataStream(true)
-                    .source(xContentBuilder)
-                    .tsid(tsid)
-                    .setIncludeSourceOnError(false)
-                    .setDynamicTemplates(dynamicTemplates)
-                    .setDynamicTemplateParams(dynamicTemplateParams)
-            );
-        }
     }
 }
