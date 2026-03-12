@@ -281,16 +281,21 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     ) {
         new ActionRunnable<>(listener) {
 
+            private static final int MAX_BATCH_MAPPING_RETRIES = 3;
+
             private final BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(request, primary);
 
             final long startBulkTime = System.nanoTime();
 
             private final ActionListener<Void> onMappingUpdateDone = ActionListener.wrap(v -> executor.execute(this), this::onRejection);
 
+            private int batchMappingRetries = 0;
+            private boolean batchFallbackToSerial = false;
+
             @Override
             protected void doRun() throws Exception {
                 // Try batch path if the coordinating node determined this request is batch-eligible
-                if (request.isRowBatchMode()) {
+                if (request.isRowBatchMode() && batchFallbackToSerial == false) {
                     try {
                         var batchResult = performRowBatchOnPrimary(request, primary, postWriteRefresh, postWriteAction);
                         if (batchResult != null) {
@@ -299,6 +304,13 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                             return;
                         }
                     } catch (BatchDynamicMappingUpdateRequired mappingRequired) {
+                        if (batchMappingRetries >= MAX_BATCH_MAPPING_RETRIES) {
+                            logger.debug("Row batch dynamic mapping update retries exhausted, falling back to serial path");
+                            batchFallbackToSerial = true;
+                            runSerialLoop();
+                            return;
+                        }
+                        batchMappingRetries++;
                         // Batch needs a dynamic mapping update — submit async and retry
                         final long initialMappingVersion = primary.mapperService().mappingVersion();
                         mappingUpdater.updateMappings(mappingRequired.getMappingUpdate(), primary.shardId(), new ActionListener<>() {
@@ -311,8 +323,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                             @Override
                             public void onFailure(Exception e) {
                                 logger.warn("Row batch dynamic mapping update failed, falling back to serial path", e);
-                                // Re-execute — next doRun() will retry batch (and likely succeed
-                                // or fall through to serial path)
+                                batchFallbackToSerial = true;
                                 onMappingUpdateDone.onResponse(null);
                             }
                         });
@@ -486,9 +497,30 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             }
         }
 
+        // Phase 1.5: Extract tsid from batch data for ForIndexDimensions indices.
+        // The tsid may have been pre-computed during BulkOperation encoding, but if dimension
+        // fields were unmapped at that time (common during dynamic mapping bootstrapping),
+        // the tsid will be null. Re-extract here using the current (post-mapping-update) mapping.
+        if (primary.indexSettings().getMode() == org.elasticsearch.index.IndexMode.TIME_SERIES) {
+            extractTsidsFromBatch(rowBatch, indexRequests, mappingLookup);
+        }
+
         // Phase 2: Parse batch using RowBatchDocumentParser
         var batchParser = mapperService.createRowBatchDocumentParser();
         var parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
+
+        // Check if any parsed document needs a dynamic mapping update that wasn't predicted
+        // by the upfront requiresDynamicMapping check (mirrors serial path's check in
+        // IndexShard.applyIndexOperation after parsing)
+        for (int i = 0; i < batchDocCount; i++) {
+            if (parseResult.isSuccess(i)) {
+                CompressedXContent docMappingUpdate = parseResult.getDocument(i).dynamicMappingsUpdate();
+                if (docMappingUpdate != null) {
+                    // A parsed document discovered unmapped fields during parsing — need mapping update
+                    throw new BatchDynamicMappingUpdateRequired(docMappingUpdate);
+                }
+            }
+        }
 
         // Phase 3: Build Engine.Index operations for successfully parsed documents
         final java.util.List<Engine.Index> engineOps = new java.util.ArrayList<>(batchDocCount);
@@ -582,6 +614,92 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         BulkShardResponse shardResponse = new BulkShardResponse(shardId, responses);
 
         return new WritePrimaryResult<>(request, shardResponse, locationToSync, primary, logger, postWriteRefresh, postWriteAction);
+    }
+
+    /**
+     * Extracts tsid for each IndexRequest from the row batch data using the current mapping's dimension fields.
+     * This is needed because the tsid may not have been set during BulkOperation encoding if dimension fields
+     * were not yet mapped at that time.
+     */
+    private static void extractTsidsFromBatch(
+        RowDocumentBatch rowBatch,
+        java.util.List<IndexRequest> indexRequests,
+        MappingLookup mappingLookup
+    ) {
+        // Collect dimension field names from the current mapping
+        java.util.Set<String> dimensionFields = new java.util.HashSet<>();
+        for (var entry : mappingLookup.fieldMappers()) {
+            if (entry instanceof org.elasticsearch.index.mapper.FieldMapper fm && fm.fieldType().isDimension()) {
+                dimensionFields.add(fm.fieldType().name());
+            }
+        }
+        if (dimensionFields.isEmpty()) {
+            return;
+        }
+
+        // Map dimension fields to batch schema columns
+        DocBatchSchema schema = rowBatch.schema();
+        int[] dimColIndices = new int[dimensionFields.size()];
+        String[] dimColNames = new String[dimensionFields.size()];
+        int dimColCount = 0;
+        for (int col = 0; col < schema.columnCount(); col++) {
+            String colName = schema.getColumnName(col);
+            if (dimensionFields.contains(colName)) {
+                dimColIndices[dimColCount] = col;
+                dimColNames[dimColCount] = colName;
+                dimColCount++;
+            }
+        }
+        if (dimColCount == 0) {
+            return;
+        }
+
+        // Extract tsid for each document
+        for (int docIdx = 0; docIdx < indexRequests.size(); docIdx++) {
+            IndexRequest request = indexRequests.get(docIdx);
+            int rowIndex = request.batchRowIndex() >= 0 ? request.batchRowIndex() : docIdx;
+            DocBatchRowReader rowReader = rowBatch.getRowReader(rowIndex);
+
+            org.elasticsearch.cluster.routing.TsidBuilder tsidBuilder = new org.elasticsearch.cluster.routing.TsidBuilder(dimColCount);
+            for (int i = 0; i < dimColCount; i++) {
+                int colIdx = dimColIndices[i];
+                String fieldName = dimColNames[i];
+                byte baseType = rowReader.getBaseType(colIdx);
+
+                switch (baseType) {
+                    case RowType.STRING -> tsidBuilder.addStringDimension(fieldName, rowReader.getStringValue(colIdx));
+                    case RowType.LONG -> tsidBuilder.addLongDimension(fieldName, rowReader.getLongValue(colIdx));
+                    case RowType.DOUBLE -> tsidBuilder.addDoubleDimension(fieldName, rowReader.getDoubleValue(colIdx));
+                    case RowType.TRUE -> tsidBuilder.addBooleanDimension(fieldName, true);
+                    case RowType.FALSE -> tsidBuilder.addBooleanDimension(fieldName, false);
+                    case RowType.ARRAY -> {
+                        byte[] arrayData = rowReader.getArrayValue(colIdx);
+                        SmallArrayReader arrayReader = new SmallArrayReader(arrayData);
+                        while (arrayReader.next()) {
+                            if (arrayReader.isNull()) continue;
+                            switch (arrayReader.type()) {
+                                case RowType.STRING -> tsidBuilder.addStringDimension(
+                                    fieldName,
+                                    arrayReader.stringBytes(),
+                                    arrayReader.stringOffset(),
+                                    arrayReader.stringLength()
+                                );
+                                case RowType.LONG -> tsidBuilder.addLongDimension(fieldName, arrayReader.longValue());
+                                case RowType.DOUBLE -> tsidBuilder.addDoubleDimension(fieldName, arrayReader.doubleValue());
+                                case RowType.TRUE -> tsidBuilder.addBooleanDimension(fieldName, true);
+                                case RowType.FALSE -> tsidBuilder.addBooleanDimension(fieldName, false);
+                                default -> { }
+                            }
+                        }
+                    }
+                    case RowType.NULL -> { }
+                    default -> { }
+                }
+            }
+            if (tsidBuilder.size() > 0) {
+                request.tsid(tsidBuilder.buildTsid());
+            }
+        }
     }
 
     /**
