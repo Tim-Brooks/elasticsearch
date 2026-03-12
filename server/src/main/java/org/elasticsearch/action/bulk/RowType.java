@@ -26,7 +26,7 @@ public final class RowType {
     public static final byte XCONTENT_ARRAY = 0x08;
 
     /** Maximum number of leaf elements in a small (typed) array. */
-    public static final int MAX_SMALL_ARRAY_SIZE = 8;
+    public static final int MAX_SMALL_ARRAY_SIZE = 32;
 
     /** Set when the field came from a nested JSON object (dot-path flattened). */
     public static final byte OBJECT_FLAG = (byte) 0x80;

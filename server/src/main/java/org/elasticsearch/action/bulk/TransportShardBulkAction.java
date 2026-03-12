@@ -319,7 +319,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                         return; // async — will re-enter via listener
                     } catch (Exception e) {
                         // Batch failed entirely — fall through to serial path
-                        logger.warn("Row batch execution failed, falling back to serial path", e);
+                        logger.error("Row batch execution failed, falling back to serial path", e);
                     }
                 }
 
