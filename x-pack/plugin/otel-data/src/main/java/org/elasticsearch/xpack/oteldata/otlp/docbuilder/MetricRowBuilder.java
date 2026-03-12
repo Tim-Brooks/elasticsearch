@@ -20,12 +20,15 @@ import com.google.protobuf.ByteString;
 
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.bulk.DocumentBatchRowBuilder;
+import org.elasticsearch.action.bulk.DocumentBatchRowEncoder;
+import org.elasticsearch.action.bulk.RowType;
 import org.elasticsearch.cluster.routing.TsidBuilder;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.hash.BufferedMurmur3Hasher;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentFactory;
+import org.elasticsearch.xcontent.XContentString;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.oteldata.otlp.datapoint.DataPoint;
 import org.elasticsearch.xpack.oteldata.otlp.datapoint.DataPointGroupingContext;
@@ -40,6 +43,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import static org.elasticsearch.action.bulk.RowType.MAX_SMALL_ARRAY_SIZE;
+
 /**
  * Builds metric documents directly into a {@link DocumentBatchRowBuilder},
  * bypassing XContent serialization. Mirrors the logic of {@link MetricDocumentBuilder}
@@ -52,6 +57,10 @@ public class MetricRowBuilder {
     private final MappingHints defaultMappingHints;
     private final BufferedMurmur3Hasher hasher = new BufferedMurmur3Hasher(0);
     private final ExponentialHistogramConverter.BucketBuffer scratch = new ExponentialHistogramConverter.BucketBuffer();
+    // Reusable scratch buffers for compact array encoding
+    private final byte[] arrayElemTypes = new byte[MAX_SMALL_ARRAY_SIZE];
+    private final long[] arrayElemFixed = new long[MAX_SMALL_ARRAY_SIZE];
+    private final XContentString.UTF8Bytes[] arrayElemStrings = new XContentString.UTF8Bytes[MAX_SMALL_ARRAY_SIZE];
 
     public MetricRowBuilder(
         DocumentBatchRowBuilder rowBuilder,
@@ -188,10 +197,8 @@ public class MetricRowBuilder {
             case INT_VALUE -> rowBuilder.setLong(path, value.getIntValue(), true);
             case DOUBLE_VALUE -> rowBuilder.setDouble(path, value.getDoubleValue(), true);
             case ARRAY_VALUE -> {
-                // Serialize array as XContent JSON bytes
                 try {
-                    BytesReference arrayBytes = serializeArrayAsXContent(value);
-                    rowBuilder.setXContentArray(path, arrayBytes, true);
+                    setArrayValue(path, value);
                 } catch (IOException e) {
                     throw new RuntimeException("Failed to serialize array value for " + path, e);
                 }
@@ -208,8 +215,54 @@ public class MetricRowBuilder {
         }
     }
 
+    /**
+     * Sets an array value, using compact binary encoding for small leaf-only arrays
+     * and falling back to XContent for larger or nested arrays.
+     */
+    private void setArrayValue(String path, AnyValue arrayValue) throws IOException {
+        List<AnyValue> values = arrayValue.getArrayValue().getValuesList();
+        if (values.size() <= MAX_SMALL_ARRAY_SIZE) {
+            // Try compact encoding - check all elements are leaves
+            boolean allLeaves = true;
+            int count = 0;
+            for (int i = 0, size = values.size(); i < size; i++) {
+                AnyValue elem = values.get(i);
+                switch (elem.getValueCase()) {
+                    case STRING_VALUE -> {
+                        arrayElemTypes[count] = RowType.STRING;
+                        ByteString bs = elem.getStringValueBytes();
+                        byte[] buf = byteStringAccessor.toBytes(bs);
+                        arrayElemStrings[count] = new XContentString.UTF8Bytes(buf, 0, bs.size());
+                    }
+                    case BOOL_VALUE -> arrayElemTypes[count] = elem.getBoolValue() ? RowType.TRUE : RowType.FALSE;
+                    case INT_VALUE -> {
+                        arrayElemTypes[count] = RowType.LONG;
+                        arrayElemFixed[count] = elem.getIntValue();
+                    }
+                    case DOUBLE_VALUE -> {
+                        arrayElemTypes[count] = RowType.DOUBLE;
+                        arrayElemFixed[count] = Double.doubleToRawLongBits(elem.getDoubleValue());
+                    }
+                    default -> {
+                        allLeaves = false;
+                    }
+                }
+                if (allLeaves == false) break;
+                count++;
+            }
+            if (allLeaves) {
+                byte[] packed = DocumentBatchRowEncoder.packSmallArray(arrayElemTypes, arrayElemFixed, arrayElemStrings, count);
+                rowBuilder.setPackedArray(path, packed, true);
+                return;
+            }
+        }
+        // Fall back to XContent for large or non-leaf arrays
+        BytesReference arrayBytes = serializeArrayAsXContent(arrayValue);
+        rowBuilder.setXContentArray(path, arrayBytes, true);
+    }
+
     private BytesReference serializeArrayAsXContent(AnyValue arrayValue) throws IOException {
-        try (XContentBuilder xBuilder = XContentFactory.contentBuilder(XContentType.JSON)) {
+        try (XContentBuilder xBuilder = XContentFactory.contentBuilder(XContentType.CBOR)) {
             xBuilder.startArray();
             List<AnyValue> values = arrayValue.getArrayValue().getValuesList();
             for (int i = 0, size = values.size(); i < size; i++) {
@@ -296,7 +349,7 @@ public class MetricRowBuilder {
      */
     private void buildExpHistTDigest(String metricPath, ExponentialHistogramDataPoint dp) throws IOException {
         BytesReference histBytes;
-        try (XContentBuilder xb = XContentFactory.contentBuilder(XContentType.JSON)) {
+        try (XContentBuilder xb = XContentFactory.contentBuilder(XContentType.CBOR)) {
             xb.startObject();
             xb.startArray("counts");
             TDigestConverter.counts(dp, xb::value);
@@ -315,7 +368,7 @@ public class MetricRowBuilder {
      */
     private void buildExplicitHistTDigest(String metricPath, HistogramDataPoint dp) throws IOException {
         BytesReference histBytes;
-        try (XContentBuilder xb = XContentFactory.contentBuilder(XContentType.JSON)) {
+        try (XContentBuilder xb = XContentFactory.contentBuilder(XContentType.CBOR)) {
             xb.startObject();
             xb.startArray("counts");
             TDigestConverter.counts(dp, xb::value);
@@ -337,7 +390,7 @@ public class MetricRowBuilder {
         // Use XContent to serialize the whole exponential histogram value, then store as XCONTENT_ARRAY
         // This is the simplest approach since exponential histograms have deeply nested structures
         BytesReference histBytes;
-        try (XContentBuilder xb = XContentFactory.contentBuilder(XContentType.JSON)) {
+        try (XContentBuilder xb = XContentFactory.contentBuilder(XContentType.CBOR)) {
             ExponentialHistogramConverter.buildExponentialHistogram(dp, xb);
             histBytes = BytesReference.bytes(xb);
         }
@@ -349,7 +402,7 @@ public class MetricRowBuilder {
      */
     private void buildExplicitHistAsExpHist(String metricPath, HistogramDataPoint dp) throws IOException {
         BytesReference histBytes;
-        try (XContentBuilder xb = XContentFactory.contentBuilder(XContentType.JSON)) {
+        try (XContentBuilder xb = XContentFactory.contentBuilder(XContentType.CBOR)) {
             ExponentialHistogramConverter.buildExponentialHistogram(dp, xb, scratch);
             histBytes = BytesReference.bytes(xb);
         }

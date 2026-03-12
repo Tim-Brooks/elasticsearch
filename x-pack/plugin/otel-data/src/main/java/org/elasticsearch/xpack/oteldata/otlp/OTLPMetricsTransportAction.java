@@ -96,7 +96,7 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
             long timestampMillis = TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getTimestampUnixNano());
             IndexRequest indexRequest = new IndexRequest(dataPointGroup.targetIndex().index()).opType(DocWriteRequest.OpType.CREATE)
                 .setRequireDataStream(true)
-                .source("{}", XContentType.JSON)
+                .source("{}", XContentType.CBOR)
                 .tsid(tsid)
                 .setIncludeSourceOnError(false)
                 .setDynamicTemplates(dynamicTemplates)

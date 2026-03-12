@@ -166,6 +166,17 @@ public class DocumentBatchRowBuilder implements Releasable {
     }
 
     /**
+     * Sets a compact packed array column value (small leaf-only arrays).
+     * The bytes should be produced by {@link DocumentBatchRowEncoder#packSmallArray}.
+     */
+    public void setPackedArray(String path, byte[] packed, boolean fromObject) {
+        int colIdx = resolveColumn(path);
+        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
+        scratch.typeBytes[colIdx] = (byte) (RowType.ARRAY | objectFlag);
+        scratch.varData[colIdx] = new org.elasticsearch.common.bytes.BytesArray(packed);
+    }
+
+    /**
      * Sets an XContent array column value from pre-serialized bytes (e.g. JSON array bytes).
      */
     public void setXContentArray(String path, BytesReference bytes, boolean fromObject) {

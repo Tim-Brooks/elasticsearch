@@ -19,6 +19,8 @@ import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentParser;
@@ -33,6 +35,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
 
 /**
@@ -41,6 +44,8 @@ import java.util.function.Supplier;
  * The header (schema + doc index) is built last and combined with row data via {@link CompositeBytesReference}.
  */
 public class DocumentBatchRowEncoder {
+
+    private static final Logger logger = LogManager.getLogger(DocumentBatchRowEncoder.class)
 
     private static final int HEADER_SIZE = 32;
     private static final int INITIAL_CAPACITY = 16;
@@ -339,6 +344,10 @@ public class DocumentBatchRowEncoder {
         if (fallback) {
             // Write buffered elements + remaining tokens as raw x-content
             BytesReference rawBytes = buildXContentArrayFallback(parser, xContentType, elemTypes, elemFixed, elemStrings, count, token);
+            // TODO: Remove
+            if (ThreadLocalRandom.current().nextInt(100) < 5) {
+                logger.error("Failed to encode array as compact typed array: {}", rawBytes.utf8ToString());
+            }
             byte base = RowType.XCONTENT_ARRAY;
             scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (base | RowType.OBJECT_FLAG) : base;
             scratch.varData[colIdx] = rawBytes;
@@ -356,7 +365,7 @@ public class DocumentBatchRowEncoder {
      * count(1) | for each element: type(1) + data
      * where data is: nothing for NULL/TRUE/FALSE, 8 bytes for LONG/DOUBLE, 4 bytes length + UTF-8 for STRING.
      */
-    private static byte[] packSmallArray(byte[] elemTypes, long[] elemFixed, XContentString.UTF8Bytes[] elemStrings, int count) {
+    public static byte[] packSmallArray(byte[] elemTypes, long[] elemFixed, XContentString.UTF8Bytes[] elemStrings, int count) {
         // Compute total size
         int size = 1; // count byte
         for (int i = 0; i < count; i++) {
