@@ -79,6 +79,57 @@ public final class RowBatchDocumentParser {
     }
 
     /**
+     * Checks if a field path is a sub-field of a compound field mapper (e.g., "metrics.X.sum"
+     * is a sub-field of compound parent "metrics.X" which is an aggregate_metric_double).
+     * Returns the compound parent info if found, or null if not a compound sub-field.
+     */
+    static CompoundFieldInfo resolveCompoundParent(String fieldPath, MappingLookup mappingLookup) {
+        int dotPos = fieldPath.length();
+        while (true) {
+            dotPos = fieldPath.lastIndexOf('.', dotPos - 1);
+            if (dotPos < 0) return null;
+            String parentPath = fieldPath.substring(0, dotPos);
+            Mapper parent = resolveMapper(parentPath, mappingLookup);
+            if (parent instanceof FieldMapper fm && fm.isCompoundField()) {
+                String subPath = fieldPath.substring(dotPos + 1);
+                return new CompoundFieldInfo(parentPath, fm, subPath);
+            }
+        }
+    }
+
+    record CompoundFieldInfo(String parentPath, FieldMapper parentMapper, String subFieldPath) {}
+
+    /**
+     * Group of sub-field columns belonging to one compound parent field.
+     * During row iteration, sub-field values are buffered here and then
+     * processed together after the main column loop.
+     */
+    static final class CompoundFieldGroup {
+        final String parentPath;
+        final FieldMapper parentMapper;
+        final String[] parentSegments;
+        final List<String> subFieldPaths = new ArrayList<>();
+        final List<Integer> columnIndices = new ArrayList<>();
+        // Per-row buffered values (indexed by subFieldPaths position)
+        final List<Object> bufferedValues = new ArrayList<>();
+
+        CompoundFieldGroup(String parentPath, FieldMapper parentMapper, String[] parentSegments) {
+            this.parentPath = parentPath;
+            this.parentMapper = parentMapper;
+            this.parentSegments = parentSegments;
+        }
+
+        void addSubField(String subFieldPath, int columnIndex) {
+            subFieldPaths.add(subFieldPath);
+            columnIndices.add(columnIndex);
+        }
+
+        void clearBuffers() {
+            bufferedValues.clear();
+        }
+    }
+
+    /**
      * Determines whether an unmapped field would require a dynamic mapping update.
      * Returns {@code true} if the field has no mapper and the effective dynamic setting
      * for its location in the mapping hierarchy is {@link ObjectMapper.Dynamic#TRUE} or
@@ -94,6 +145,12 @@ public final class RowBatchDocumentParser {
         // Runtime fields are not in the field mappers but are in the field type lookup.
         // An existing runtime field does not require a dynamic mapping update.
         if (mappingLookup.getFieldType(fieldPath) != null) {
+            return false;
+        }
+        // Check if this is a sub-field of an already-mapped compound field (e.g., metrics.X.sum
+        // under a mapped metrics.X of type aggregate_metric_double). In this case the parent
+        // mapper handles parsing, so no dynamic mapping is needed.
+        if (resolveCompoundParent(fieldPath, mappingLookup) != null) {
             return false;
         }
         ObjectMapper.Dynamic dynamic = getEffectiveDynamic(fieldPath, mappingLookup);
@@ -181,8 +238,40 @@ public final class RowBatchDocumentParser {
             dynamicColumns.size() + 2
         );
 
+        // Track compound parent paths that have already been processed so we create
+        // only one dynamic mapping entry per compound parent, not one per sub-field.
+        Set<String> processedCompoundParents = new java.util.HashSet<>();
+
         for (int col : dynamicColumns) {
             String fieldName = schema.getColumnName(col);
+
+            // Check if this is a compound sub-field (e.g., metrics.X.sum).
+            // If so, find the parent path and use its dynamic template to create the mapping.
+            String compoundParentPath = findCompoundDynamicParent(fieldName, indexRequests);
+            if (compoundParentPath != null) {
+                if (processedCompoundParents.add(compoundParentPath)) {
+                    // Process this compound parent once
+                    FieldPathInfo parentPathInfo = computeFieldPathInfo(compoundParentPath, mappingLookup);
+                    String[] parentSegments = parentPathInfo.parentSegments();
+                    String leafName = parentPathInfo.leafName();
+                    ObjectMapper.Dynamic dynamic = getEffectiveDynamic(compoundParentPath, mappingLookup);
+
+                    setPathForField(parentSegments, context.path());
+                    try {
+                        // Use OBJECT match type since the parent is an object-like field
+                        DynamicTemplate.XContentFieldType matchType = DynamicTemplate.XContentFieldType.OBJECT;
+                        if (dynamic == ObjectMapper.Dynamic.TRUE) {
+                            createDynamicFieldForColumn(context, leafName, matchType, RowType.BINARY);
+                        } else if (dynamic == ObjectMapper.Dynamic.RUNTIME) {
+                            createRuntimeDynamicFieldForColumn(context, leafName, matchType);
+                        }
+                    } finally {
+                        resetPath(parentSegments.length, context.path());
+                    }
+                }
+                continue;
+            }
+
             FieldPathInfo pathInfo = computeFieldPathInfo(fieldName, mappingLookup);
             String[] parentSegments = pathInfo.parentSegments();
             String leafName = pathInfo.leafName();
@@ -214,6 +303,27 @@ public final class RowBatchDocumentParser {
         }
 
         return DocumentParser.createDynamicUpdate(context);
+    }
+
+    /**
+     * Checks if a field path is a sub-field of a compound parent that has a dynamic template.
+     * For example, "metrics.X.sum" might have parent "metrics.X" with a "summary" dynamic template.
+     * Returns the parent path if found, or null.
+     */
+    private static String findCompoundDynamicParent(String fieldPath, List<IndexRequest> indexRequests) {
+        if (indexRequests.isEmpty()) return null;
+        Map<String, String> dynamicTemplates = indexRequests.get(0).getDynamicTemplates();
+        if (dynamicTemplates == null || dynamicTemplates.isEmpty()) return null;
+
+        int dotPos = fieldPath.length();
+        while (true) {
+            dotPos = fieldPath.lastIndexOf('.', dotPos - 1);
+            if (dotPos < 0) return null;
+            String parentPath = fieldPath.substring(0, dotPos);
+            if (dynamicTemplates.containsKey(parentPath)) {
+                return parentPath;
+            }
+        }
     }
 
     /**
@@ -392,21 +502,39 @@ public final class RowBatchDocumentParser {
         final ParsedDocument[] results = new ParsedDocument[docCount];
         final Exception[] exceptions = new Exception[docCount];
 
-        // Pre-resolve mappers once per column and validate strict dynamic mappings upfront
+        // Pre-resolve mappers once per column and validate strict dynamic mappings upfront.
+        // Also detect compound sub-fields (e.g., metrics.X.sum where metrics.X is aggregate_metric_double).
         final Mapper[] columnMappers = new Mapper[schema.columnCount()];
         final String[][] columnParentSegments = new String[schema.columnCount()][];
+        final boolean[] isCompoundSubField = new boolean[schema.columnCount()];
+        final Map<String, CompoundFieldGroup> compoundGroups = new HashMap<>();
         for (int col = 0; col < schema.columnCount(); col++) {
             String fieldName = schema.getColumnName(col);
             columnMappers[col] = resolveMapper(fieldName, mappingLookup);
             columnParentSegments[col] = computeFieldPathInfo(fieldName, mappingLookup).parentSegments();
             if (columnMappers[col] == null && mappingLookup.getFieldType(fieldName) == null) {
-                // Field has no mapper and is not a runtime field — check strict dynamic
-                ObjectMapper.Dynamic dynamic = getEffectiveDynamic(fieldName, mappingLookup);
-                if (dynamic == ObjectMapper.Dynamic.STRICT) {
-                    int lastDot = fieldName.lastIndexOf('.');
-                    String parentPath = lastDot > 0 ? fieldName.substring(0, lastDot) : "";
-                    String leafName = lastDot > 0 ? fieldName.substring(lastDot + 1) : fieldName;
-                    throw new StrictDynamicMappingException(XContentLocation.UNKNOWN, parentPath, leafName);
+                // Check if this is a compound sub-field
+                CompoundFieldInfo compoundInfo = resolveCompoundParent(fieldName, mappingLookup);
+                if (compoundInfo != null) {
+                    isCompoundSubField[col] = true;
+                    CompoundFieldGroup group = compoundGroups.computeIfAbsent(
+                        compoundInfo.parentPath(),
+                        k -> new CompoundFieldGroup(
+                            compoundInfo.parentPath(),
+                            compoundInfo.parentMapper(),
+                            computeFieldPathInfo(compoundInfo.parentPath(), mappingLookup).parentSegments()
+                        )
+                    );
+                    group.addSubField(compoundInfo.subFieldPath(), col);
+                } else {
+                    // Field has no mapper and is not a runtime field — check strict dynamic
+                    ObjectMapper.Dynamic dynamic = getEffectiveDynamic(fieldName, mappingLookup);
+                    if (dynamic == ObjectMapper.Dynamic.STRICT) {
+                        int lastDot = fieldName.lastIndexOf('.');
+                        String parentPath = lastDot > 0 ? fieldName.substring(0, lastDot) : "";
+                        String leafName = lastDot > 0 ? fieldName.substring(lastDot + 1) : fieldName;
+                        throw new StrictDynamicMappingException(XContentLocation.UNKNOWN, parentPath, leafName);
+                    }
                 }
             }
         }
@@ -454,11 +582,27 @@ public final class RowBatchDocumentParser {
                 DocBatchRowReader rowReader = rowBatch.getRowReader(rowIndex);
                 DocBatchRowIterator rowIterator = rowReader.iterator();
 
+                // Clear compound group buffers for this document
+                for (CompoundFieldGroup group : compoundGroups.values()) {
+                    group.clearBuffers();
+                }
+
                 while (rowIterator.next()) {
                     if (exceptions[i] != null) break;
                     if (rowIterator.isNull()) continue;
 
                     int col = rowIterator.column();
+
+                    // Buffer compound sub-field values instead of parsing them directly
+                    if (isCompoundSubField[col]) {
+                        try {
+                            bufferCompoundSubFieldValue(rowIterator, col, compoundGroups);
+                        } catch (Exception e) {
+                            exceptions[i] = e;
+                        }
+                        continue;
+                    }
+
                     Mapper mapper = columnMappers[col];
                     if (mapper == null) {
                         continue; // unmapped field, skip
@@ -477,6 +621,19 @@ public final class RowBatchDocumentParser {
                         }
                     } catch (Exception e) {
                         exceptions[i] = e;
+                    }
+                }
+
+                if (exceptions[i] != null) continue;
+
+                // Process compound field groups after the main column loop
+                for (CompoundFieldGroup group : compoundGroups.values()) {
+                    if (group.bufferedValues.isEmpty()) continue;
+                    try {
+                        parseCompoundFieldGroup(group, contexts[i]);
+                    } catch (Exception e) {
+                        exceptions[i] = e;
+                        break;
                     }
                 }
 
@@ -515,6 +672,81 @@ public final class RowBatchDocumentParser {
         }
 
         return new BatchResult(results, exceptions);
+    }
+
+    /**
+     * Buffers a compound sub-field value from the current iterator position into the appropriate
+     * CompoundFieldGroup. The value is read based on the RowType and stored for later processing.
+     */
+    private static void bufferCompoundSubFieldValue(
+        DocBatchRowIterator iterator,
+        int col,
+        Map<String, CompoundFieldGroup> compoundGroups
+    ) {
+        byte baseType = iterator.baseType();
+        Object value = switch (baseType) {
+            case RowType.LONG -> iterator.rowLongValue();
+            case RowType.DOUBLE -> iterator.rowDoubleValue();
+            case RowType.STRING -> iterator.stringValue();
+            case RowType.TRUE -> true;
+            case RowType.FALSE -> false;
+            default -> null;
+        };
+        if (value == null) return;
+
+        // Find which group this column belongs to
+        for (CompoundFieldGroup group : compoundGroups.values()) {
+            int idx = group.columnIndices.indexOf(col);
+            if (idx >= 0) {
+                // Ensure the bufferedValues list is big enough
+                while (group.bufferedValues.size() <= idx) {
+                    group.bufferedValues.add(null);
+                }
+                group.bufferedValues.set(idx, value);
+                break;
+            }
+        }
+    }
+
+    /**
+     * Processes a compound field group by building a synthetic XContentParser from the buffered
+     * sub-field values and calling the parent field mapper's parse method.
+     */
+    private static void parseCompoundFieldGroup(CompoundFieldGroup group, BatchDocumentParserContext context) throws IOException {
+        XContentParser compoundParser = buildCompoundParser(group);
+        if (compoundParser == null) return;
+
+        setPathForField(group.parentSegments, context.path());
+        try {
+            compoundParser.nextToken(); // Position at START_OBJECT
+            context.setParser(compoundParser);
+            group.parentMapper.parse(context);
+        } finally {
+            resetPath(group.parentSegments.length, context.path());
+            compoundParser.close();
+        }
+    }
+
+    /**
+     * Builds a CompoundFieldXContentParser from the buffered values in a compound group.
+     * Currently supports aggregate_metric_double; extend for histogram/exp_histogram later.
+     */
+    private static XContentParser buildCompoundParser(CompoundFieldGroup group) {
+        // For aggregate_metric_double: expect "sum" (double) and "value_count" (long)
+        Double sum = null;
+        Long valueCount = null;
+        for (int j = 0; j < group.subFieldPaths.size(); j++) {
+            Object val = j < group.bufferedValues.size() ? group.bufferedValues.get(j) : null;
+            if (val == null) continue;
+            switch (group.subFieldPaths.get(j)) {
+                case "sum" -> sum = ((Number) val).doubleValue();
+                case "value_count" -> valueCount = ((Number) val).longValue();
+            }
+        }
+        if (sum != null && valueCount != null) {
+            return CompoundFieldXContentParser.forAggregateMetricDouble(sum, valueCount);
+        }
+        return null;
     }
 
     private static void parseFieldForDocument(

@@ -286,16 +286,9 @@ public class MetricRowBuilder {
         buildAggregateMetricDouble(metricPath, dp.getSum(), dp.getCount());
     }
 
-    private void buildAggregateMetricDouble(String metricPath, double sum, long valueCount) throws IOException {
-        BytesReference aggBytes;
-        try (XContentBuilder xb = XContentFactory.contentBuilder(XContentType.JSON)) {
-            xb.startObject();
-            xb.field("sum", sum);
-            xb.field("value_count", valueCount);
-            xb.endObject();
-            aggBytes = BytesReference.bytes(xb);
-        }
-        rowBuilder.setBinary(metricPath, aggBytes, true);
+    private void buildAggregateMetricDouble(String metricPath, double sum, long valueCount) {
+        rowBuilder.setDouble(metricPath + ".sum", sum, true);
+        rowBuilder.setLong(metricPath + ".value_count", valueCount, true);
     }
 
     /**
