@@ -554,7 +554,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         }
 
         // Phase 4: Execute on engine
-        final java.util.List<Engine.IndexResult> engineResults = primary.indexBatch(engineOps, rowBatch.getRawData());
+        final java.util.List<Engine.IndexResult> engineResults = primary.indexBatch(engineOps, rowBatch.getDataReference());
 
         // Phase 5: Build BulkItemResponse for each item
         final BulkItemResponse[] responses = new BulkItemResponse[items.length];
@@ -1162,7 +1162,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             return null;
         }
 
-        java.util.List<Engine.IndexResult> replicaResults = replica.indexBatch(engineOps, rowBatch.getRawData());
+        java.util.List<Engine.IndexResult> replicaResults = replica.indexBatch(engineOps, rowBatch.getDataReference());
 
         Translog.Location replicaLocation = null;
         for (Engine.IndexResult result : replicaResults) {

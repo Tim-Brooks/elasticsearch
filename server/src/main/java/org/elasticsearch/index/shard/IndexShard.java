@@ -52,6 +52,7 @@ import org.elasticsearch.cluster.service.MasterService;
 import org.elasticsearch.common.CheckedBiConsumer;
 import org.elasticsearch.common.UUIDs;
 import org.elasticsearch.common.bytes.BytesArray;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.compress.CompressedXContent;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.lucene.Lucene;
@@ -969,7 +970,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      * @param operations the index operations to perform
      * @param batchData  the raw DocumentBatch bytes for translog storage
      */
-    public List<Engine.IndexResult> indexBatch(List<Engine.Index> operations, byte[] batchData) throws IOException {
+    public List<Engine.IndexResult> indexBatch(List<Engine.Index> operations, BytesReference batchData) throws IOException {
         final Engine engine = getEngine();
         List<Engine.Index> preIndexed = new ArrayList<>(operations.size());
         for (Engine.Index op : operations) {
@@ -2214,21 +2215,23 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 final Translog.Batch batch = (Translog.Batch) operation;
                 final MappingLookup mappingLookup = mapperService.mappingLookup();
 
-                final byte[] batchData = batch.batchData();
-                final RowDocumentBatch rowBatch = new RowDocumentBatch(new BytesArray(batchData));
-                // Build IndexRequests from DocMeta for the row parser
-                final List<Translog.Batch.DocMeta> metas = batch.docMetas();
-                final java.util.List<org.elasticsearch.action.index.IndexRequest> indexRequests = new java.util.ArrayList<>(metas.size());
-                for (Translog.Batch.DocMeta meta : metas) {
+                final BytesReference batchDataRef = batch.batchData();
+                final RowDocumentBatch rowBatch = new RowDocumentBatch(batchDataRef);
+                // Build IndexRequests from DocMeta for the row parser, using rowIndex
+                final List<Translog.Batch.DocMeta> docMetas = batch.docMetas();
+                final java.util.List<org.elasticsearch.action.index.IndexRequest> indexRequests = new java.util.ArrayList<>(
+                    docMetas.size()
+                );
+                for (Translog.Batch.DocMeta meta : docMetas) {
                     var req = new org.elasticsearch.action.index.IndexRequest();
                     req.id(Uid.decodeId(meta.uid()));
+                    req.setBatchRowIndex(meta.rowIndex());
                     indexRequests.add(req);
                 }
                 var rowParser = mapperService.createRowBatchDocumentParser();
                 final RowBatchDocumentParser.BatchResult parseResult = rowParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
 
                 // Build Engine.Index operations using DocMeta for seqNo/version/etc.
-                final List<Translog.Batch.DocMeta> docMetas = batch.docMetas();
                 final java.util.List<Engine.Index> engineOps = new java.util.ArrayList<>();
                 final long startTimeNanos = getRelativeTimeInNanos();
 
@@ -2257,7 +2260,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 }
 
                 if (engineOps.isEmpty() == false) {
-                    engine.indexBatch(engineOps, batch.batchData());
+                    engine.indexBatch(engineOps, batchDataRef);
                 }
                 // Return a synthetic result from the last doc meta
                 Translog.Batch.DocMeta lastMeta = docMetas.get(docMetas.size() - 1);

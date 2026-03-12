@@ -718,7 +718,7 @@ public abstract class Engine implements Closeable {
      * @param batchData  the raw DocumentBatch bytes for translog storage
      * @return list of IndexResults, one per operation, in the same order
      */
-    public List<IndexResult> indexBatch(List<Index> operations, byte[] batchData) throws IOException {
+    public List<IndexResult> indexBatch(List<Index> operations, BytesReference batchData) throws IOException {
         // Default implementation: fall back to serial indexing
         List<IndexResult> results = new java.util.ArrayList<>(operations.size());
         for (Index op : operations) {
