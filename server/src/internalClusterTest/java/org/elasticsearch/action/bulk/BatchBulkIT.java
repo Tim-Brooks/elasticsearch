@@ -1098,6 +1098,192 @@ public class BatchBulkIT extends ESIntegTestCase {
         );
     }
 
+    /**
+     * Reproduces the bug where different documents in a batch have different metric fields,
+     * each with their own dynamic template assignments. The batch path was only reading
+     * dynamic templates from the first IndexRequest, so fields that only appeared in later
+     * documents would get default mappings (without time_series_metric) instead of the
+     * correct template-based mapping (with time_series_metric: counter/gauge).
+     *
+     * This caused: "Cannot update parameter [time_series_metric] from [null] to [counter]"
+     */
+    @SuppressWarnings("unchecked")
+    public void testBatchModeWithHeterogeneousMetricFields() throws IOException {
+        String index = "test-batch-heterogeneous-metrics";
+
+        // Create a TSDB index with passthrough metrics object and named dynamic templates
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            {
+                mapping.startObject("_source");
+                mapping.field("mode", "synthetic");
+                mapping.endObject();
+
+                mapping.startObject("properties");
+                {
+                    mapping.startObject("@timestamp").field("type", "date").endObject();
+                    mapping.startObject("resource_id").field("type", "keyword").field("time_series_dimension", true).endObject();
+                    mapping.startObject("metrics");
+                    {
+                        mapping.field("type", "passthrough");
+                        mapping.field("dynamic", true);
+                        mapping.field("priority", 10);
+                    }
+                    mapping.endObject();
+                }
+                mapping.endObject();
+
+                // Named dynamic templates
+                mapping.startArray("dynamic_templates");
+                {
+                    mapping.startObject();
+                    mapping.startObject("gauge_long");
+                    mapping.startObject("mapping");
+                    mapping.field("type", "long");
+                    mapping.field("time_series_metric", "gauge");
+                    mapping.endObject();
+                    mapping.endObject();
+                    mapping.endObject();
+
+                    mapping.startObject();
+                    mapping.startObject("counter_long");
+                    mapping.startObject("mapping");
+                    mapping.field("type", "long");
+                    mapping.field("time_series_metric", "counter");
+                    mapping.endObject();
+                    mapping.endObject();
+                    mapping.endObject();
+
+                    mapping.startObject();
+                    mapping.startObject("gauge_double");
+                    mapping.startObject("mapping");
+                    mapping.field("type", "double");
+                    mapping.field("time_series_metric", "gauge");
+                    mapping.endObject();
+                    mapping.endObject();
+                    mapping.endObject();
+                }
+                mapping.endArray();
+            }
+            mapping.endObject();
+        }
+        mapping.endObject();
+
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put(IndexSettings.MODE.getKey(), IndexMode.TIME_SERIES)
+                        .putList(IndexMetadata.INDEX_ROUTING_PATH.getKey(), List.of("resource_id"))
+                        .put(IndexSettings.TIME_SERIES_START_TIME.getKey(), "2000-01-01T00:00:00.000Z")
+                        .put(IndexSettings.TIME_SERIES_END_TIME.getKey(), "2100-01-01T00:00:00.000Z")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+
+        String coordinatingNode = findCoordinatingNode();
+        Instant baseTime = Instant.parse("2025-01-15T10:00:00.000Z");
+
+        // Key: different documents have DIFFERENT metric fields with DIFFERENT templates.
+        // Doc 0: has cpu_usage (gauge_double) and memory_used (gauge_long), but NOT network_errors
+        // Doc 1: has cpu_usage (gauge_double) and network_errors (counter_long), but NOT memory_used
+        // The batch schema will have columns for all three fields.
+        // The bug: only doc 0's templates were read, so network_errors got a default mapping.
+        BulkRequest bulkRequest = new BulkRequest();
+
+        // Doc 0: cpu_usage + memory_used
+        {
+            XContentBuilder doc = JsonXContent.contentBuilder();
+            doc.startObject();
+            doc.field("@timestamp", baseTime.toEpochMilli());
+            doc.field("resource_id", "host-1");
+            doc.startObject("metrics");
+            doc.field("cpu_usage", 42.5);
+            doc.field("memory_used", 1024L);
+            doc.endObject();
+            doc.endObject();
+
+            IndexRequest ir = new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE).source(doc);
+            ir.setDynamicTemplates(Map.of("metrics.cpu_usage", "gauge_double", "metrics.memory_used", "gauge_long"));
+            bulkRequest.add(ir);
+        }
+
+        // Doc 1: cpu_usage + network_errors (counter!)
+        {
+            XContentBuilder doc = JsonXContent.contentBuilder();
+            doc.startObject();
+            doc.field("@timestamp", baseTime.plusSeconds(1).toEpochMilli());
+            doc.field("resource_id", "host-1");
+            doc.startObject("metrics");
+            doc.field("cpu_usage", 55.0);
+            doc.field("network_errors", 7L);
+            doc.endObject();
+            doc.endObject();
+
+            IndexRequest ir = new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE).source(doc);
+            ir.setDynamicTemplates(Map.of("metrics.cpu_usage", "gauge_double", "metrics.network_errors", "counter_long"));
+            bulkRequest.add(ir);
+        }
+
+        // Doc 2: all three fields
+        {
+            XContentBuilder doc = JsonXContent.contentBuilder();
+            doc.startObject();
+            doc.field("@timestamp", baseTime.plusSeconds(2).toEpochMilli());
+            doc.field("resource_id", "host-1");
+            doc.startObject("metrics");
+            doc.field("cpu_usage", 60.0);
+            doc.field("memory_used", 2048L);
+            doc.field("network_errors", 3L);
+            doc.endObject();
+            doc.endObject();
+
+            IndexRequest ir = new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE).source(doc);
+            ir.setDynamicTemplates(
+                Map.of("metrics.cpu_usage", "gauge_double", "metrics.memory_used", "gauge_long", "metrics.network_errors", "counter_long")
+            );
+            bulkRequest.add(ir);
+        }
+
+        BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+        assertNoFailures(bulkResponse);
+        assertThat(bulkResponse.getItems().length, equalTo(3));
+
+        refresh(index);
+
+        // Verify all docs indexed
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo(3L));
+        });
+
+        // Verify dynamic mappings were created correctly via templates
+        var mappingsResponse = client().admin().indices().prepareGetMappings(TimeValue.MAX_VALUE, index).get();
+        Map<String, Object> mappingMap = mappingsResponse.getMappings().get(index).sourceAsMap();
+        Map<String, Object> properties = (Map<String, Object>) mappingMap.get("properties");
+        Map<String, Object> metricsProps = (Map<String, Object>) ((Map<String, Object>) properties.get("metrics")).get("properties");
+
+        // network_errors should be counter, not a plain long
+        Map<String, Object> networkErrors = (Map<String, Object>) metricsProps.get("network_errors");
+        assertThat("network_errors type", networkErrors.get("type"), equalTo("long"));
+        assertThat("network_errors must be counter metric", networkErrors.get("time_series_metric"), equalTo("counter"));
+
+        // memory_used should be gauge
+        Map<String, Object> memoryUsed = (Map<String, Object>) metricsProps.get("memory_used");
+        assertThat("memory_used type", memoryUsed.get("type"), equalTo("long"));
+        assertThat("memory_used must be gauge metric", memoryUsed.get("time_series_metric"), equalTo("gauge"));
+
+        // cpu_usage should be gauge double
+        Map<String, Object> cpuUsage = (Map<String, Object>) metricsProps.get("cpu_usage");
+        assertThat("cpu_usage type", cpuUsage.get("type"), equalTo("double"));
+        assertThat("cpu_usage must be gauge metric", cpuUsage.get("time_series_metric"), equalTo("gauge"));
+    }
+
     public void testBatchModeWithDynamicRuntimeFields() throws IOException {
         String index = "test-batch-runtime";
 

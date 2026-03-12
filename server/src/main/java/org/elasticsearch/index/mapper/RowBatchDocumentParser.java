@@ -201,21 +201,35 @@ public final class RowBatchDocumentParser {
 
         final DocBatchSchema schema = rowBatch.schema();
 
-        // Use the first IndexRequest's dynamic templates for template resolution
+        // Merge dynamic templates and template params from ALL IndexRequests.
+        // Different documents in an OTEL-style batch may have different metric fields,
+        // each with their own dynamic template assignments. We need the union of all templates
+        // to correctly map every field in the batch schema.
         IndexRequest firstRequest = indexRequests.get(0);
         XContentType xContentType = firstRequest.getContentType();
         if (xContentType == null) {
             xContentType = XContentType.JSON;
         }
 
-        // Create a SourceToParse with dynamic templates from the first request
+        Map<String, String> mergedDynamicTemplates = new HashMap<>();
+        Map<String, Map<String, String>> mergedDynamicTemplateParams = new HashMap<>();
+        for (IndexRequest ir : indexRequests) {
+            if (ir.getDynamicTemplates() != null) {
+                mergedDynamicTemplates.putAll(ir.getDynamicTemplates());
+            }
+            if (ir.getDynamicTemplateParams() != null) {
+                mergedDynamicTemplateParams.putAll(ir.getDynamicTemplateParams());
+            }
+        }
+
+        // Create a SourceToParse with merged dynamic templates from all requests
         SourceToParse source = new SourceToParse(
             firstRequest.id(),
             BytesArray.EMPTY,
             xContentType,
             firstRequest.routing(),
-            firstRequest.getDynamicTemplates(),
-            firstRequest.getDynamicTemplateParams(),
+            mergedDynamicTemplates,
+            mergedDynamicTemplateParams,
             false,
             XContentMeteringParserDecorator.NOOP,
             firstRequest.tsid()
@@ -312,16 +326,18 @@ public final class RowBatchDocumentParser {
      */
     private static String findCompoundDynamicParent(String fieldPath, List<IndexRequest> indexRequests) {
         if (indexRequests.isEmpty()) return null;
-        Map<String, String> dynamicTemplates = indexRequests.get(0).getDynamicTemplates();
-        if (dynamicTemplates == null || dynamicTemplates.isEmpty()) return null;
 
+        // Check all IndexRequests since different documents may have different dynamic template assignments
         int dotPos = fieldPath.length();
         while (true) {
             dotPos = fieldPath.lastIndexOf('.', dotPos - 1);
             if (dotPos < 0) return null;
             String parentPath = fieldPath.substring(0, dotPos);
-            if (dynamicTemplates.containsKey(parentPath)) {
-                return parentPath;
+            for (IndexRequest ir : indexRequests) {
+                Map<String, String> dynamicTemplates = ir.getDynamicTemplates();
+                if (dynamicTemplates != null && dynamicTemplates.containsKey(parentPath)) {
+                    return parentPath;
+                }
             }
         }
     }

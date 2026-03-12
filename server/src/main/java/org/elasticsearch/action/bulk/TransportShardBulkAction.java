@@ -432,8 +432,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             return null;
         }
 
-        for (IndexRequest ir : indexRequests) {
-        }
         // Collect all field names that have named dynamic templates from any index request
         java.util.Set<String> dynamicTemplateFields = new java.util.HashSet<>();
         for (IndexRequest ir : indexRequests) {
