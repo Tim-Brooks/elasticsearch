@@ -12,16 +12,21 @@ package org.elasticsearch.action.bulk;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.routing.TsidBuilder;
 import org.elasticsearch.common.util.ByteUtils;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.xcontent.XContentString;
 
 import java.util.Arrays;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Extracts TSID from dimension columns during batch encoding.
  * Used for TSDB / ForIndexDimensions indices.
  */
 class TsidRoutingExtractor implements RoutingMetadataExtractor {
+
+    private static final Logger logger = LogManager.getLogger(TsidRoutingExtractor.class);
 
     private final Set<String> dimensionFields;
 
@@ -35,6 +40,8 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
 
     TsidRoutingExtractor(Set<String> dimensionFields) {
         this.dimensionFields = dimensionFields;
+        // TODO: Remove
+        logger.error("Dimension fields at ctor: {}", dimensionFields);
     }
 
     @Override
@@ -59,6 +66,11 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
 
     @Override
     public void extractFromScratch(DocumentBatchRowEncoder.ScratchBuffers scratch, IndexRequest request) {
+        // TODO: Remove
+        if (ThreadLocalRandom.current().nextInt(10000) < 5) {
+            logger.error("Dimension fields at extract: {}", dimensionFields);
+        }
+
         TsidBuilder tsidBuilder = new TsidBuilder(dimColCount);
         for (int i = 0; i < dimColCount; i++) {
             int colIdx = dimColIndices[i];
