@@ -507,8 +507,14 @@ public final class RowBatchDocumentParser {
         final DocBatchSchema schema = rowBatch.schema();
         final MetadataFieldMapper[] metadataFieldMappers = mappingLookup.getMapping().getSortedMetadataMappers();
 
-        // Pre-compute the copy-to destination set once — it is read-only and safe to share.
+        // Pre-compute shared collections. The dynamic mapper collections are shared across
+        // document contexts intentionally — they accumulate any dynamic mappers encountered
+        // during binary blob parsing. createDynamicUpdate is NOT called per-document (see below),
+        // so the shared-map cascade that caused O(N) expensive mapping serializations is gone.
         final Set<String> sharedCopyToFields = mappingLookup.fieldTypesLookup().getCopyToDestinationFields();
+        final Map<String, List<Mapper.Builder>> sharedDynamicMappers = new HashMap<>();
+        final Map<String, ObjectMapper.Builder> sharedDynamicObjectMappers = new HashMap<>();
+        final Map<String, List<RuntimeField>> sharedDynamicRuntimeFields = new HashMap<>();
 
         final SourceToParse[] sources = new SourceToParse[docCount];
         final BatchDocumentParserContext[] contexts = new BatchDocumentParserContext[docCount];
@@ -573,20 +579,15 @@ public final class RowBatchDocumentParser {
                     indexRequest.tsid()
                 );
 
-                // Step 2: Create context with per-document dynamic mapper collections.
-                // Dynamic mapper collections must NOT be shared across documents: if doc 0
-                // creates a dynamic mapper (e.g. via parseBinaryObjectForDocument), sharing
-                // would cause hasDynamicMappersOrRuntimeFields() to return true for every
-                // subsequent document, triggering expensive createDynamicUpdate calls (full
-                // mapping serialization) for the entire batch.
+                // Step 2: Create context
                 contexts[i] = new BatchDocumentParserContext(
                     mappingLookup,
                     mappingParserContext,
                     sources[i],
                     sharedCopyToFields,
-                    new HashMap<>(),
-                    new HashMap<>(),
-                    new HashMap<>(),
+                    sharedDynamicMappers,
+                    sharedDynamicObjectMappers,
+                    sharedDynamicRuntimeFields,
                     fieldCountHint + 2 // TODO: Unsure
                 );
 
@@ -663,8 +664,13 @@ public final class RowBatchDocumentParser {
                 }
 
                 // Step 6: Build ParsedDocument
+                // Dynamic mapping updates are intentionally NOT produced here. The batch path
+                // pre-handles dynamic mappings in performRowBatchOnPrimary before calling
+                // parseRowBatch. Even if parseBinaryObjectForDocument encounters unmapped fields
+                // and creates temporary mappers in the context, calling createDynamicUpdate would
+                // build and compress the entire mapping for every document — expensive work that
+                // performRowBatchOnPrimary never uses (it ignores ParsedDocument.dynamicUpdate).
                 BatchDocumentParserContext ctx = contexts[i];
-                CompressedXContent dynamicUpdate = DocumentParser.createDynamicUpdate(ctx);
 
                 results[i] = new ParsedDocument(
                     ctx.version(),
@@ -674,7 +680,7 @@ public final class RowBatchDocumentParser {
                     ctx.reorderParentAndGetDocs(),
                     new BytesArray("{\"marker\":true}"),
                     sources[i].getXContentType(),
-                    dynamicUpdate,
+                    null,
                     XContentMeteringParserDecorator.UNKNOWN_SIZE
                 ) {
                     @Override
