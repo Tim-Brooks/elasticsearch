@@ -654,9 +654,13 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             return;
         }
 
-        // Extract tsid for each document
+        // Extract tsid for each document that doesn't already have one.
+        // The OTLP path pre-computes tsid from protobuf data; don't overwrite it.
         for (int docIdx = 0; docIdx < indexRequests.size(); docIdx++) {
             IndexRequest request = indexRequests.get(docIdx);
+            if (request.tsid() != null) {
+                continue;
+            }
             int rowIndex = request.batchRowIndex() >= 0 ? request.batchRowIndex() : docIdx;
             DocBatchRowReader rowReader = rowBatch.getRowReader(rowIndex);
 
