@@ -35,7 +35,6 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
 
 /**
@@ -345,9 +344,7 @@ public class DocumentBatchRowEncoder {
             // Write buffered elements + remaining tokens as raw x-content
             BytesReference rawBytes = buildXContentArrayFallback(parser, xContentType, elemTypes, elemFixed, elemStrings, count, token);
             // TODO: Remove
-            if (ThreadLocalRandom.current().nextInt(100) < 5) {
-                logger.error("Failed to encode array as compact typed array: {}", rawBytes.utf8ToString());
-            }
+            logger.error("Failed to encode array as compact typed array: {}", rawBytes.utf8ToString());
             byte base = RowType.XCONTENT_ARRAY;
             scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (base | RowType.OBJECT_FLAG) : base;
             scratch.varData[colIdx] = rawBytes;
