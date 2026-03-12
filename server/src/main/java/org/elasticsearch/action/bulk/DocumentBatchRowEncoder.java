@@ -45,7 +45,7 @@ import java.util.function.Supplier;
  */
 public class DocumentBatchRowEncoder {
 
-    private static final Logger logger = LogManager.getLogger(DocumentBatchRowEncoder.class)
+    private static final Logger logger = LogManager.getLogger(DocumentBatchRowEncoder.class);
 
     private static final int HEADER_SIZE = 32;
     private static final int INITIAL_CAPACITY = 16;
