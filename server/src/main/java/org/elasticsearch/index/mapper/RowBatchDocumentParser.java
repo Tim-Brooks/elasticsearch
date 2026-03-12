@@ -507,11 +507,8 @@ public final class RowBatchDocumentParser {
         final DocBatchSchema schema = rowBatch.schema();
         final MetadataFieldMapper[] metadataFieldMappers = mappingLookup.getMapping().getSortedMetadataMappers();
 
-        // Pre-compute shared collections (same as BatchDocumentParser)
+        // Pre-compute the copy-to destination set once — it is read-only and safe to share.
         final Set<String> sharedCopyToFields = mappingLookup.fieldTypesLookup().getCopyToDestinationFields();
-        final Map<String, List<Mapper.Builder>> sharedDynamicMappers = new HashMap<>();
-        final Map<String, ObjectMapper.Builder> sharedDynamicObjectMappers = new HashMap<>();
-        final Map<String, List<RuntimeField>> sharedDynamicRuntimeFields = new HashMap<>();
 
         final SourceToParse[] sources = new SourceToParse[docCount];
         final BatchDocumentParserContext[] contexts = new BatchDocumentParserContext[docCount];
@@ -576,15 +573,20 @@ public final class RowBatchDocumentParser {
                     indexRequest.tsid()
                 );
 
-                // Step 2: Create context
+                // Step 2: Create context with per-document dynamic mapper collections.
+                // Dynamic mapper collections must NOT be shared across documents: if doc 0
+                // creates a dynamic mapper (e.g. via parseBinaryObjectForDocument), sharing
+                // would cause hasDynamicMappersOrRuntimeFields() to return true for every
+                // subsequent document, triggering expensive createDynamicUpdate calls (full
+                // mapping serialization) for the entire batch.
                 contexts[i] = new BatchDocumentParserContext(
                     mappingLookup,
                     mappingParserContext,
                     sources[i],
                     sharedCopyToFields,
-                    sharedDynamicMappers,
-                    sharedDynamicObjectMappers,
-                    sharedDynamicRuntimeFields,
+                    new HashMap<>(),
+                    new HashMap<>(),
+                    new HashMap<>(),
                     fieldCountHint + 2 // TODO: Unsure
                 );
 
