@@ -12,11 +12,14 @@ package org.elasticsearch.action.bulk;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.routing.TsidBuilder;
 import org.elasticsearch.common.util.ByteUtils;
+import org.elasticsearch.common.regex.Regex;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.xcontent.XContentString;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -29,6 +32,7 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
     private static final Logger logger = LogManager.getLogger(TsidRoutingExtractor.class);
 
     private final Set<String> dimensionFields;
+    private final List<String> wildcardPatterns;
 
     // Track which columns are dimension columns
     private int[] dimColIndices = new int[4];
@@ -40,15 +44,20 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
 
     TsidRoutingExtractor(Set<String> dimensionFields) {
         this.dimensionFields = dimensionFields;
-        // TODO: Remove
-        logger.error("Dimension fields at ctor: {}", dimensionFields);
+        List<String> wildcards = new ArrayList<>();
+        for (String field : dimensionFields) {
+            if (field.contains("*")) {
+                wildcards.add(field);
+            }
+        }
+        this.wildcardPatterns = wildcards;
     }
 
     @Override
     public void resolveColumn(int colIdx, String fieldPath) {
         ensureResolvedCapacity(colIdx + 1);
         resolved[colIdx] = true;
-        if (dimensionFields.contains(fieldPath)) {
+        if (isDimensionField(fieldPath)) {
             if (dimColCount == dimColIndices.length) {
                 dimColIndices = Arrays.copyOf(dimColIndices, dimColCount * 2);
                 dimColNames = Arrays.copyOf(dimColNames, dimColCount * 2);
@@ -66,11 +75,6 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
 
     @Override
     public void extractFromScratch(DocumentBatchRowEncoder.ScratchBuffers scratch, IndexRequest request) {
-        // TODO: Remove
-        if (ThreadLocalRandom.current().nextInt(10000) < 5) {
-            logger.error("Dimension fields at extract: {}", dimensionFields);
-        }
-
         TsidBuilder tsidBuilder = new TsidBuilder(dimColCount);
         for (int i = 0; i < dimColCount; i++) {
             int colIdx = dimColIndices[i];
@@ -109,6 +113,18 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
     @Override
     public void resetDocument() {
         // No per-document state to reset — TsidBuilder is created fresh per document
+    }
+
+    private boolean isDimensionField(String fieldPath) {
+        if (dimensionFields.contains(fieldPath)) {
+            return true;
+        }
+        for (String pattern : wildcardPatterns) {
+            if (Regex.simpleMatch(pattern, fieldPath)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void ensureResolvedCapacity(int needed) {
