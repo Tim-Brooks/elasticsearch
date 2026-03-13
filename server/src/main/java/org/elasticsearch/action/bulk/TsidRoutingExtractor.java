@@ -80,7 +80,7 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
             int colIdx = dimColIndices[i];
             String fieldName = dimColNames[i];
             byte typeByte = scratch.typeBytes[colIdx];
-            byte baseType = RowType.baseType(typeByte);
+            byte baseType = typeByte;
 
             switch (baseType) {
                 case RowType.STRING -> {

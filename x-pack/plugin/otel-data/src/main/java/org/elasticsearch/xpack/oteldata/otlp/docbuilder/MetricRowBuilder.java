@@ -86,11 +86,11 @@ public class MetricRowBuilder {
         List<DataPoint> dataPoints = dataPointGroup.dataPoints();
 
         // @timestamp
-        rowBuilder.setLong("@timestamp", TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getTimestampUnixNano()), false);
+        rowBuilder.setLong("@timestamp", TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getTimestampUnixNano()));
 
         // start_timestamp
         if (dataPointGroup.getStartTimestampUnixNano() != 0) {
-            rowBuilder.setLong("start_timestamp", TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getStartTimestampUnixNano()), false);
+            rowBuilder.setLong("start_timestamp", TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getStartTimestampUnixNano()));
         }
 
         // Resource fields
@@ -107,12 +107,12 @@ public class MetricRowBuilder {
 
         // unit
         if (Strings.hasLength(dataPointGroup.unit())) {
-            rowBuilder.setString("unit", dataPointGroup.unit(), false);
+            rowBuilder.setString("unit", dataPointGroup.unit());
         }
 
         // _metric_names_hash
         String metricNamesHash = dataPointGroup.getMetricNamesHash(hasher);
-        rowBuilder.setString("_metric_names_hash", metricNamesHash, false);
+        rowBuilder.setString("_metric_names_hash", metricNamesHash);
 
         // Metric values
         long docCount = 0;
@@ -135,7 +135,7 @@ public class MetricRowBuilder {
         }
 
         if (docCount > 0) {
-            rowBuilder.setLong("_doc_count", docCount, false);
+            rowBuilder.setLong("_doc_count", docCount);
         }
 
         TsidBuilder tsidBuilder = dataPointGroup.tsidBuilder();
@@ -144,10 +144,10 @@ public class MetricRowBuilder {
     }
 
     private void buildResource(Resource resource, ByteString schemaUrl) {
-        setByteStringIfNotEmpty("resource.schema_url", schemaUrl, true);
+        setByteStringIfNotEmpty("resource.schema_url", schemaUrl);
         int droppedCount = resource.getDroppedAttributesCount();
         if (droppedCount > 0) {
-            rowBuilder.setLong("resource.dropped_attributes_count", droppedCount, true);
+            rowBuilder.setLong("resource.dropped_attributes_count", droppedCount);
         }
         buildKeyValueAttributes("resource.attributes.", resource.getAttributesList());
     }
@@ -156,18 +156,18 @@ public class MetricRowBuilder {
         if (targetIndex.isDataStream() == false) {
             return;
         }
-        rowBuilder.setString("data_stream.type", targetIndex.type(), true);
-        rowBuilder.setString("data_stream.dataset", targetIndex.dataset(), true);
-        rowBuilder.setString("data_stream.namespace", targetIndex.namespace(), true);
+        rowBuilder.setString("data_stream.type", targetIndex.type());
+        rowBuilder.setString("data_stream.dataset", targetIndex.dataset());
+        rowBuilder.setString("data_stream.namespace", targetIndex.namespace());
     }
 
     private void buildScope(InstrumentationScope scope, ByteString schemaUrl) {
-        setByteStringIfNotEmpty("scope.schema_url", schemaUrl, true);
-        setByteStringIfNotEmpty("scope.name", scope.getNameBytes(), true);
-        setByteStringIfNotEmpty("scope.version", scope.getVersionBytes(), true);
+        setByteStringIfNotEmpty("scope.schema_url", schemaUrl);
+        setByteStringIfNotEmpty("scope.name", scope.getNameBytes());
+        setByteStringIfNotEmpty("scope.version", scope.getVersionBytes());
         int droppedCount = scope.getDroppedAttributesCount();
         if (droppedCount > 0) {
-            rowBuilder.setLong("scope.dropped_attributes_count", droppedCount, true);
+            rowBuilder.setLong("scope.dropped_attributes_count", droppedCount);
         }
         buildKeyValueAttributes("scope.attributes.", scope.getAttributesList());
     }
@@ -191,11 +191,11 @@ public class MetricRowBuilder {
             case STRING_VALUE -> {
                 ByteString bs = value.getStringValueBytes();
                 byte[] buf = byteStringAccessor.toBytes(bs);
-                rowBuilder.setString(path, buf, 0, bs.size(), true);
+                rowBuilder.setString(path, buf, 0, bs.size());
             }
-            case BOOL_VALUE -> rowBuilder.setBoolean(path, value.getBoolValue(), true);
-            case INT_VALUE -> rowBuilder.setLong(path, value.getIntValue(), true);
-            case DOUBLE_VALUE -> rowBuilder.setDouble(path, value.getDoubleValue(), true);
+            case BOOL_VALUE -> rowBuilder.setBoolean(path, value.getBoolValue());
+            case INT_VALUE -> rowBuilder.setLong(path, value.getIntValue());
+            case DOUBLE_VALUE -> rowBuilder.setDouble(path, value.getDoubleValue());
             case ARRAY_VALUE -> {
                 try {
                     setArrayValue(path, value);
@@ -225,8 +225,7 @@ public class MetricRowBuilder {
             // Try compact encoding - check all elements are leaves
             boolean allLeaves = true;
             int count = 0;
-            for (int i = 0, size = values.size(); i < size; i++) {
-                AnyValue elem = values.get(i);
+            for (AnyValue elem : values) {
                 switch (elem.getValueCase()) {
                     case STRING_VALUE -> {
                         arrayElemTypes[count] = RowType.STRING;
@@ -252,13 +251,13 @@ public class MetricRowBuilder {
             }
             if (allLeaves) {
                 byte[] packed = DocumentBatchRowEncoder.packSmallArray(arrayElemTypes, arrayElemFixed, arrayElemStrings, count);
-                rowBuilder.setPackedArray(path, packed, true);
+                rowBuilder.setPackedArray(path, packed);
                 return;
             }
         }
         // Fall back to XContent for large or non-leaf arrays
         BytesReference arrayBytes = serializeArrayAsXContent(arrayValue);
-        rowBuilder.setXContentArray(path, arrayBytes, true);
+        rowBuilder.setXContentArray(path, arrayBytes);
     }
 
     private BytesReference serializeArrayAsXContent(AnyValue arrayValue) throws IOException {
@@ -307,8 +306,8 @@ public class MetricRowBuilder {
         NumberDataPoint dp = numberDp.dataPoint();
         String metricPath = "metrics." + numberDp.getMetricName();
         switch (dp.getValueCase()) {
-            case AS_DOUBLE -> rowBuilder.setDouble(metricPath, dp.getAsDouble(), true);
-            case AS_INT -> rowBuilder.setLong(metricPath, dp.getAsInt(), true);
+            case AS_DOUBLE -> rowBuilder.setDouble(metricPath, dp.getAsDouble());
+            case AS_INT -> rowBuilder.setLong(metricPath, dp.getAsInt());
         }
     }
 
@@ -340,8 +339,8 @@ public class MetricRowBuilder {
     }
 
     private void buildAggregateMetricDouble(String metricPath, double sum, long valueCount) {
-        rowBuilder.setDouble(metricPath + ".sum", sum, true);
-        rowBuilder.setLong(metricPath + ".value_count", valueCount, true);
+        rowBuilder.setDouble(metricPath + ".sum", sum);
+        rowBuilder.setLong(metricPath + ".value_count", valueCount);
     }
 
     /**
@@ -360,7 +359,7 @@ public class MetricRowBuilder {
             xb.endObject();
             histBytes = BytesReference.bytes(xb);
         }
-        rowBuilder.setBinary(metricPath, histBytes, true);
+        rowBuilder.setBinary(metricPath, histBytes);
     }
 
     /**
@@ -379,7 +378,7 @@ public class MetricRowBuilder {
             xb.endObject();
             histBytes = BytesReference.bytes(xb);
         }
-        rowBuilder.setBinary(metricPath, histBytes, true);
+        rowBuilder.setBinary(metricPath, histBytes);
     }
 
     /**
@@ -394,7 +393,7 @@ public class MetricRowBuilder {
             ExponentialHistogramConverter.buildExponentialHistogram(dp, xb);
             histBytes = BytesReference.bytes(xb);
         }
-        rowBuilder.setBinary(metricPath, histBytes, true);
+        rowBuilder.setBinary(metricPath, histBytes);
     }
 
     /**
@@ -406,13 +405,13 @@ public class MetricRowBuilder {
             ExponentialHistogramConverter.buildExponentialHistogram(dp, xb, scratch);
             histBytes = BytesReference.bytes(xb);
         }
-        rowBuilder.setBinary(metricPath, histBytes, true);
+        rowBuilder.setBinary(metricPath, histBytes);
     }
 
-    private void setByteStringIfNotEmpty(String path, ByteString value, boolean fromObject) {
+    private void setByteStringIfNotEmpty(String path, ByteString value) {
         if (value != null && value.isEmpty() == false) {
             byte[] buf = byteStringAccessor.toBytes(value);
-            rowBuilder.setString(path, buf, 0, value.size(), fromObject);
+            rowBuilder.setString(path, buf, 0, value.size());
         }
     }
 }

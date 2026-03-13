@@ -101,7 +101,7 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        baseType = RowType.baseType(typeByte);
+        baseType = typeByte;
         return true;
     }
 

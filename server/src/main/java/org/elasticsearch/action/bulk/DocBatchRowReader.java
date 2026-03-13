@@ -58,15 +58,11 @@ public final class DocBatchRowReader {
     }
 
     public byte getBaseType(int col) {
-        return RowType.baseType(getTypeByte(col));
-    }
-
-    public boolean isFromObject(int col) {
-        return RowType.isFromObject(getTypeByte(col));
+        return getTypeByte(col);
     }
 
     public boolean isNull(int col) {
-        return getBaseType(col) == RowType.NULL;
+        return getTypeByte(col) == RowType.NULL;
     }
 
     public boolean getBooleanValue(int col) {

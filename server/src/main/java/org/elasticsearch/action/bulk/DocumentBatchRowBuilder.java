@@ -94,10 +94,9 @@ public class DocumentBatchRowBuilder implements Releasable {
     /**
      * Sets a string column value.
      */
-    public void setString(String path, String value, boolean fromObject) {
+    public void setString(String path, String value) {
         int colIdx = resolveColumn(path);
-        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
-        scratch.typeBytes[colIdx] = (byte) (RowType.STRING | objectFlag);
+        scratch.typeBytes[colIdx] = RowType.STRING;
         byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
         scratch.varData[colIdx] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
     }
@@ -106,10 +105,9 @@ public class DocumentBatchRowBuilder implements Releasable {
      * Sets a string column value from raw UTF-8 bytes.
      * The bytes are copied, so the caller's array can be reused after this call.
      */
-    public void setString(String path, byte[] utf8, int offset, int length, boolean fromObject) {
+    public void setString(String path, byte[] utf8, int offset, int length) {
         int colIdx = resolveColumn(path);
-        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
-        scratch.typeBytes[colIdx] = (byte) (RowType.STRING | objectFlag);
+        scratch.typeBytes[colIdx] = RowType.STRING;
         byte[] copy = new byte[length];
         System.arraycopy(utf8, offset, copy, 0, length);
         scratch.varData[colIdx] = new XContentString.UTF8Bytes(copy, 0, length);
@@ -118,50 +116,44 @@ public class DocumentBatchRowBuilder implements Releasable {
     /**
      * Sets a long column value.
      */
-    public void setLong(String path, long value, boolean fromObject) {
+    public void setLong(String path, long value) {
         int colIdx = resolveColumn(path);
-        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
-        scratch.typeBytes[colIdx] = (byte) (RowType.LONG | objectFlag);
+        scratch.typeBytes[colIdx] = RowType.LONG;
         DocumentBatchRowEncoder.writeLongToFixed(scratch.fixedData, colIdx, value);
     }
 
     /**
      * Sets a double column value.
      */
-    public void setDouble(String path, double value, boolean fromObject) {
+    public void setDouble(String path, double value) {
         int colIdx = resolveColumn(path);
-        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
-        scratch.typeBytes[colIdx] = (byte) (RowType.DOUBLE | objectFlag);
+        scratch.typeBytes[colIdx] = RowType.DOUBLE;
         DocumentBatchRowEncoder.writeLongToFixed(scratch.fixedData, colIdx, Double.doubleToRawLongBits(value));
     }
 
     /**
      * Sets a boolean column value.
      */
-    public void setBoolean(String path, boolean value, boolean fromObject) {
+    public void setBoolean(String path, boolean value) {
         int colIdx = resolveColumn(path);
-        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
-        byte base = value ? RowType.TRUE : RowType.FALSE;
-        scratch.typeBytes[colIdx] = (byte) (base | objectFlag);
+        scratch.typeBytes[colIdx] = value ? RowType.TRUE : RowType.FALSE;
     }
 
     /**
      * Sets a null column value.
      */
-    public void setNull(String path, boolean fromObject) {
+    public void setNull(String path) {
         int colIdx = resolveColumn(path);
-        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
-        scratch.typeBytes[colIdx] = (byte) (RowType.NULL | objectFlag);
+        scratch.typeBytes[colIdx] = RowType.NULL;
     }
 
     /**
      * Sets a binary column value from pre-serialized XContent bytes (e.g. a JSON object).
      * Use this for XContent that is not an array (objects, etc.).
      */
-    public void setBinary(String path, BytesReference bytes, boolean fromObject) {
+    public void setBinary(String path, BytesReference bytes) {
         int colIdx = resolveColumn(path);
-        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
-        scratch.typeBytes[colIdx] = (byte) (RowType.BINARY | objectFlag);
+        scratch.typeBytes[colIdx] = RowType.BINARY;
         scratch.varData[colIdx] = bytes;
     }
 
@@ -169,20 +161,18 @@ public class DocumentBatchRowBuilder implements Releasable {
      * Sets a compact packed array column value (small leaf-only arrays).
      * The bytes should be produced by {@link DocumentBatchRowEncoder#packSmallArray}.
      */
-    public void setPackedArray(String path, byte[] packed, boolean fromObject) {
+    public void setPackedArray(String path, byte[] packed) {
         int colIdx = resolveColumn(path);
-        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
-        scratch.typeBytes[colIdx] = (byte) (RowType.ARRAY | objectFlag);
+        scratch.typeBytes[colIdx] = RowType.ARRAY;
         scratch.varData[colIdx] = new org.elasticsearch.common.bytes.BytesArray(packed);
     }
 
     /**
      * Sets an XContent array column value from pre-serialized bytes (e.g. JSON array bytes).
      */
-    public void setXContentArray(String path, BytesReference bytes, boolean fromObject) {
+    public void setXContentArray(String path, BytesReference bytes) {
         int colIdx = resolveColumn(path);
-        byte objectFlag = fromObject ? RowType.OBJECT_FLAG : 0;
-        scratch.typeBytes[colIdx] = (byte) (RowType.XCONTENT_ARRAY | objectFlag);
+        scratch.typeBytes[colIdx] = RowType.XCONTENT_ARRAY;
         scratch.varData[colIdx] = bytes;
     }
 

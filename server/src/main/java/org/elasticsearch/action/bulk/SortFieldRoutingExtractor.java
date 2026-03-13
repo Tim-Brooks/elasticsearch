@@ -67,7 +67,7 @@ class SortFieldRoutingExtractor implements RoutingMetadataExtractor {
             int colIdx = routingColIndices[i];
             String fieldName = routingColNames[i];
             byte typeByte = scratch.typeBytes[colIdx];
-            byte baseType = RowType.baseType(typeByte);
+            byte baseType = typeByte;
 
             if (baseType == RowType.NULL) {
                 continue;

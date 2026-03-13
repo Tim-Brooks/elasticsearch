@@ -11,7 +11,6 @@ package org.elasticsearch.action.bulk;
 
 /**
  * Type byte constants for the row-oriented document batch format.
- * Not an enum because the {@link #OBJECT_FLAG} composes with any base type via bitwise OR.
  */
 public final class RowType {
 
@@ -28,11 +27,8 @@ public final class RowType {
     /** Maximum number of leaf elements in a small (typed) array. */
     public static final int MAX_SMALL_ARRAY_SIZE = 32;
 
-    /** Set when the field came from a nested JSON object (dot-path flattened). */
-    public static final byte OBJECT_FLAG = (byte) 0x80;
-
     /**
-     * Fixed-section size in bytes for each base type.
+     * Fixed-section size in bytes for each type.
      * NULL/TRUE/FALSE = 0 (value is implicit in the type byte).
      * LONG/DOUBLE = 8 (raw value).
      * STRING/BINARY/ARRAY/XCONTENT_ARRAY = 8 (offset:u32 + length:u32 pair referencing var section).
@@ -41,25 +37,16 @@ public final class RowType {
 
     private RowType() {}
 
-    public static byte baseType(byte typeByte) {
-        return (byte) (typeByte & 0x7F);
-    }
-
-    public static boolean isFromObject(byte typeByte) {
-        return (typeByte & OBJECT_FLAG) != 0;
-    }
-
     public static int fixedSize(byte typeByte) {
-        return FIXED_SIZE[baseType(typeByte)];
+        return FIXED_SIZE[typeByte];
     }
 
     public static boolean isVariable(byte typeByte) {
-        byte base = baseType(typeByte);
-        return base == STRING || base == BINARY || base == ARRAY || base == XCONTENT_ARRAY;
+        return typeByte == STRING || typeByte == BINARY || typeByte == ARRAY || typeByte == XCONTENT_ARRAY;
     }
 
     public static String name(byte typeByte) {
-        String baseName = switch (baseType(typeByte)) {
+        return switch (typeByte) {
             case NULL -> "NULL";
             case TRUE -> "TRUE";
             case FALSE -> "FALSE";
@@ -69,8 +56,7 @@ public final class RowType {
             case BINARY -> "BINARY";
             case ARRAY -> "ARRAY";
             case XCONTENT_ARRAY -> "XCONTENT_ARRAY";
-            default -> "UNKNOWN(0x" + Integer.toHexString(baseType(typeByte) & 0xFF) + ")";
+            default -> "UNKNOWN(0x" + Integer.toHexString(typeByte & 0xFF) + ")";
         };
-        return isFromObject(typeByte) ? baseName + "|OBJECT" : baseName;
     }
 }

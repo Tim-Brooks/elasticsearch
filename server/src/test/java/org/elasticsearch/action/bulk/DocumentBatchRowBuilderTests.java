@@ -24,13 +24,13 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
     public void testSimpleScalarDocuments() {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             builder.startDocument();
-            builder.setString("name", "alice", false);
-            builder.setLong("age", 30, false);
+            builder.setString("name", "alice");
+            builder.setLong("age", 30);
             builder.endDocument();
 
             builder.startDocument();
-            builder.setString("name", "bob", false);
-            builder.setLong("age", 25, false);
+            builder.setString("name", "bob");
+            builder.setLong("age", 25);
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -55,11 +55,11 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
         }
     }
 
-    public void testNestedObjectFieldsWithObjectFlag() {
+    public void testNestedObjectFields() {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             builder.startDocument();
-            builder.setString("user.name", "alice", true);
-            builder.setLong("user.age", 30, true);
+            builder.setString("user.name", "alice");
+            builder.setLong("user.age", 30);
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -70,8 +70,6 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
             assertEquals("user.age", schema.getColumnName(1));
 
             DocBatchRowReader row0 = batch.getRowReader(0);
-            assertTrue(row0.isFromObject(0));
-            assertTrue(row0.isFromObject(1));
             assertEquals(RowType.STRING, row0.getBaseType(0));
             assertEquals("alice", row0.getStringValue(0));
             assertEquals(30L, row0.getLongValue(1));
@@ -84,14 +82,14 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             // Doc 0: name and age
             builder.startDocument();
-            builder.setString("name", "alice", false);
-            builder.setLong("age", 30, false);
+            builder.setString("name", "alice");
+            builder.setLong("age", 30);
             builder.endDocument();
 
             // Doc 1: name and email (new column)
             builder.startDocument();
-            builder.setString("name", "bob", false);
-            builder.setString("email", "bob@test.com", false);
+            builder.setString("name", "bob");
+            builder.setString("email", "bob@test.com");
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -117,13 +115,13 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
     public void testMissingFields() {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             builder.startDocument();
-            builder.setString("name", "alice", false);
-            builder.setLong("age", 30, false);
+            builder.setString("name", "alice");
+            builder.setLong("age", 30);
             builder.endDocument();
 
             // Second doc only has age
             builder.startDocument();
-            builder.setLong("age", 25, false);
+            builder.setLong("age", 25);
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -140,8 +138,8 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
     public void testBooleanValues() {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             builder.startDocument();
-            builder.setBoolean("active", true, false);
-            builder.setBoolean("deleted", false, false);
+            builder.setBoolean("active", true);
+            builder.setBoolean("deleted", false);
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -158,8 +156,8 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
     public void testDoubleValues() {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             builder.startDocument();
-            builder.setDouble("score", 3.14, false);
-            builder.setDouble("weight", -1.5, false);
+            builder.setDouble("score", 3.14);
+            builder.setDouble("weight", -1.5);
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -175,7 +173,7 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
     public void testNullValues() {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             builder.startDocument();
-            builder.setNull("field", false);
+            builder.setNull("field");
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -191,7 +189,7 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             byte[] jsonArray = "[1,2,3,4,5,6,7,8,9,10]".getBytes(StandardCharsets.UTF_8);
             builder.startDocument();
-            builder.setXContentArray("nums", new BytesArray(jsonArray), false);
+            builder.setXContentArray("nums", new BytesArray(jsonArray));
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -208,10 +206,10 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
     public void testRoundTripReadableByRowReader() {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             builder.startDocument();
-            builder.setString("name", "test", false);
-            builder.setLong("count", 42, false);
-            builder.setDouble("value", 2.718, false);
-            builder.setBoolean("flag", true, false);
+            builder.setString("name", "test");
+            builder.setLong("count", 42);
+            builder.setDouble("value", 2.718);
+            builder.setBoolean("flag", true);
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -239,12 +237,12 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             // Doc 0: val is LONG
             builder.startDocument();
-            builder.setLong("val", 42, false);
+            builder.setLong("val", 42);
             builder.endDocument();
 
             // Doc 1: val is STRING
             builder.startDocument();
-            builder.setString("val", "hello", false);
+            builder.setString("val", "hello");
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -271,13 +269,13 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
         // Build via builder (programmatic)
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             builder.startDocument();
-            builder.setString("name", "alice", false);
-            builder.setLong("age", 30, false);
+            builder.setString("name", "alice");
+            builder.setLong("age", 30);
             builder.endDocument();
 
             builder.startDocument();
-            builder.setString("name", "bob", false);
-            builder.setLong("age", 25, false);
+            builder.setString("name", "bob");
+            builder.setLong("age", 25);
             builder.endDocument();
 
             RowDocumentBatch builderBatch = builder.build();
@@ -292,11 +290,6 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
                 assertEquals(encoderRow.columnCount(), builderRow.columnCount());
                 for (int col = 0; col < encoderRow.columnCount(); col++) {
                     assertEquals("Type mismatch at doc " + doc + " col " + col, encoderRow.getBaseType(col), builderRow.getBaseType(col));
-                    assertEquals(
-                        "Object flag mismatch at doc " + doc + " col " + col,
-                        encoderRow.isFromObject(col),
-                        builderRow.isFromObject(col)
-                    );
                     if (encoderRow.isNull(col) == false) {
                         byte baseType = encoderRow.getBaseType(col);
                         switch (baseType) {
@@ -322,14 +315,14 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
             // First document with 20 columns
             builder.startDocument();
             for (int i = 0; i < 20; i++) {
-                builder.setLong("col" + i, i, false);
+                builder.setLong("col" + i, i);
             }
             builder.endDocument();
 
             // Second document with same columns
             builder.startDocument();
             for (int i = 0; i < 20; i++) {
-                builder.setLong("col" + i, i * 10, false);
+                builder.setLong("col" + i, i * 10);
             }
             builder.endDocument();
 
@@ -355,7 +348,7 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
             byte[] utf8 = "hello world".getBytes(StandardCharsets.UTF_8);
             builder.startDocument();
-            builder.setString("msg", utf8, 0, utf8.length, false);
+            builder.setString("msg", utf8, 0, utf8.length);
             builder.endDocument();
 
             RowDocumentBatch batch = builder.build();
@@ -388,7 +381,7 @@ public class DocumentBatchRowBuilderTests extends ESTestCase {
 
     public void testSetValueOutsideDocument() {
         try (DocumentBatchRowBuilder builder = new DocumentBatchRowBuilder()) {
-            expectThrows(IllegalStateException.class, () -> builder.setString("name", "test", false));
+            expectThrows(IllegalStateException.class, () -> builder.setString("name", "test"));
         }
     }
 }
