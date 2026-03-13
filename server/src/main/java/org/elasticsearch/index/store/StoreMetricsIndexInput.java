@@ -312,7 +312,7 @@ public class StoreMetricsIndexInput extends FilterIndexInput implements DirectAc
         @Override
         public byte readByte(long pos) throws IOException {
             byte result = delegate.readByte(pos);
-            metricHolder.instance().addBytesRead(1);
+//            metricHolder.instance().addBytesRead(1);
             return result;
         }
 
