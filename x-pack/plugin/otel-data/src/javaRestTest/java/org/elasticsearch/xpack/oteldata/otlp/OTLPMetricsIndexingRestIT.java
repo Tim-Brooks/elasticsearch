@@ -49,6 +49,7 @@ import static io.opentelemetry.sdk.metrics.data.AggregationTemporality.DELTA;
 import static org.elasticsearch.test.rest.ObjectPath.evaluate;
 import static org.elasticsearch.xpack.oteldata.otlp.OTLPMetricsIndexingRestIT.Monotonicity.MONOTONIC;
 import static org.elasticsearch.xpack.oteldata.otlp.OTLPMetricsIndexingRestIT.Monotonicity.NON_MONOTONIC;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.equalTo;
@@ -436,6 +437,34 @@ public class OTLPMetricsIndexingRestIT extends AbstractOTLPIndexingRestIT {
         );
         assertThat(searchResponse.evaluate("hits.total.value"), equalTo(2));
         assertThat(searchResponse.evaluate("hits.hits.0.fields._tsid"), equalTo(searchResponse.evaluate("hits.hits.1.fields._tsid")));
+    }
+
+    public void testIpAddressArrayAttribute() throws Exception {
+        long now = Clock.getDefault().now();
+        export(
+            List.of(
+                createDoubleGauge(
+                    TEST_RESOURCE,
+                    Attributes.builder()
+                        .put(AttributeKey.stringArrayKey("host.ip"), List.of("127.0.0.1", "0.0.0.0"))
+                        .build(),
+                    "metric_with_ip_array",
+                    42,
+                    "By",
+                    now
+                )
+            )
+        );
+
+        ObjectPath search = search("metrics-generic.otel-default");
+        assertThat(search.toString(), search.evaluate("hits.total.value"), equalTo(1));
+        var source = search.evaluate("hits.hits.0._source");
+        List<String> ips = evaluate(source, "attributes.host\\.ip");
+        assertThat(ips, containsInAnyOrder("127.0.0.1", "0.0.0.0"));
+
+        // Verify the field was mapped as ip type via the ecs_ip dynamic template
+        Map<String, Object> mappings = evaluate(getMapping("metrics-generic.otel-default"), "properties.attributes.properties");
+        assertThat(evaluate(mappings, "host\\.ip.type"), equalTo("ip"));
     }
 
     private static Map<String, Object> getMapping(String target) throws IOException {

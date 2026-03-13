@@ -230,8 +230,10 @@ public class MetricRowBuilder {
                     case STRING_VALUE -> {
                         arrayElemTypes[count] = RowType.STRING;
                         ByteString bs = elem.getStringValueBytes();
-                        byte[] buf = byteStringAccessor.toBytes(bs);
-                        arrayElemStrings[count] = new XContentString.UTF8Bytes(buf, 0, bs.size());
+                        // Must copy — byteStringAccessor.toBytes() returns a shared buffer
+                        // that would be overwritten by subsequent elements
+                        byte[] buf = bs.toByteArray();
+                        arrayElemStrings[count] = new XContentString.UTF8Bytes(buf, 0, buf.length);
                     }
                     case BOOL_VALUE -> arrayElemTypes[count] = elem.getBoolValue() ? RowType.TRUE : RowType.FALSE;
                     case INT_VALUE -> {
