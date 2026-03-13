@@ -405,7 +405,7 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
         }
     }
 
-    private static class BloomFilterTerms extends FilterLeafReader.FilterTerms {
+    public static class BloomFilterTerms extends FilterLeafReader.FilterTerms {
         private final RandomAccessInput data;
         private final int bloomFilterSize;
         private final int[] hashes = new int[NUM_HASH_FUNCTIONS];
@@ -416,11 +416,11 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
             this.bloomFilterSize = bloomFilterSize;
         }
 
-        Terms getDelegate() {
+        public Terms getDelegate() {
             return in;
         }
 
-        private boolean mayContainTerm(BytesRef term) throws IOException {
+        public boolean mayContainTerm(BytesRef term) throws IOException {
             hashTerm(term, hashes);
             for (int hash : hashes) {
                 hash = hash % bloomFilterSize;
@@ -471,15 +471,11 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
     }
 
     /**
-     * If the given Terms is a bloom filter wrapper, return the unwrapped delegate Terms.
-     * Otherwise return the input as-is. This allows callers to bypass the bloom filter
-     * for batch lookups where the per-term bloom check is not beneficial.
+     * If the given Terms is a bloom filter wrapper, return it as a BloomFilterTerms.
+     * Returns null if the Terms is not bloom-filter-wrapped.
      */
-    public static Terms unwrapBloomFilter(Terms terms) {
-        if (terms instanceof BloomFilterTerms bloomFilterTerms) {
-            return bloomFilterTerms.getDelegate();
-        }
-        return terms;
+    public static BloomFilterTerms getBloomFilterTerms(Terms terms) {
+        return terms instanceof BloomFilterTerms bft ? bft : null;
     }
 
     static int bloomFilterSize(int maxDocs) {

@@ -53,7 +53,9 @@ final class PerThreadIDVersionAndSeqNoLookup {
 
     private final TermsEnum termsEnum;
 
-    /** TermsEnum with bloom filter unwrapped for batch lookups (avoids megamorphic dispatch) */
+    /** Bloom filter for direct concrete-type calls in batch lookups (null if no bloom filter) */
+    private final ES87BloomFilterPostingsFormat.BloomFilterTerms bloomFilter;
+    /** Unwrapped TermsEnum for batch lookups — bypasses bloom filter virtual dispatch */
     private final TermsEnum batchTermsEnum;
 
     /** Reused for iteration (when the term exists) */
@@ -89,13 +91,20 @@ final class PerThreadIDVersionAndSeqNoLookup {
                 );
             }
             termsEnum = null;
+            bloomFilter = null;
             batchTermsEnum = null;
         } else {
             termsEnum = terms.iterator();
-            // Unwrap bloom filter for batch lookups: the bloom filter adds per-term overhead
-            // (7 random reads + virtual dispatch) that isn't beneficial when doing many seeks.
-            Terms unwrapped = ES87BloomFilterPostingsFormat.unwrapBloomFilter(terms);
-            batchTermsEnum = (unwrapped != terms) ? unwrapped.iterator() : termsEnum;
+            // For batch lookups, split the bloom filter from the delegate TermsEnum so both
+            // can be called as concrete types (no virtual dispatch in the hot loop).
+            ES87BloomFilterPostingsFormat.BloomFilterTerms bf = ES87BloomFilterPostingsFormat.getBloomFilterTerms(terms);
+            if (bf != null) {
+                bloomFilter = bf;
+                batchTermsEnum = bf.getDelegate().iterator();
+            } else {
+                bloomFilter = null;
+                batchTermsEnum = termsEnum;
+            }
         }
         if (reader.getNumericDocValues(VersionFieldMapper.NAME) == null) {
             throw new IllegalArgumentException("reader misses the [" + VersionFieldMapper.NAME + "] field; _uid terms [" + terms + "]");
@@ -213,10 +222,16 @@ final class PerThreadIDVersionAndSeqNoLookup {
             return;
         }
         final Bits liveDocs = context.reader().getLiveDocs();
+        final ES87BloomFilterPostingsFormat.BloomFilterTerms bf = this.bloomFilter;
         for (int i = 0; i < count; i++) {
             int idx = originalIndices[i];
             if (results[idx] != null) {
                 continue; // already resolved in an earlier segment
+            }
+            // Direct concrete-type calls: bloom filter check then delegate seekExact,
+            // avoiding the megamorphic TermsEnum.seekExact virtual dispatch.
+            if (bf != null && bf.mayContainTerm(terms[i]) == false) {
+                continue;
             }
             if (batchTermsEnum.seekExact(terms[i])) {
                 int docID = DocIdSetIterator.NO_MORE_DOCS;
