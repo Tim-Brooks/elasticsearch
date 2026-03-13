@@ -416,6 +416,10 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
             this.bloomFilterSize = bloomFilterSize;
         }
 
+        Terms getDelegate() {
+            return in;
+        }
+
         private boolean mayContainTerm(BytesRef term) throws IOException {
             hashTerm(term, hashes);
             for (int hash : hashes) {
@@ -464,6 +468,18 @@ public class ES87BloomFilterPostingsFormat extends PostingsFormat {
                 }
             };
         }
+    }
+
+    /**
+     * If the given Terms is a bloom filter wrapper, return the unwrapped delegate Terms.
+     * Otherwise return the input as-is. This allows callers to bypass the bloom filter
+     * for batch lookups where the per-term bloom check is not beneficial.
+     */
+    public static Terms unwrapBloomFilter(Terms terms) {
+        if (terms instanceof BloomFilterTerms bloomFilterTerms) {
+            return bloomFilterTerms.getDelegate();
+        }
+        return terms;
     }
 
     static int bloomFilterSize(int maxDocs) {
