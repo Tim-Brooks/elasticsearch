@@ -14,12 +14,11 @@ import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.CloseableThreadLocal;
+import org.apache.lucene.util.IntroSorter;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.core.Assertions;
 import org.elasticsearch.index.mapper.TsidExtractingIdFieldMapper;
 import org.elasticsearch.index.mapper.Uid;
-
-import org.apache.lucene.util.IntroSorter;
 
 import java.io.IOException;
 import java.util.Base64;
@@ -276,11 +275,7 @@ public final class VersionsAndSeqNoResolver {
     /**
      * Batch version of {@link #timeSeriesLoadDocIdAndVersion(IndexReader, BytesRef, boolean)} for non-TSDB indices.
      */
-    public static DocIdAndVersion[] loadDocIdAndVersions(
-        IndexReader reader,
-        BytesRef[] uids,
-        boolean loadSeqNo
-    ) throws IOException {
+    public static DocIdAndVersion[] loadDocIdAndVersions(IndexReader reader, BytesRef[] uids, boolean loadSeqNo) throws IOException {
         final int count = uids.length;
         final DocIdAndVersion[] results = new DocIdAndVersion[count];
         if (count == 0) {

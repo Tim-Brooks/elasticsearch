@@ -702,11 +702,7 @@ public final class RowBatchDocumentParser {
      * Buffers a compound sub-field value from the current iterator position into the appropriate
      * CompoundFieldGroup. The value is read based on the RowType and stored for later processing.
      */
-    private static void bufferCompoundSubFieldValue(
-        DocBatchRowIterator iterator,
-        int col,
-        Map<String, CompoundFieldGroup> compoundGroups
-    ) {
+    private static void bufferCompoundSubFieldValue(DocBatchRowIterator iterator, int col, Map<String, CompoundFieldGroup> compoundGroups) {
         byte baseType = iterator.baseType();
         Object value = switch (baseType) {
             case RowType.LONG -> iterator.rowLongValue();

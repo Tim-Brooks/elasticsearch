@@ -11,8 +11,8 @@ package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.routing.TsidBuilder;
-import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.common.regex.Regex;
+import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.xcontent.XContentString;
@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Extracts TSID from dimension columns during batch encoding.

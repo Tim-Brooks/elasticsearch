@@ -692,12 +692,15 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                                 case RowType.DOUBLE -> tsidBuilder.addDoubleDimension(fieldName, arrayReader.doubleValue());
                                 case RowType.TRUE -> tsidBuilder.addBooleanDimension(fieldName, true);
                                 case RowType.FALSE -> tsidBuilder.addBooleanDimension(fieldName, false);
-                                default -> { }
+                                default -> {
+                                }
                             }
                         }
                     }
-                    case RowType.NULL -> { }
-                    default -> { }
+                    case RowType.NULL -> {
+                    }
+                    default -> {
+                    }
                 }
             }
             if (tsidBuilder.size() > 0) {
