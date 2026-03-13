@@ -27,7 +27,6 @@ import org.elasticsearch.cluster.metadata.DataStream;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.lucene.uid.VersionsAndSeqNoResolver.DocIdAndSeqNo;
 import org.elasticsearch.common.lucene.uid.VersionsAndSeqNoResolver.DocIdAndVersion;
-import org.elasticsearch.index.codec.bloomfilter.ES87BloomFilterPostingsFormat;
 import org.elasticsearch.index.mapper.IdFieldMapper;
 import org.elasticsearch.index.mapper.SeqNoFieldMapper;
 import org.elasticsearch.index.mapper.VersionFieldMapper;
@@ -53,12 +52,8 @@ final class PerThreadIDVersionAndSeqNoLookup {
 
     private final TermsEnum termsEnum;
 
-    /** TermsEnum with bloom filter unwrapped for batch lookups (avoids megamorphic dispatch) */
-    private final TermsEnum batchTermsEnum;
-
     /** Reused for iteration (when the term exists) */
     private PostingsEnum docsEnum;
-    private PostingsEnum batchDocsEnum;
 
     /** used for assertions to make sure class usage meets assumptions */
     private final Object readerKey;
@@ -89,13 +84,8 @@ final class PerThreadIDVersionAndSeqNoLookup {
                 );
             }
             termsEnum = null;
-            batchTermsEnum = null;
         } else {
             termsEnum = terms.iterator();
-            // Unwrap bloom filter for batch lookups: the bloom filter adds per-term overhead
-            // (7 random reads + virtual dispatch) that isn't beneficial when doing many seeks.
-            Terms unwrapped = ES87BloomFilterPostingsFormat.unwrapBloomFilter(terms);
-            batchTermsEnum = (unwrapped != terms) ? unwrapped.iterator() : termsEnum;
         }
         if (reader.getNumericDocValues(VersionFieldMapper.NAME) == null) {
             throw new IllegalArgumentException("reader misses the [" + VersionFieldMapper.NAME + "] field; _uid terms [" + terms + "]");
@@ -209,7 +199,7 @@ final class PerThreadIDVersionAndSeqNoLookup {
     ) throws IOException {
         assert readerKey == null || context.reader().getCoreCacheHelper().getKey().equals(readerKey)
             : "context's reader is not the same as the reader class was initialized on.";
-        if (batchTermsEnum == null || count == 0) {
+        if (termsEnum == null || count == 0) {
             return;
         }
         final Bits liveDocs = context.reader().getLiveDocs();
@@ -218,10 +208,10 @@ final class PerThreadIDVersionAndSeqNoLookup {
             if (results[idx] != null) {
                 continue; // already resolved in an earlier segment
             }
-            if (batchTermsEnum.seekExact(terms[i])) {
+            if (termsEnum.seekExact(terms[i])) {
                 int docID = DocIdSetIterator.NO_MORE_DOCS;
-                batchDocsEnum = batchTermsEnum.postings(batchDocsEnum, 0);
-                for (int d = batchDocsEnum.nextDoc(); d != DocIdSetIterator.NO_MORE_DOCS; d = batchDocsEnum.nextDoc()) {
+                docsEnum = termsEnum.postings(docsEnum, 0);
+                for (int d = docsEnum.nextDoc(); d != DocIdSetIterator.NO_MORE_DOCS; d = docsEnum.nextDoc()) {
                     if (liveDocs != null && liveDocs.get(d) == false) {
                         continue;
                     }
