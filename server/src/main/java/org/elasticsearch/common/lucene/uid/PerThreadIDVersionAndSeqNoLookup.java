@@ -185,7 +185,7 @@ final class PerThreadIDVersionAndSeqNoLookup {
     }
 
     /**
-     * Batch lookup of multiple terms within a single segment. Terms MUST be pre-sorted lexicographically by caller.
+     * Batch lookup of multiple terms within a single segment.
      * Results are written into results[originalIndices[i]] for each found term. Already-resolved entries
      * (results[idx] != null) are skipped.
      */
@@ -202,7 +202,15 @@ final class PerThreadIDVersionAndSeqNoLookup {
         if (termsEnum == null || count == 0) {
             return;
         }
-        final Bits liveDocs = context.reader().getLiveDocs();
+        final LeafReader reader = context.reader();
+        final Bits liveDocs = reader.getLiveDocs();
+        final int docBase = context.docBase;
+
+        // Acquire doc values iterators once for the whole batch in this segment
+        final NumericDocValues versionDV = reader.getNumericDocValues(VersionFieldMapper.NAME);
+        final NumericDocValues seqNoDV = loadSeqNo ? reader.getNumericDocValues(SeqNoFieldMapper.NAME) : null;
+        final NumericDocValues primaryTermDV = loadSeqNo ? reader.getNumericDocValues(SeqNoFieldMapper.PRIMARY_TERM_NAME) : null;
+
         for (int i = 0; i < count; i++) {
             int idx = originalIndices[i];
             if (results[idx] != null) {
@@ -219,20 +227,28 @@ final class PerThreadIDVersionAndSeqNoLookup {
                     docID = d;
                 }
                 if (docID != DocIdSetIterator.NO_MORE_DOCS) {
+                    final long version = advanceAndReadDV(versionDV, VersionFieldMapper.NAME, docID);
                     final long seqNo;
                     final long term;
                     if (loadSeqNo) {
-                        seqNo = readNumericDocValues(context.reader(), SeqNoFieldMapper.NAME, docID);
-                        term = readNumericDocValues(context.reader(), SeqNoFieldMapper.PRIMARY_TERM_NAME, docID);
+                        seqNo = advanceAndReadDV(seqNoDV, SeqNoFieldMapper.NAME, docID);
+                        term = advanceAndReadDV(primaryTermDV, SeqNoFieldMapper.PRIMARY_TERM_NAME, docID);
                     } else {
                         seqNo = UNASSIGNED_SEQ_NO;
                         term = UNASSIGNED_PRIMARY_TERM;
                     }
-                    final long version = readNumericDocValues(context.reader(), VersionFieldMapper.NAME, docID);
-                    results[idx] = new DocIdAndVersion(docID, version, seqNo, term, context.reader(), context.docBase);
+                    results[idx] = new DocIdAndVersion(docID, version, seqNo, term, reader, docBase);
                 }
             }
         }
+    }
+
+    private static long advanceAndReadDV(NumericDocValues dv, String field, int docId) throws IOException {
+        if (dv == null || dv.advanceExact(docId) == false) {
+            assert false : "document [" + docId + "] does not have docValues for [" + field + "]";
+            throw new IllegalStateException("document [" + docId + "] does not have docValues for [" + field + "]");
+        }
+        return dv.longValue();
     }
 
     /** Return null if id is not found. */

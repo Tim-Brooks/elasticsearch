@@ -19,9 +19,10 @@ import org.elasticsearch.core.Assertions;
 import org.elasticsearch.index.mapper.TsidExtractingIdFieldMapper;
 import org.elasticsearch.index.mapper.Uid;
 
+import org.apache.lucene.util.IntroSorter;
+
 import java.io.IOException;
 import java.util.Base64;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentMap;
 
@@ -230,40 +231,44 @@ public final class VersionsAndSeqNoResolver {
             }
         }
 
+        // Sort once upfront by term lexicographic order
+        final int[] sortedIndices = sortIndicesByTerm(uids, count);
+        final BytesRef[] sortedTerms = new BytesRef[count];
+        for (int i = 0; i < count; i++) {
+            sortedTerms[i] = uids[sortedIndices[i]];
+        }
+
         PerThreadIDVersionAndSeqNoLookup[] lookups = getLookupState(reader, true);
         List<LeafReaderContext> leaves = reader.leaves();
 
-        // For each leaf, collect applicable indices, sort terms, and batch lookup
+        // Reusable arrays for per-leaf subsets (drawn from the pre-sorted order)
+        int[] subOriginalIndices = new int[count];
+        BytesRef[] subTerms = new BytesRef[count];
+
         for (final LeafReaderContext leaf : leaves) {
             PerThreadIDVersionAndSeqNoLookup lookup = lookups[leaf.ord];
             assert lookup.loadedTimestampRange;
 
-            // Collect indices where timestamp falls in this segment's range and not yet resolved
+            // Walk the pre-sorted order, picking entries whose timestamp matches this leaf
             int subCount = 0;
-            int[] subIndices = new int[count]; // indices into uids[] that apply to this segment
             for (int i = 0; i < count; i++) {
-                if (results[i] != null) {
+                int orig = sortedIndices[i];
+                if (results[orig] != null) {
                     continue; // already resolved
                 }
-                if (timestamps[i] < lookup.minTimestamp || timestamps[i] > lookup.maxTimestamp) {
+                if (timestamps[orig] < lookup.minTimestamp || timestamps[orig] > lookup.maxTimestamp) {
                     continue; // timestamp not in segment range
                 }
-                subIndices[subCount++] = i;
+                subTerms[subCount] = sortedTerms[i];
+                subOriginalIndices[subCount] = orig;
+                subCount++;
             }
             if (subCount == 0) {
                 continue;
             }
 
-            // Sort subset by term (lexicographic) for sequential seeks
-            sortByTerm(uids, subIndices, subCount);
-
-            // Build sorted term/index arrays for lookupVersions
-            BytesRef[] sortedTerms = new BytesRef[subCount];
-            for (int i = 0; i < subCount; i++) {
-                sortedTerms[i] = uids[subIndices[i]];
-            }
-
-            lookup.lookupVersions(sortedTerms, subIndices, subCount, loadSeqNo, leaf, results);
+            // subTerms is already in sorted order (subset of the globally sorted array)
+            lookup.lookupVersions(subTerms, subOriginalIndices, subCount, loadSeqNo, leaf, results);
         }
         return results;
     }
@@ -282,16 +287,11 @@ public final class VersionsAndSeqNoResolver {
             return results;
         }
 
-        // Build index mapping and sort by term for sequential seeks
-        int[] indices = new int[count];
+        // Sort once by term lexicographic order
+        final int[] sortedIndices = sortIndicesByTerm(uids, count);
+        final BytesRef[] sortedTerms = new BytesRef[count];
         for (int i = 0; i < count; i++) {
-            indices[i] = i;
-        }
-        sortByTerm(uids, indices, count);
-
-        BytesRef[] sortedTerms = new BytesRef[count];
-        for (int i = 0; i < count; i++) {
-            sortedTerms[i] = uids[indices[i]];
+            sortedTerms[i] = uids[sortedIndices[i]];
         }
 
         PerThreadIDVersionAndSeqNoLookup[] lookups = getLookupState(reader, false);
@@ -300,26 +300,41 @@ public final class VersionsAndSeqNoResolver {
         for (int i = leaves.size() - 1; i >= 0; i--) {
             final LeafReaderContext leaf = leaves.get(i);
             PerThreadIDVersionAndSeqNoLookup lookup = lookups[leaf.ord];
-            lookup.lookupVersions(sortedTerms, indices, count, loadSeqNo, leaf, results);
+            lookup.lookupVersions(sortedTerms, sortedIndices, count, loadSeqNo, leaf, results);
         }
         return results;
     }
 
     /**
-     * Sort indices[0..count) by the lexicographic order of uids[indices[i]].
-     * Simple insertion sort — good for small batch sizes typical of bulk indexing.
+     * Build an index array sorted by the lexicographic order of uids.
+     * Uses IntroSorter (no boxing, no allocation beyond the result array).
      */
-    private static void sortByTerm(BytesRef[] uids, int[] indices, int count) {
-        for (int i = 1; i < count; i++) {
-            int key = indices[i];
-            BytesRef keyTerm = uids[key];
-            int j = i - 1;
-            while (j >= 0 && uids[indices[j]].compareTo(keyTerm) > 0) {
-                indices[j + 1] = indices[j];
-                j--;
-            }
-            indices[j + 1] = key;
+    private static int[] sortIndicesByTerm(BytesRef[] uids, int count) {
+        final int[] indices = new int[count];
+        for (int i = 0; i < count; i++) {
+            indices[i] = i;
         }
+        new IntroSorter() {
+            private int pivot;
+
+            @Override
+            protected void swap(int i, int j) {
+                int tmp = indices[i];
+                indices[i] = indices[j];
+                indices[j] = tmp;
+            }
+
+            @Override
+            protected int comparePivot(int j) {
+                return uids[pivot].compareTo(uids[indices[j]]);
+            }
+
+            @Override
+            protected void setPivot(int i) {
+                pivot = indices[i];
+            }
+        }.sort(0, count);
+        return indices;
     }
 
     public static DocIdAndVersion loadDocIdAndVersionUncached(IndexReader reader, BytesRef term, boolean loadSeqNo) throws IOException {
