@@ -202,22 +202,13 @@ final class PerThreadIDVersionAndSeqNoLookup {
         if (termsEnum == null || count == 0) {
             return;
         }
-        final LeafReader reader = context.reader();
-        final Bits liveDocs = reader.getLiveDocs();
-        final int docBase = context.docBase;
-
-        // Acquire doc values iterators once for the whole batch in this segment
-        final NumericDocValues versionDV = reader.getNumericDocValues(VersionFieldMapper.NAME);
-        final NumericDocValues seqNoDV = loadSeqNo ? reader.getNumericDocValues(SeqNoFieldMapper.NAME) : null;
-        final NumericDocValues primaryTermDV = loadSeqNo ? reader.getNumericDocValues(SeqNoFieldMapper.PRIMARY_TERM_NAME) : null;
-
+        final Bits liveDocs = context.reader().getLiveDocs();
         for (int i = 0; i < count; i++) {
             int idx = originalIndices[i];
             if (results[idx] != null) {
                 continue; // already resolved in an earlier segment
             }
             if (termsEnum.seekExact(terms[i])) {
-                // find the last live doc (handles nested docs)
                 int docID = DocIdSetIterator.NO_MORE_DOCS;
                 docsEnum = termsEnum.postings(docsEnum, 0);
                 for (int d = docsEnum.nextDoc(); d != DocIdSetIterator.NO_MORE_DOCS; d = docsEnum.nextDoc()) {
@@ -227,28 +218,20 @@ final class PerThreadIDVersionAndSeqNoLookup {
                     docID = d;
                 }
                 if (docID != DocIdSetIterator.NO_MORE_DOCS) {
-                    final long version = advanceAndReadDV(versionDV, VersionFieldMapper.NAME, docID);
                     final long seqNo;
                     final long term;
                     if (loadSeqNo) {
-                        seqNo = advanceAndReadDV(seqNoDV, SeqNoFieldMapper.NAME, docID);
-                        term = advanceAndReadDV(primaryTermDV, SeqNoFieldMapper.PRIMARY_TERM_NAME, docID);
+                        seqNo = readNumericDocValues(context.reader(), SeqNoFieldMapper.NAME, docID);
+                        term = readNumericDocValues(context.reader(), SeqNoFieldMapper.PRIMARY_TERM_NAME, docID);
                     } else {
                         seqNo = UNASSIGNED_SEQ_NO;
                         term = UNASSIGNED_PRIMARY_TERM;
                     }
-                    results[idx] = new DocIdAndVersion(docID, version, seqNo, term, reader, docBase);
+                    final long version = readNumericDocValues(context.reader(), VersionFieldMapper.NAME, docID);
+                    results[idx] = new DocIdAndVersion(docID, version, seqNo, term, context.reader(), context.docBase);
                 }
             }
         }
-    }
-
-    private static long advanceAndReadDV(NumericDocValues dv, String field, int docId) throws IOException {
-        if (dv == null || dv.advanceExact(docId) == false) {
-            assert false : "document [" + docId + "] does not have docValues for [" + field + "]";
-            throw new IllegalStateException("document [" + docId + "] does not have docValues for [" + field + "]");
-        }
-        return dv.longValue();
     }
 
     /** Return null if id is not found. */
