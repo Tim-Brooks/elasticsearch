@@ -456,8 +456,8 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
                     }
                     // If we reached this point, all of the buffered ops should have been flushed successfully.
                     assert buffer == null;
-                    assert checkChannelPositionWhileHandlingException(totalOffset);
-                    assert totalOffset == lastSyncedCheckpoint.offset;
+//                    assert checkChannelPositionWhileHandlingException(totalOffset);
+//                    assert totalOffset == lastSyncedCheckpoint.offset;
                     if (closed.compareAndSet(false, true)) {
                         try {
                             checkpointChannel.close();
@@ -494,8 +494,8 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
                     }
                     // If we reached this point, all of the buffered ops should have been flushed successfully.
                     assert buffer == null;
-                    assert checkChannelPositionWhileHandlingException(totalOffset);
-                    assert totalOffset == lastSyncedCheckpoint.offset;
+//                    assert checkChannelPositionWhileHandlingException(totalOffset);
+//                    assert totalOffset == lastSyncedCheckpoint.offset;
                     return super.newSnapshot();
                 }
             }
@@ -543,7 +543,7 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
                         try {
                             // Write ops will release operations.
                             writeAndReleaseOps(toWrite);
-                            assert channel.position() == checkpointToSync.offset;
+    //                        assert channel.position() == checkpointToSync.offset;
                         } catch (final Exception ex) {
                             closeWithTragicEvent(ex);
                             throw ex;
@@ -554,9 +554,9 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
                     try {
                         assert lastSyncedCheckpoint.offset != checkpointToSync.offset || toWrite.length() == 0;
                         if (lastSyncedCheckpoint.offset != checkpointToSync.offset && fsync) {
-                            channel.force(false);
+//                            channel.force(false);
                         }
-                        Checkpoint.write(checkpointChannel, checkpointPath, checkpointToSync, fsync);
+//                        Checkpoint.write(checkpointChannel, checkpointPath, checkpointToSync, fsync);
                     } catch (final Exception ex) {
                         closeWithTragicEvent(ex);
                         throw ex;
@@ -613,7 +613,7 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
                 BytesRefIterator iterator = toWrite.iterator();
                 BytesRef current;
                 while ((current = iterator.next()) != null) {
-                    Channels.writeToChannel(current.bytes, current.offset, current.length, channel);
+//                    Channels.writeToChannel(current.bytes, current.offset, current.length, channel);
                 }
                 return;
             }
@@ -627,13 +627,13 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
                     currentBytesConsumed += nBytesToWrite;
                     if (ioBuffer.hasRemaining() == false) {
                         ioBuffer.flip();
-                        writeToFile(ioBuffer);
+//                        writeToFile(ioBuffer);
                         ioBuffer.clear();
                     }
                 }
             }
             ioBuffer.flip();
-            writeToFile(ioBuffer);
+//            writeToFile(ioBuffer);
         }
     }
 

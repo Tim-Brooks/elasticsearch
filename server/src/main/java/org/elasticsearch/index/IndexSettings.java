@@ -292,7 +292,7 @@ public final class IndexSettings {
         Property.IndexScope
     );
 
-    public static final TimeValue DEFAULT_REFRESH_INTERVAL = new TimeValue(1, TimeUnit.SECONDS);
+    public static final TimeValue DEFAULT_REFRESH_INTERVAL = new TimeValue(2, TimeUnit.SECONDS);
     public static final Setting<TimeValue> NODE_DEFAULT_REFRESH_INTERVAL_SETTING = Setting.timeSetting(
         "node._internal.default_refresh_interval",
         DEFAULT_REFRESH_INTERVAL,

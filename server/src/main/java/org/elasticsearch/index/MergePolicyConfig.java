@@ -357,8 +357,11 @@ public final class MergePolicyConfig {
     }
 
     void setCompoundFormatThreshold(CompoundFileThreshold compoundFileThreshold) {
-        compoundFileThreshold.configure(tieredMergePolicy);
-        compoundFileThreshold.configure(timeBasedMergePolicy);
+        // HACK: disable CFS entirely
+        tieredMergePolicy.setNoCFSRatio(0.0);
+        tieredMergePolicy.setMaxCFSSegmentSizeMB(0.0);
+        timeBasedMergePolicy.setNoCFSRatio(0.0);
+        timeBasedMergePolicy.setMaxCFSSegmentSizeMB(0.0);
     }
 
     void setDeletesPctAllowed(Double deletesPctAllowed) {
