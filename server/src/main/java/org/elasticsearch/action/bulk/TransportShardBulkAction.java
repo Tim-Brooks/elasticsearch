@@ -281,16 +281,21 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     ) {
         new ActionRunnable<>(listener) {
 
+            private static final int MAX_BATCH_MAPPING_RETRIES = 3;
+
             private final BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(request, primary);
 
             final long startBulkTime = System.nanoTime();
 
             private final ActionListener<Void> onMappingUpdateDone = ActionListener.wrap(v -> executor.execute(this), this::onRejection);
 
+            private int batchMappingRetries = 0;
+            private boolean batchFallbackToSerial = false;
+
             @Override
             protected void doRun() throws Exception {
                 // Try batch path if the coordinating node determined this request is batch-eligible
-                if (request.isRowBatchMode()) {
+                if (request.isRowBatchMode() && batchFallbackToSerial == false) {
                     try {
                         var batchResult = performRowBatchOnPrimary(request, primary, postWriteRefresh, postWriteAction);
                         if (batchResult != null) {
@@ -298,13 +303,41 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                             listener.onResponse(batchResult);
                             return;
                         }
+                    } catch (BatchDynamicMappingUpdateRequired mappingRequired) {
+                        if (batchMappingRetries >= MAX_BATCH_MAPPING_RETRIES) {
+                            logger.debug("Row batch dynamic mapping update retries exhausted, falling back to serial path");
+                            batchFallbackToSerial = true;
+                            runSerialLoop();
+                            return;
+                        }
+                        batchMappingRetries++;
+                        // Batch needs a dynamic mapping update — submit async and retry
+                        final long initialMappingVersion = primary.mapperService().mappingVersion();
+                        mappingUpdater.updateMappings(mappingRequired.getMappingUpdate(), primary.shardId(), new ActionListener<>() {
+                            @Override
+                            public void onResponse(Void v) {
+                                // Mapping update accepted — wait for it to propagate, then re-execute
+                                waitForMappingUpdate.accept(onMappingUpdateDone, initialMappingVersion);
+                            }
+
+                            @Override
+                            public void onFailure(Exception e) {
+                                logger.warn("Row batch dynamic mapping update failed, falling back to serial path", e);
+                                batchFallbackToSerial = true;
+                                onMappingUpdateDone.onResponse(null);
+                            }
+                        });
+                        return; // async — will re-enter via listener
                     } catch (Exception e) {
                         // Batch failed entirely — fall through to serial path
-                        logger.warn("Row batch execution failed, falling back to serial path", e);
+                        logger.error("Row batch execution failed, falling back to serial path", e);
                     }
                 }
 
-                // Serial loop
+                runSerialLoop();
+            }
+
+            private void runSerialLoop() throws Exception {
                 while (context.hasMoreOperationsToExecute()) {
                     if (executeBulkItemRequest(
                         context,
@@ -410,18 +443,84 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             return null;
         }
 
-        // Check if any schema columns require dynamic mapping — if so, fall back to serial path
-        // which handles dynamic mapping creation via the standard mapping update flow.
-        DocBatchSchema schema = rowBatch.schema();
-        for (int col = 0; col < schema.columnCount(); col++) {
-            if (RowBatchDocumentParser.requiresDynamicMapping(schema.getColumnName(col), mappingLookup)) {
-                return null;
+        // Collect all field names that have named dynamic templates from any index request
+        java.util.Set<String> dynamicTemplateFields = new java.util.HashSet<>();
+        for (IndexRequest ir : indexRequests) {
+            if (ir.getDynamicTemplates() != null) {
+                dynamicTemplateFields.addAll(ir.getDynamicTemplates().keySet());
             }
+        }
+
+        // Check if any schema columns require dynamic mapping
+        DocBatchSchema schema = rowBatch.schema();
+        java.util.List<Integer> dynamicColumns = new java.util.ArrayList<>();
+        for (int col = 0; col < schema.columnCount(); col++) {
+            String columnName = schema.getColumnName(col);
+            if (RowBatchDocumentParser.requiresDynamicMapping(columnName, mappingLookup)) {
+                dynamicColumns.add(col);
+            } else if (dynamicTemplateFields.contains(columnName)
+                && RowBatchDocumentParser.resolveMapper(columnName, mappingLookup) == null
+                && mappingLookup.getFieldType(columnName) == null) {
+                    // Field has a named dynamic template but the mapping hierarchy didn't flag it
+                    // (e.g. passthrough objects with subobjects:false may not be in objectMappers).
+                    dynamicColumns.add(col);
+                }
+        }
+
+        if (dynamicColumns.isEmpty() == false) {
+            // Build a dynamic mapping update from the batch data
+            var batchParser = mapperService.createRowBatchDocumentParser();
+            CompressedXContent mappingUpdate = batchParser.buildDynamicMappingUpdate(
+                rowBatch,
+                dynamicColumns,
+                indexRequests,
+                mappingLookup
+            );
+            if (mappingUpdate == null) {
+                return null; // couldn't determine types — fall back to serial
+            }
+
+            // Preflight merge to validate the mapping update
+            CompressedXContent mergedSource = mapperService.merge(
+                MapperService.SINGLE_MAPPING_NAME,
+                mappingUpdate,
+                MapperService.MergeReason.MAPPING_AUTO_UPDATE_PREFLIGHT
+            ).mappingSource();
+
+            DocumentMapper existingMapper = mapperService.documentMapper();
+            if (existingMapper != null && mergedSource.equals(existingMapper.mappingSource())) {
+                // Mapping already up to date (concurrent update?) — proceed with refreshed lookup
+                // Fall through to parse with the current mappingLookup which should now have the fields
+            } else {
+                // Mapping update required — return special marker to trigger async update
+                throw new BatchDynamicMappingUpdateRequired(mappingUpdate);
+            }
+        }
+
+        // Phase 1.5: Extract tsid from batch data for ForIndexDimensions indices.
+        // The tsid may have been pre-computed during BulkOperation encoding, but if dimension
+        // fields were unmapped at that time (common during dynamic mapping bootstrapping),
+        // the tsid will be null. Re-extract here using the current (post-mapping-update) mapping.
+        if (primary.indexSettings().getMode() == org.elasticsearch.index.IndexMode.TIME_SERIES) {
+            extractTsidsFromBatch(rowBatch, indexRequests, mappingLookup);
         }
 
         // Phase 2: Parse batch using RowBatchDocumentParser
         var batchParser = mapperService.createRowBatchDocumentParser();
         var parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
+
+        // Check if any parsed document needs a dynamic mapping update that wasn't predicted
+        // by the upfront requiresDynamicMapping check (mirrors serial path's check in
+        // IndexShard.applyIndexOperation after parsing)
+        for (int i = 0; i < batchDocCount; i++) {
+            if (parseResult.isSuccess(i)) {
+                CompressedXContent docMappingUpdate = parseResult.getDocument(i).dynamicMappingsUpdate();
+                if (docMappingUpdate != null) {
+                    // A parsed document discovered unmapped fields during parsing — need mapping update
+                    throw new BatchDynamicMappingUpdateRequired(docMappingUpdate);
+                }
+            }
+        }
 
         // Phase 3: Build Engine.Index operations for successfully parsed documents
         final java.util.List<Engine.Index> engineOps = new java.util.ArrayList<>(batchDocCount);
@@ -455,7 +554,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         }
 
         // Phase 4: Execute on engine
-        final java.util.List<Engine.IndexResult> engineResults = primary.indexBatch(engineOps, rowBatch.getRawData());
+        final java.util.List<Engine.IndexResult> engineResults = primary.indexBatch(engineOps, rowBatch.getDataReference());
 
         // Phase 5: Build BulkItemResponse for each item
         final BulkItemResponse[] responses = new BulkItemResponse[items.length];
@@ -515,6 +614,99 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         BulkShardResponse shardResponse = new BulkShardResponse(shardId, responses);
 
         return new WritePrimaryResult<>(request, shardResponse, locationToSync, primary, logger, postWriteRefresh, postWriteAction);
+    }
+
+    /**
+     * Extracts tsid for each IndexRequest from the row batch data using the current mapping's dimension fields.
+     * This is needed because the tsid may not have been set during BulkOperation encoding if dimension fields
+     * were not yet mapped at that time.
+     */
+    private static void extractTsidsFromBatch(
+        RowDocumentBatch rowBatch,
+        java.util.List<IndexRequest> indexRequests,
+        MappingLookup mappingLookup
+    ) {
+        // Collect dimension field names from the current mapping
+        java.util.Set<String> dimensionFields = new java.util.HashSet<>();
+        for (var entry : mappingLookup.fieldMappers()) {
+            if (entry instanceof org.elasticsearch.index.mapper.FieldMapper fm && fm.fieldType().isDimension()) {
+                dimensionFields.add(fm.fieldType().name());
+            }
+        }
+        if (dimensionFields.isEmpty()) {
+            return;
+        }
+
+        // Map dimension fields to batch schema columns
+        DocBatchSchema schema = rowBatch.schema();
+        int[] dimColIndices = new int[dimensionFields.size()];
+        String[] dimColNames = new String[dimensionFields.size()];
+        int dimColCount = 0;
+        for (int col = 0; col < schema.columnCount(); col++) {
+            String colName = schema.getColumnName(col);
+            if (dimensionFields.contains(colName)) {
+                dimColIndices[dimColCount] = col;
+                dimColNames[dimColCount] = colName;
+                dimColCount++;
+            }
+        }
+        if (dimColCount == 0) {
+            return;
+        }
+
+        // Extract tsid for each document that doesn't already have one.
+        // The OTLP path pre-computes tsid from protobuf data; don't overwrite it.
+        for (int docIdx = 0; docIdx < indexRequests.size(); docIdx++) {
+            IndexRequest request = indexRequests.get(docIdx);
+            if (request.tsid() != null) {
+                continue;
+            }
+            int rowIndex = request.batchRowIndex() >= 0 ? request.batchRowIndex() : docIdx;
+            DocBatchRowReader rowReader = rowBatch.getRowReader(rowIndex);
+
+            org.elasticsearch.cluster.routing.TsidBuilder tsidBuilder = new org.elasticsearch.cluster.routing.TsidBuilder(dimColCount);
+            for (int i = 0; i < dimColCount; i++) {
+                int colIdx = dimColIndices[i];
+                String fieldName = dimColNames[i];
+                byte baseType = rowReader.getBaseType(colIdx);
+
+                switch (baseType) {
+                    case RowType.STRING -> tsidBuilder.addStringDimension(fieldName, rowReader.getStringValue(colIdx));
+                    case RowType.LONG -> tsidBuilder.addLongDimension(fieldName, rowReader.getLongValue(colIdx));
+                    case RowType.DOUBLE -> tsidBuilder.addDoubleDimension(fieldName, rowReader.getDoubleValue(colIdx));
+                    case RowType.TRUE -> tsidBuilder.addBooleanDimension(fieldName, true);
+                    case RowType.FALSE -> tsidBuilder.addBooleanDimension(fieldName, false);
+                    case RowType.ARRAY -> {
+                        byte[] arrayData = rowReader.getArrayValue(colIdx);
+                        SmallArrayReader arrayReader = new SmallArrayReader(arrayData);
+                        while (arrayReader.next()) {
+                            if (arrayReader.isNull()) continue;
+                            switch (arrayReader.type()) {
+                                case RowType.STRING -> tsidBuilder.addStringDimension(
+                                    fieldName,
+                                    arrayReader.stringBytes(),
+                                    arrayReader.stringOffset(),
+                                    arrayReader.stringLength()
+                                );
+                                case RowType.LONG -> tsidBuilder.addLongDimension(fieldName, arrayReader.longValue());
+                                case RowType.DOUBLE -> tsidBuilder.addDoubleDimension(fieldName, arrayReader.doubleValue());
+                                case RowType.TRUE -> tsidBuilder.addBooleanDimension(fieldName, true);
+                                case RowType.FALSE -> tsidBuilder.addBooleanDimension(fieldName, false);
+                                default -> {
+                                }
+                            }
+                        }
+                    }
+                    case RowType.NULL -> {
+                    }
+                    default -> {
+                    }
+                }
+            }
+            if (tsidBuilder.size() > 0) {
+                request.tsid(tsidBuilder.buildTsid());
+            }
+        }
     }
 
     /**
@@ -973,7 +1165,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             return null;
         }
 
-        java.util.List<Engine.IndexResult> replicaResults = replica.indexBatch(engineOps, rowBatch.getRawData());
+        java.util.List<Engine.IndexResult> replicaResults = replica.indexBatch(engineOps, rowBatch.getDataReference());
 
         Translog.Location replicaLocation = null;
         for (Engine.IndexResult result : replicaResults) {
@@ -1042,5 +1234,22 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             );
         }
         return result;
+    }
+
+    /**
+     * Exception used to signal that the batch path requires a dynamic mapping update before it can proceed.
+     * Caught in doRun() to trigger the async mapping update flow.
+     */
+    static final class BatchDynamicMappingUpdateRequired extends RuntimeException {
+        private final CompressedXContent mappingUpdate;
+
+        BatchDynamicMappingUpdateRequired(CompressedXContent mappingUpdate) {
+            super("Batch path requires dynamic mapping update");
+            this.mappingUpdate = mappingUpdate;
+        }
+
+        CompressedXContent getMappingUpdate() {
+            return mappingUpdate;
+        }
     }
 }

@@ -184,6 +184,16 @@ public abstract class FieldMapper extends Mapper {
     }
 
     /**
+     * Whether this field mapper represents a compound field whose sub-fields can be stored
+     * as individual typed columns in a row batch and reassembled into the token stream
+     * the mapper expects during parsing. Override to return {@code true} in compound field
+     * types like aggregate_metric_double, histogram, etc.
+     */
+    public boolean isCompoundField() {
+        return false;
+    }
+
+    /**
      * Parse the field value using the provided {@link DocumentParserContext}.
      */
     public void parse(DocumentParserContext context) throws IOException {

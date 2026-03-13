@@ -22,9 +22,9 @@ import org.elasticsearch.exponentialhistogram.ExponentialScaleUtils;
  * Elasticsearch exporter on GitHub
  * </a>
  */
-class TDigestConverter {
+public class TDigestConverter {
 
-    static <E extends Exception> void counts(ExponentialHistogramDataPoint dp, CheckedLongConsumer<E> counts) throws E {
+    public static <E extends Exception> void counts(ExponentialHistogramDataPoint dp, CheckedLongConsumer<E> counts) throws E {
         ExponentialHistogramDataPoint.Buckets negative = dp.getNegative();
 
         for (int i = negative.getBucketCountsCount() - 1; i >= 0; i--) {
@@ -54,7 +54,7 @@ class TDigestConverter {
      * <code>ToTDigest</code> function
      * </a>
      */
-    static <E extends Exception> void centroidValues(ExponentialHistogramDataPoint dp, CheckedDoubleConsumer<E> values) throws E {
+    public static <E extends Exception> void centroidValues(ExponentialHistogramDataPoint dp, CheckedDoubleConsumer<E> values) throws E {
         int scale = dp.getScale();
         ExponentialHistogramDataPoint.Buckets negative = dp.getNegative();
 
@@ -85,7 +85,7 @@ class TDigestConverter {
         }
     }
 
-    static <E extends Exception> void counts(HistogramDataPoint dp, CheckedLongConsumer<E> counts) throws E {
+    public static <E extends Exception> void counts(HistogramDataPoint dp, CheckedLongConsumer<E> counts) throws E {
         for (int i = 0; i < dp.getBucketCountsCount(); i++) {
             long count = dp.getBucketCounts(i);
             if (count != 0) {
@@ -100,7 +100,7 @@ class TDigestConverter {
      * <code>histogramToValue</code> function
      * </a>
      */
-    static <E extends Exception> void centroidValues(HistogramDataPoint dp, CheckedDoubleConsumer<E> values) throws E {
+    public static <E extends Exception> void centroidValues(HistogramDataPoint dp, CheckedDoubleConsumer<E> values) throws E {
         int size = dp.getBucketCountsCount();
         for (int i = 0; i < size; i++) {
             long count = dp.getBucketCounts(i);
@@ -130,11 +130,11 @@ class TDigestConverter {
         return value;
     }
 
-    interface CheckedLongConsumer<E extends Exception> {
+    public interface CheckedLongConsumer<E extends Exception> {
         void accept(long value) throws E;
     }
 
-    interface CheckedDoubleConsumer<E extends Exception> {
+    public interface CheckedDoubleConsumer<E extends Exception> {
         void accept(double value) throws E;
     }
 }

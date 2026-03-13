@@ -131,6 +131,10 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
 
     @Override
     protected void doExecute(Task task, BulkRequest bulkRequest, ActionListener<BulkResponse> listener) {
+        for (DocWriteRequest<?> r : bulkRequest.requests()) {
+            if (r instanceof IndexRequest ir) {
+            }
+        }
         /*
          * This is called on the Transport thread so we can check the indexing
          * memory pressure *quickly* but we don't want to keep the transport
@@ -275,7 +279,7 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
         }
 
         Map<String, IngestService.Pipelines> resolvedPipelineCache = new HashMap<>();
-        boolean hasLogsCustomPipeline = ingestService.getPipeline(projectId, "logs@custom") != null;
+        boolean hasLogsCustomPipeline = ingestService != null && ingestService.getPipeline(projectId, "logs@custom") != null;
         for (DocWriteRequest<?> actionRequest : bulkRequest.requests) {
             IndexRequest indexRequest = getIndexWriteRequest(actionRequest);
             if (indexRequest != null) {
@@ -345,6 +349,10 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
             listener.delegateFailureAndWrap((l, unused) -> {
                 long ingestTookInMillis = TimeUnit.NANOSECONDS.toMillis(relativeTimeNanos() - ingestStartTimeInNanos);
                 BulkRequest bulkRequest = bulkRequestModifier.getBulkRequest();
+                for (DocWriteRequest<?> r : bulkRequest.requests()) {
+                    if (r instanceof IndexRequest ir) {
+                    }
+                }
                 ActionListener<BulkResponse> actionListener = bulkRequestModifier.wrapActionListenerIfNeeded(ingestTookInMillis, l);
                 if (bulkRequest.requests().isEmpty()) {
                     // at this stage, the transport bulk action can't deal with a bulk request with no requests,
@@ -436,6 +444,10 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
         ActionListener<BulkResponse> listener,
         boolean haveRunIngestService
     ) throws IOException {
+        for (DocWriteRequest<?> r : bulkRequest.requests()) {
+            if (r instanceof IndexRequest ir) {
+            }
+        }
         final long relativeStartTimeNanos = relativeTimeNanos();
 
         // Validate child stream writes before processing pipelines
@@ -452,8 +464,13 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
 
         var wrappedListener = bulkRequestModifier.wrapActionListenerIfNeeded(listener);
 
-        if (applyPipelines(task, bulkRequestModifier.getBulkRequest(), executor, wrappedListener, haveRunIngestService) == false) {
-            doInternalExecute(task, bulkRequestModifier.getBulkRequest(), executor, wrappedListener, relativeStartTimeNanos);
+        BulkRequest finalBulkRequest = bulkRequestModifier.getBulkRequest();
+        if (applyPipelines(task, finalBulkRequest, executor, wrappedListener, haveRunIngestService) == false) {
+            for (DocWriteRequest<?> r : finalBulkRequest.requests()) {
+                if (r instanceof IndexRequest ir) {
+                }
+            }
+            doInternalExecute(task, finalBulkRequest, executor, wrappedListener, relativeStartTimeNanos);
         }
     }
 

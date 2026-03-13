@@ -245,6 +245,141 @@ public class VersionsTests extends ESTestCase {
         dir.close();
     }
 
+    public void testBatchLookupBasic() throws Exception {
+        Directory dir = newDirectory();
+        IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig(Lucene.STANDARD_ANALYZER));
+
+        // Add 3 documents
+        for (int i = 1; i <= 3; i++) {
+            Document doc = new Document();
+            doc.add(new StringField(IdFieldMapper.NAME, Integer.toString(i), Field.Store.YES));
+            doc.add(new NumericDocValuesField(VersionFieldMapper.NAME, i * 10));
+            doc.add(new NumericDocValuesField(SeqNoFieldMapper.NAME, i));
+            doc.add(new NumericDocValuesField(SeqNoFieldMapper.PRIMARY_TERM_NAME, 1L));
+            writer.addDocument(doc);
+        }
+
+        DirectoryReader reader = ElasticsearchDirectoryReader.wrap(DirectoryReader.open(writer), new ShardId("foo", "_na_", 1));
+        BytesRef[] uids = { new BytesRef("1"), new BytesRef("2"), new BytesRef("3") };
+
+        // Batch lookup
+        VersionsAndSeqNoResolver.DocIdAndVersion[] batchResults = VersionsAndSeqNoResolver.loadDocIdAndVersions(reader, uids, true);
+
+        // Verify batch matches individual lookups
+        for (int i = 0; i < 3; i++) {
+            VersionsAndSeqNoResolver.DocIdAndVersion single = timeSeriesLoadDocIdAndVersion(reader, uids[i], true);
+            assertThat(batchResults[i], notNullValue());
+            assertThat(single, notNullValue());
+            assertThat(batchResults[i].version, equalTo(single.version));
+            assertThat(batchResults[i].seqNo, equalTo(single.seqNo));
+        }
+
+        reader.close();
+        writer.close();
+        dir.close();
+    }
+
+    public void testBatchLookupMixedFoundAndNotFound() throws Exception {
+        Directory dir = newDirectory();
+        IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig(Lucene.STANDARD_ANALYZER));
+
+        Document doc = new Document();
+        doc.add(new StringField(IdFieldMapper.NAME, "exists", Field.Store.YES));
+        doc.add(new NumericDocValuesField(VersionFieldMapper.NAME, 42));
+        doc.add(new NumericDocValuesField(SeqNoFieldMapper.NAME, 1L));
+        doc.add(new NumericDocValuesField(SeqNoFieldMapper.PRIMARY_TERM_NAME, 1L));
+        writer.addDocument(doc);
+
+        DirectoryReader reader = ElasticsearchDirectoryReader.wrap(DirectoryReader.open(writer), new ShardId("foo", "_na_", 1));
+        BytesRef[] uids = { new BytesRef("exists"), new BytesRef("missing1"), new BytesRef("missing2") };
+
+        VersionsAndSeqNoResolver.DocIdAndVersion[] results = VersionsAndSeqNoResolver.loadDocIdAndVersions(reader, uids, true);
+
+        assertThat(results[0], notNullValue());
+        assertThat(results[0].version, equalTo(42L));
+        assertThat(results[1], nullValue());
+        assertThat(results[2], nullValue());
+
+        reader.close();
+        writer.close();
+        dir.close();
+    }
+
+    public void testBatchLookupWithDeletes() throws Exception {
+        Directory dir = newDirectory();
+        IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig(Lucene.STANDARD_ANALYZER));
+
+        // Add two docs
+        for (String id : new String[] { "a", "b" }) {
+            Document doc = new Document();
+            doc.add(new StringField(IdFieldMapper.NAME, id, Field.Store.YES));
+            doc.add(new NumericDocValuesField(VersionFieldMapper.NAME, 1));
+            doc.add(new NumericDocValuesField(SeqNoFieldMapper.NAME, 1L));
+            doc.add(new NumericDocValuesField(SeqNoFieldMapper.PRIMARY_TERM_NAME, 1L));
+            writer.addDocument(doc);
+        }
+
+        // Delete "a"
+        writer.deleteDocuments(new Term(IdFieldMapper.NAME, "a"));
+
+        DirectoryReader reader = ElasticsearchDirectoryReader.wrap(DirectoryReader.open(writer), new ShardId("foo", "_na_", 1));
+        BytesRef[] uids = { new BytesRef("a"), new BytesRef("b") };
+
+        VersionsAndSeqNoResolver.DocIdAndVersion[] results = VersionsAndSeqNoResolver.loadDocIdAndVersions(reader, uids, true);
+
+        assertThat(results[0], nullValue()); // deleted
+        assertThat(results[1], notNullValue());
+        assertThat(results[1].version, equalTo(1L));
+
+        reader.close();
+        writer.close();
+        dir.close();
+    }
+
+    public void testBatchLookupAcrossSegments() throws Exception {
+        Directory dir = newDirectory();
+        IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig(Lucene.STANDARD_ANALYZER));
+
+        // Add docs in first segment
+        for (int i = 1; i <= 3; i++) {
+            Document doc = new Document();
+            doc.add(new StringField(IdFieldMapper.NAME, Integer.toString(i), Field.Store.YES));
+            doc.add(new NumericDocValuesField(VersionFieldMapper.NAME, i * 10));
+            doc.add(new NumericDocValuesField(SeqNoFieldMapper.NAME, i));
+            doc.add(new NumericDocValuesField(SeqNoFieldMapper.PRIMARY_TERM_NAME, 1L));
+            writer.addDocument(doc);
+        }
+        writer.commit();
+
+        // Add docs in second segment
+        for (int i = 4; i <= 6; i++) {
+            Document doc = new Document();
+            doc.add(new StringField(IdFieldMapper.NAME, Integer.toString(i), Field.Store.YES));
+            doc.add(new NumericDocValuesField(VersionFieldMapper.NAME, i * 10));
+            doc.add(new NumericDocValuesField(SeqNoFieldMapper.NAME, i));
+            doc.add(new NumericDocValuesField(SeqNoFieldMapper.PRIMARY_TERM_NAME, 1L));
+            writer.addDocument(doc);
+        }
+
+        DirectoryReader reader = ElasticsearchDirectoryReader.wrap(DirectoryReader.open(writer), new ShardId("foo", "_na_", 1));
+        assertThat(reader.leaves().size(), equalTo(2));
+
+        // Lookup docs spanning both segments + a missing doc
+        BytesRef[] uids = { new BytesRef("1"), new BytesRef("5"), new BytesRef("99") };
+
+        VersionsAndSeqNoResolver.DocIdAndVersion[] results = VersionsAndSeqNoResolver.loadDocIdAndVersions(reader, uids, true);
+
+        assertThat(results[0], notNullValue());
+        assertThat(results[0].version, equalTo(10L));
+        assertThat(results[1], notNullValue());
+        assertThat(results[1].version, equalTo(50L));
+        assertThat(results[2], nullValue());
+
+        reader.close();
+        writer.close();
+        dir.close();
+    }
+
     private static String createTSDBId(long timestamp) {
         return createId(randomInt(), new BytesRef("tsid"), timestamp);
     }

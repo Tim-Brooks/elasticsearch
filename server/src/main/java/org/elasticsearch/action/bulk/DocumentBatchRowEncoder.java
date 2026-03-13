@@ -19,6 +19,8 @@ import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentParser;
@@ -41,6 +43,8 @@ import java.util.function.Supplier;
  * The header (schema + doc index) is built last and combined with row data via {@link CompositeBytesReference}.
  */
 public class DocumentBatchRowEncoder {
+
+    private static final Logger logger = LogManager.getLogger(DocumentBatchRowEncoder.class);
 
     private static final int HEADER_SIZE = 32;
     private static final int INITIAL_CAPACITY = 16;
@@ -112,7 +116,7 @@ public class DocumentBatchRowEncoder {
                     parser.allowDuplicateKeys(true);
                     parser.nextToken(); // START_OBJECT
                     scratch.pathBuilder.setLength(0);
-                    flattenObject(parser, 0, 0, schema, scratch, xContentType);
+                    flattenObject(parser, 0, schema, scratch, xContentType);
                 }
 
                 // Resolve any newly discovered columns for routing extraction
@@ -141,11 +145,10 @@ public class DocumentBatchRowEncoder {
                         request.setRawTimestamp(generatedTimestampString);
                     } else {
                         // @timestamp was parsed from the doc, extract its value for rawTimestamp
-                        byte baseType = RowType.baseType(tsType);
-                        if (baseType == RowType.STRING) {
+                        if (tsType == RowType.STRING) {
                             XContentString.UTF8Bytes bytes = (XContentString.UTF8Bytes) scratch.varData[tsColIdx];
                             request.setRawTimestamp(new String(bytes.bytes(), bytes.offset(), bytes.length(), StandardCharsets.UTF_8));
-                        } else if (baseType == RowType.LONG) {
+                        } else if (tsType == RowType.LONG) {
                             request.setRawTimestamp(readLongFromFixed(scratch.fixedData, tsColIdx));
                         }
                     }
@@ -182,6 +185,7 @@ public class DocumentBatchRowEncoder {
 
     /**
      * Mutable holder for scratch buffers that survives growth across recursive calls.
+     * Package-private so that {@link DocumentBatchRowBuilder} can reuse it.
      */
     static final class ScratchBuffers {
         byte[] typeBytes;
@@ -210,7 +214,6 @@ public class DocumentBatchRowEncoder {
     private static void flattenObject(
         XContentParser parser,
         int prefixLen,
-        int objectDepth,
         DocBatchSchema schema,
         ScratchBuffers scratch,
         XContentType xContentType
@@ -233,7 +236,7 @@ public class DocumentBatchRowEncoder {
                     pathBuilder.setLength(prefixLen);
                     pathBuilder.append('.').append(fieldName);
                 }
-                flattenObject(parser, pathBuilder.length(), objectDepth + 1, schema, scratch, xContentType);
+                flattenObject(parser, pathBuilder.length(), schema, scratch, xContentType);
                 continue;
             }
 
@@ -250,36 +253,34 @@ public class DocumentBatchRowEncoder {
 
             switch (token) {
                 case START_ARRAY -> {
-                    encodeArray(parser, xContentType, colIdx, objectDepth, scratch);
+                    encodeArray(parser, xContentType, colIdx, scratch);
                 }
                 case VALUE_STRING -> {
-                    scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.STRING | RowType.OBJECT_FLAG) : RowType.STRING;
+                    scratch.typeBytes[colIdx] = RowType.STRING;
                     scratch.varData[colIdx] = parser.optimizedText().bytes();
                 }
                 case VALUE_NUMBER -> {
                     XContentParser.NumberType numType = parser.numberType();
                     switch (numType) {
                         case INT, LONG -> {
-                            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.LONG | RowType.OBJECT_FLAG) : RowType.LONG;
+                            scratch.typeBytes[colIdx] = RowType.LONG;
                             writeLongToFixed(scratch.fixedData, colIdx, parser.longValue());
                         }
                         case FLOAT, DOUBLE -> {
-                            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.DOUBLE | RowType.OBJECT_FLAG) : RowType.DOUBLE;
+                            scratch.typeBytes[colIdx] = RowType.DOUBLE;
                             writeLongToFixed(scratch.fixedData, colIdx, Double.doubleToRawLongBits(parser.doubleValue()));
                         }
                         default -> {
-                            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.STRING | RowType.OBJECT_FLAG) : RowType.STRING;
+                            scratch.typeBytes[colIdx] = RowType.STRING;
                             scratch.varData[colIdx] = parser.optimizedText().bytes();
                         }
                     }
                 }
                 case VALUE_BOOLEAN -> {
-                    boolean val = parser.booleanValue();
-                    byte base = val ? RowType.TRUE : RowType.FALSE;
-                    scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (base | RowType.OBJECT_FLAG) : base;
+                    scratch.typeBytes[colIdx] = parser.booleanValue() ? RowType.TRUE : RowType.FALSE;
                 }
                 case VALUE_NULL -> {
-                    scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (RowType.NULL | RowType.OBJECT_FLAG) : RowType.NULL;
+                    scratch.typeBytes[colIdx] = RowType.NULL;
                 }
                 default -> throw new IllegalStateException("Unexpected token: " + token);
             }
@@ -290,7 +291,7 @@ public class DocumentBatchRowEncoder {
      * Encodes an array value. Attempts to produce a compact typed array (≤8 leaf elements).
      * Falls back to raw x-content if the array has more than 8 elements or contains non-leaf values.
      */
-    private static void encodeArray(XContentParser parser, XContentType xContentType, int colIdx, int objectDepth, ScratchBuffers scratch)
+    private static void encodeArray(XContentParser parser, XContentType xContentType, int colIdx, ScratchBuffers scratch)
         throws IOException {
         // Buffer up to MAX_SMALL_ARRAY_SIZE leaf elements
         int maxSmall = RowType.MAX_SMALL_ARRAY_SIZE;
@@ -338,14 +339,14 @@ public class DocumentBatchRowEncoder {
         if (fallback) {
             // Write buffered elements + remaining tokens as raw x-content
             BytesReference rawBytes = buildXContentArrayFallback(parser, xContentType, elemTypes, elemFixed, elemStrings, count, token);
-            byte base = RowType.XCONTENT_ARRAY;
-            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (base | RowType.OBJECT_FLAG) : base;
+            // TODO: Remove
+            logger.error("Failed to encode array as compact typed array: {}", rawBytes.utf8ToString());
+            scratch.typeBytes[colIdx] = RowType.XCONTENT_ARRAY;
             scratch.varData[colIdx] = rawBytes;
         } else {
             // Serialize as compact typed array
             byte[] packed = packSmallArray(elemTypes, elemFixed, elemStrings, count);
-            byte base = RowType.ARRAY;
-            scratch.typeBytes[colIdx] = objectDepth > 0 ? (byte) (base | RowType.OBJECT_FLAG) : base;
+            scratch.typeBytes[colIdx] = RowType.ARRAY;
             scratch.varData[colIdx] = new BytesArray(packed);
         }
     }
@@ -355,7 +356,7 @@ public class DocumentBatchRowEncoder {
      * count(1) | for each element: type(1) + data
      * where data is: nothing for NULL/TRUE/FALSE, 8 bytes for LONG/DOUBLE, 4 bytes length + UTF-8 for STRING.
      */
-    private static byte[] packSmallArray(byte[] elemTypes, long[] elemFixed, XContentString.UTF8Bytes[] elemStrings, int count) {
+    public static byte[] packSmallArray(byte[] elemTypes, long[] elemFixed, XContentString.UTF8Bytes[] elemStrings, int count) {
         // Compute total size
         int size = 1; // count byte
         for (int i = 0; i < count; i++) {
@@ -464,7 +465,7 @@ public class DocumentBatchRowEncoder {
         }
     }
 
-    private static void writeRow(RecyclerBytesStreamOutput output, int columnCount, ScratchBuffers scratch) throws IOException {
+    static void writeRow(RecyclerBytesStreamOutput output, int columnCount, ScratchBuffers scratch) throws IOException {
         byte[] typeBytes = scratch.typeBytes;
         byte[] fixedData = scratch.fixedData;
         Object[] varData = scratch.varData;
@@ -480,18 +481,17 @@ public class DocumentBatchRowEncoder {
             int fs = RowType.fixedSize(typeByte);
             if (fs == 0) continue;
 
-            byte baseType = RowType.baseType(typeByte);
-            if (baseType == RowType.LONG || baseType == RowType.DOUBLE) {
+            if (typeByte == RowType.LONG || typeByte == RowType.DOUBLE) {
                 output.writeBytes(fixedData, col * 8, 8);
-            } else if (baseType == RowType.STRING) {
+            } else if (typeByte == RowType.STRING) {
                 XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) varData[col];
                 output.writeLong(((long) varOffset << 32) | (str.length() & 0xFFFFFFFFL));
                 varOffset += str.length();
-            } else if (baseType == RowType.BINARY || baseType == RowType.XCONTENT_ARRAY) {
+            } else if (typeByte == RowType.BINARY || typeByte == RowType.XCONTENT_ARRAY) {
                 BytesReference ref = (BytesReference) varData[col];
                 output.writeLong(((long) varOffset << 32) | (ref.length() & 0xFFFFFFFFL));
                 varOffset += ref.length();
-            } else if (baseType == RowType.ARRAY) {
+            } else if (typeByte == RowType.ARRAY) {
                 BytesArray arr = (BytesArray) varData[col];
                 output.writeLong(((long) varOffset << 32) | (arr.length() & 0xFFFFFFFFL));
                 varOffset += arr.length();
@@ -500,21 +500,21 @@ public class DocumentBatchRowEncoder {
 
         // Var section: write actual bytes
         for (int col = 0; col < columnCount; col++) {
-            byte baseType = RowType.baseType(typeBytes[col]);
-            if (baseType == RowType.STRING) {
+            byte typeByte = typeBytes[col];
+            if (typeByte == RowType.STRING) {
                 XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) varData[col];
                 output.writeBytes(str.bytes(), str.offset(), str.length());
-            } else if (baseType == RowType.BINARY || baseType == RowType.XCONTENT_ARRAY) {
+            } else if (typeByte == RowType.BINARY || typeByte == RowType.XCONTENT_ARRAY) {
                 BytesReference ref = (BytesReference) varData[col];
                 ref.writeTo(output);
-            } else if (baseType == RowType.ARRAY) {
+            } else if (typeByte == RowType.ARRAY) {
                 BytesArray arr = (BytesArray) varData[col];
                 output.writeBytes(arr.array(), arr.arrayOffset(), arr.length());
             }
         }
     }
 
-    private static BytesReference buildHeader(DocBatchSchema schema, int docCount, int[] rowOffsets, int[] rowLengths, int rowDataSize) {
+    static BytesReference buildHeader(DocBatchSchema schema, int docCount, int[] rowOffsets, int[] rowLengths, int rowDataSize) {
         int columnCount = schema.columnCount();
 
         // Compute schema section size
@@ -565,7 +565,7 @@ public class DocumentBatchRowEncoder {
         return new BytesArray(header);
     }
 
-    private static void writeLongToFixed(byte[] fixedData, int colIdx, long value) {
+    static void writeLongToFixed(byte[] fixedData, int colIdx, long value) {
         ByteUtils.writeLongBE(value, fixedData, colIdx * 8);
     }
 

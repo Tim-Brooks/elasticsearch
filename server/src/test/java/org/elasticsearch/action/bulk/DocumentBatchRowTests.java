@@ -69,16 +69,12 @@ public class DocumentBatchRowTests extends ESTestCase {
         assertEquals("user.name", schema.getColumnName(0));
         assertEquals("user.age", schema.getColumnName(1));
 
-        // Verify object flag is set
         DocBatchRowReader row0 = batch.getRowReader(0);
-        assertTrue(row0.isFromObject(0));
-        assertTrue(row0.isFromObject(1));
         assertEquals(RowType.STRING, row0.getBaseType(0));
         assertEquals("alice", row0.getStringValue(0));
         assertEquals(30L, row0.getLongValue(1));
 
         DocBatchRowReader row1 = batch.getRowReader(1);
-        assertTrue(row1.isFromObject(0));
         assertEquals("bob", row1.getStringValue(0));
         assertEquals(25L, row1.getLongValue(1));
 
@@ -159,9 +155,9 @@ public class DocumentBatchRowTests extends ESTestCase {
     }
 
     public void testLargeArrayFallsBackToXContent() throws IOException {
-        // Array with >8 elements should fall back to XCONTENT_ARRAY
+        // Array with >MAX_SMALL_ARRAY_SIZE elements should fall back to XCONTENT_ARRAY
         StringBuilder json = new StringBuilder("{\"nums\":[");
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < RowType.MAX_SMALL_ARRAY_SIZE + 1; i++) {
             if (i > 0) json.append(",");
             json.append(i);
         }

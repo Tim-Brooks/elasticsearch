@@ -184,6 +184,56 @@ final class PerThreadIDVersionAndSeqNoLookup {
         return dv.longValue();
     }
 
+    /**
+     * Batch lookup of multiple terms within a single segment.
+     * Results are written into results[originalIndices[i]] for each found term. Already-resolved entries
+     * (results[idx] != null) are skipped.
+     */
+    void lookupVersions(
+        BytesRef[] terms,
+        int[] originalIndices,
+        int count,
+        boolean loadSeqNo,
+        LeafReaderContext context,
+        DocIdAndVersion[] results
+    ) throws IOException {
+        assert readerKey == null || context.reader().getCoreCacheHelper().getKey().equals(readerKey)
+            : "context's reader is not the same as the reader class was initialized on.";
+        if (termsEnum == null || count == 0) {
+            return;
+        }
+        final Bits liveDocs = context.reader().getLiveDocs();
+        for (int i = 0; i < count; i++) {
+            int idx = originalIndices[i];
+            if (results[idx] != null) {
+                continue; // already resolved in an earlier segment
+            }
+            if (termsEnum.seekExact(terms[i])) {
+                int docID = DocIdSetIterator.NO_MORE_DOCS;
+                docsEnum = termsEnum.postings(docsEnum, 0);
+                for (int d = docsEnum.nextDoc(); d != DocIdSetIterator.NO_MORE_DOCS; d = docsEnum.nextDoc()) {
+                    if (liveDocs != null && liveDocs.get(d) == false) {
+                        continue;
+                    }
+                    docID = d;
+                }
+                if (docID != DocIdSetIterator.NO_MORE_DOCS) {
+                    final long seqNo;
+                    final long term;
+                    if (loadSeqNo) {
+                        seqNo = readNumericDocValues(context.reader(), SeqNoFieldMapper.NAME, docID);
+                        term = readNumericDocValues(context.reader(), SeqNoFieldMapper.PRIMARY_TERM_NAME, docID);
+                    } else {
+                        seqNo = UNASSIGNED_SEQ_NO;
+                        term = UNASSIGNED_PRIMARY_TERM;
+                    }
+                    final long version = readNumericDocValues(context.reader(), VersionFieldMapper.NAME, docID);
+                    results[idx] = new DocIdAndVersion(docID, version, seqNo, term, context.reader(), context.docBase);
+                }
+            }
+        }
+    }
+
     /** Return null if id is not found. */
     DocIdAndSeqNo lookupSeqNo(BytesRef id, LeafReaderContext context) throws IOException {
         assert readerKey == null || context.reader().getCoreCacheHelper().getKey().equals(readerKey)
