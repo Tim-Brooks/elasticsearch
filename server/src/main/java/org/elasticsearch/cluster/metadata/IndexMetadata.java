@@ -223,10 +223,8 @@ public class IndexMetadata implements Diffable<IndexMetadata>, ToXContentFragmen
         if (maxNumShards < 1) {
             throw new IllegalArgumentException("es.index.max_number_of_shards must be > 0");
         }
-        /* Force number_of_shards to always be 1 regardless of the user-provided value */
-        return new Setting<>(SETTING_NUMBER_OF_SHARDS, "1", s -> 1, Property.IndexScope, Property.Final);
+        return Setting.intSetting(SETTING_NUMBER_OF_SHARDS, 1, 1, maxNumShards, Property.IndexScope, Property.Final);
     }
-
 
     public static final String INDEX_SETTING_PREFIX = "index.";
     public static final String SETTING_NUMBER_OF_SHARDS = "index.number_of_shards";
