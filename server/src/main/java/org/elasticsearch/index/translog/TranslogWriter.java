@@ -41,7 +41,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongConsumer;
 import java.util.function.LongSupplier;
@@ -55,14 +58,14 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
     // the last checkpoint that was written when the translog was last synced
     private volatile Checkpoint lastSyncedCheckpoint;
     /* the number of translog operations written to this file */
-    private volatile int operationCounter;
+    private final AtomicInteger operationCounter = new AtomicInteger();
     /* if we hit an exception that we can't recover from we assign it to this var and ship it with every AlreadyClosedException we throw */
     private final TragicExceptionHolder tragedy;
     /* the total offset of this file including the bytes written to the file as well as into the buffer */
-    private volatile long totalOffset;
+    private final AtomicLong totalOffset = new AtomicLong();
 
-    private volatile long minSeqNo;
-    private volatile long maxSeqNo;
+    private final AtomicLong minSeqNo = new AtomicLong();
+    private final AtomicLong maxSeqNo = new AtomicLong();
 
     private final LongSupplier globalCheckpointSupplier;
     private final LongSupplier minTranslogGenerationSupplier;
@@ -79,7 +82,7 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
     // lock order synchronized(syncLock) -> try(Releasable lock = writeLock.acquire()) -> synchronized(this)
     private final Object syncLock = new Object();
 
-    private List<Long> nonFsyncedSequenceNumbers = new ArrayList<>(64);
+    private final ConcurrentLinkedQueue<Long> nonFsyncedSequenceNumbers = new ConcurrentLinkedQueue<>();
     private final int forceWriteThreshold;
     private volatile long bufferedBytes;
     private RecyclerBytesStreamOutput buffer;
@@ -126,11 +129,11 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
         this.checkpointPath = checkpointPath;
         this.minTranslogGenerationSupplier = minTranslogGenerationSupplier;
         this.lastSyncedCheckpoint = initialCheckpoint;
-        this.totalOffset = initialCheckpoint.offset;
+        this.totalOffset.set(initialCheckpoint.offset);
         assert initialCheckpoint.minSeqNo == SequenceNumbers.NO_OPS_PERFORMED : initialCheckpoint.minSeqNo;
-        this.minSeqNo = initialCheckpoint.minSeqNo;
+        this.minSeqNo.set(initialCheckpoint.minSeqNo);
         assert initialCheckpoint.maxSeqNo == SequenceNumbers.NO_OPS_PERFORMED : initialCheckpoint.maxSeqNo;
-        this.maxSeqNo = initialCheckpoint.maxSeqNo;
+        this.maxSeqNo.set(initialCheckpoint.maxSeqNo);
         assert initialCheckpoint.trimmedAboveSeqNo == SequenceNumbers.UNASSIGNED_SEQ_NO : initialCheckpoint.trimmedAboveSeqNo;
         this.globalCheckpointSupplier = globalCheckpointSupplier;
         this.persistedSequenceNumberConsumer = persistedSequenceNumberConsumer;
@@ -236,39 +239,26 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
      * @throws IOException if writing to the translog resulted in an I/O exception
      */
     public Translog.Location add(final Translog.Serialized operation, final long seqNo) throws IOException {
-        long bufferedBytesBeforeAdd = this.bufferedBytes;
-        if (bufferedBytesBeforeAdd >= forceWriteThreshold) {
-            writeBufferedOps(Long.MAX_VALUE, bufferedBytesBeforeAdd >= forceWriteThreshold * 4);
-        }
+        ensureOpen();
 
-        final Translog.Location location;
-        synchronized (this) {
-            ensureOpen();
-            if (buffer == null) {
-                buffer = new RecyclerBytesStreamOutput(bigArrays.bytesRefRecycler());
-            }
-            assert bufferedBytes == buffer.size();
-            final long offset = totalOffset;
-            totalOffset += operation.length();
-            operation.writeToTranslogBuffer(buffer);
+        final int len = operation.length();
+        final long offset = totalOffset.getAndAdd(len);
 
-            assert minSeqNo != SequenceNumbers.NO_OPS_PERFORMED || operationCounter == 0;
-            assert maxSeqNo != SequenceNumbers.NO_OPS_PERFORMED || operationCounter == 0;
+        // CAS loop for minSeqNo
+        long current;
+        do {
+            current = minSeqNo.get();
+        } while (SequenceNumbers.min(current, seqNo) != current && minSeqNo.compareAndSet(current, SequenceNumbers.min(current, seqNo)) == false);
 
-            minSeqNo = SequenceNumbers.min(minSeqNo, seqNo);
-            maxSeqNo = SequenceNumbers.max(maxSeqNo, seqNo);
+        // CAS loop for maxSeqNo
+        do {
+            current = maxSeqNo.get();
+        } while (SequenceNumbers.max(current, seqNo) != current && maxSeqNo.compareAndSet(current, SequenceNumbers.max(current, seqNo)) == false);
 
-            nonFsyncedSequenceNumbers.add(seqNo);
+        nonFsyncedSequenceNumbers.add(seqNo);
+        operationCounter.incrementAndGet();
 
-            operationCounter++;
-
-            assert assertNoSeqNumberConflict(seqNo, operation);
-
-            location = new Translog.Location(generation, offset, operation.length());
-            operationListener.operationAdded(operation, seqNo, location);
-            bufferedBytes = buffer.size();
-        }
-
+        final Translog.Location location = new Translog.Location(generation, offset, len);
         return location;
     }
 
@@ -276,42 +266,32 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
      * Add a serialized batch operation to the translog, tracking all sequence numbers from the batch's doc metas.
      */
     public Translog.Location addBatch(final Translog.Serialized operation, final List<Translog.Batch.DocMeta> docMetas) throws IOException {
-        long bufferedBytesBeforeAdd = this.bufferedBytes;
-        if (bufferedBytesBeforeAdd >= forceWriteThreshold) {
-            writeBufferedOps(Long.MAX_VALUE, bufferedBytesBeforeAdd >= forceWriteThreshold * 4);
+        ensureOpen();
+
+        final int len = operation.length();
+        final long offset = totalOffset.getAndAdd(len);
+
+        long localMin = Long.MAX_VALUE;
+        long localMax = Long.MIN_VALUE;
+        for (Translog.Batch.DocMeta meta : docMetas) {
+            long seqNo = meta.seqNo();
+            localMin = Math.min(localMin, seqNo);
+            localMax = Math.max(localMax, seqNo);
+            nonFsyncedSequenceNumbers.add(seqNo);
         }
 
-        final Translog.Location location;
-        synchronized (this) {
-            ensureOpen();
-            if (buffer == null) {
-                buffer = new RecyclerBytesStreamOutput(bigArrays.bytesRefRecycler());
-            }
-            assert bufferedBytes == buffer.size();
-            final long offset = totalOffset;
-            totalOffset += operation.length();
-            operation.writeToTranslogBuffer(buffer);
+        // Single CAS loop each for min/max
+        long current;
+        do {
+            current = minSeqNo.get();
+        } while (SequenceNumbers.min(current, localMin) != current && minSeqNo.compareAndSet(current, SequenceNumbers.min(current, localMin)) == false);
+        do {
+            current = maxSeqNo.get();
+        } while (SequenceNumbers.max(current, localMax) != current && maxSeqNo.compareAndSet(current, SequenceNumbers.max(current, localMax)) == false);
 
-            assert minSeqNo != SequenceNumbers.NO_OPS_PERFORMED || operationCounter == 0;
-            assert maxSeqNo != SequenceNumbers.NO_OPS_PERFORMED || operationCounter == 0;
+        operationCounter.incrementAndGet();
 
-            for (Translog.Batch.DocMeta meta : docMetas) {
-                long seqNo = meta.seqNo();
-                minSeqNo = SequenceNumbers.min(minSeqNo, seqNo);
-                maxSeqNo = SequenceNumbers.max(maxSeqNo, seqNo);
-                nonFsyncedSequenceNumbers.add(seqNo);
-            }
-
-            operationCounter++;
-
-            location = new Translog.Location(generation, offset, operation.length());
-            // Use the min seqNo for the operation listener (matches the Batch's seqNo)
-            long batchSeqNo = docMetas.stream().mapToLong(Translog.Batch.DocMeta::seqNo).min().orElseThrow();
-            operationListener.operationAdded(operation, batchSeqNo, location);
-            bufferedBytes = buffer.size();
-        }
-
-        return location;
+        return new Translog.Location(generation, offset, len);
     }
 
     private synchronized boolean assertNoSeqNumberConflict(long seqNo, Translog.Serialized serialized) throws IOException {
@@ -403,24 +383,24 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
      * checkpoint has not yet been fsynced
      */
     public boolean syncNeeded() {
-        return totalOffset != lastSyncedCheckpoint.offset
+        return totalOffset.get() != lastSyncedCheckpoint.offset
             || globalCheckpointSupplier.getAsLong() != lastSyncedCheckpoint.globalCheckpoint
             || minTranslogGenerationSupplier.getAsLong() != lastSyncedCheckpoint.minTranslogGeneration;
     }
 
     @Override
     public int totalOperations() {
-        return operationCounter;
+        return operationCounter.get();
     }
 
     @Override
     synchronized Checkpoint getCheckpoint() {
         return new Checkpoint(
-            totalOffset,
-            operationCounter,
+            totalOffset.get(),
+            operationCounter.get(),
             generation,
-            minSeqNo,
-            maxSeqNo,
+            minSeqNo.get(),
+            maxSeqNo.get(),
             globalCheckpointSupplier.getAsLong(),
             minTranslogGenerationSupplier.getAsLong(),
             SequenceNumbers.UNASSIGNED_SEQ_NO
@@ -429,7 +409,7 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
 
     @Override
     public long sizeInBytes() {
-        return totalOffset;
+        return totalOffset.get();
     }
 
     /**
@@ -532,12 +512,13 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
                             ensureOpen();
                             checkpointToSync = getCheckpoint();
                             toWrite = pollOpsToWrite();
-                            if (nonFsyncedSequenceNumbers.isEmpty()) {
-                                flushedSequenceNumbers = null;
-                            } else {
-                                flushedSequenceNumbers = nonFsyncedSequenceNumbers;
-                                nonFsyncedSequenceNumbers = new ArrayList<>(64);
+                            // Drain the concurrent queue
+                            List<Long> drained = new ArrayList<>();
+                            Long seqNo;
+                            while ((seqNo = nonFsyncedSequenceNumbers.poll()) != null) {
+                                drained.add(seqNo);
                             }
+                            flushedSequenceNumbers = drained.isEmpty() ? null : drained;
                         }
 
                         try {
@@ -704,9 +685,10 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
 
     @Override
     public long getLastModifiedTime() throws IOException {
-        if (lastModifiedTimeCache.totalOffset() != totalOffset || lastModifiedTimeCache.syncedOffset() != lastSyncedCheckpoint.offset) {
+        long currentTotalOffset = totalOffset.get();
+        if (lastModifiedTimeCache.totalOffset() != currentTotalOffset || lastModifiedTimeCache.syncedOffset() != lastSyncedCheckpoint.offset) {
             long mtime = super.getLastModifiedTime();
-            lastModifiedTimeCache = new LastModifiedTimeCache(mtime, totalOffset, lastSyncedCheckpoint.offset);
+            lastModifiedTimeCache = new LastModifiedTimeCache(mtime, currentTotalOffset, lastSyncedCheckpoint.offset);
         }
         return lastModifiedTimeCache.lastModifiedTime();
     }
