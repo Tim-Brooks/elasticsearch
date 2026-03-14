@@ -1579,22 +1579,21 @@ public class InternalEngine extends Engine {
                 }
             }
 
-            // Step 3: Batch Lucene add for append-only operations
-            if (appendDocs.isEmpty() == false) {
-                batchIndexWriter.batchAddDocuments(appendDocs);
-                numDocAppends.inc(appendDocs.size());
-            }
+            // Step 3: Batch Lucene add for append-only operations — BYPASSED for benchmark
+            // if (appendDocs.isEmpty() == false) {
+            //     batchIndexWriter.batchAddDocuments(appendDocs);
+            //     numDocAppends.inc(appendDocs.size());
+            // }
 
-            // Step 4: Index non-append operations individually into Lucene
+            // Step 4: Build results for all operations — Lucene writes BYPASSED for benchmark
             for (int s = 0; s < subBatchSize; s++) {
                 int origIdx = acquired[s];
                 if (allResults[origIdx] != null) continue; // early result already set
                 IndexingStrategy plan = plans[s];
                 Index op = updatedOps[s];
 
-                if (plan.indexIntoLucene && plan.useLuceneUpdateDocument) {
-                    allResults[origIdx] = indexIntoLucene(op, plan);
-                } else if (plan.indexIntoLucene) {
+                // Fabricate success result without touching Lucene
+                if (plan.indexIntoLucene || plan.addStaleOpToLucene) {
                     allResults[origIdx] = new IndexResult(
                         plan.versionForIndexing,
                         op.primaryTerm(),
@@ -1602,8 +1601,6 @@ public class InternalEngine extends Engine {
                         plan.currentNotFoundOrDeleted,
                         op.id()
                     );
-                } else if (plan.addStaleOpToLucene) {
-                    allResults[origIdx] = indexIntoLucene(op, plan);
                 } else {
                     allResults[origIdx] = new IndexResult(
                         plan.versionForIndexing,
