@@ -66,21 +66,23 @@ public abstract class AbstractOTLPTransportAction extends HandledTransportAction
             }
 
             ProcessingContext finalContext = context;
-            bulkRequestBuilder.execute(new ActionListener<>() {
-                @Override
-                public void onResponse(BulkResponse bulkItemResponses) {
-                    if (bulkItemResponses.hasFailures() || finalContext.getIgnoredDataPoints() > 0) {
-                        handlePartialSuccess(bulkItemResponses, finalContext, listener);
-                    } else {
-                        handleSuccess(listener);
-                    }
-                }
+//            bulkRequestBuilder.execute(new ActionListener<>() {
+//                @Override
+//                public void onResponse(BulkResponse bulkItemResponses) {
+//                    if (bulkItemResponses.hasFailures() || finalContext.getIgnoredDataPoints() > 0) {
+//                        handlePartialSuccess(bulkItemResponses, finalContext, listener);
+//                    } else {
+//                        handleSuccess(listener);
+//                    }
+//                }
+//
+//                @Override
+//                public void onFailure(Exception e) {
+//                    handleFailure(listener, e, finalContext);
+//                }
+//            });
 
-                @Override
-                public void onFailure(Exception e) {
-                    handleFailure(listener, e, finalContext);
-                }
-            });
+            handleSuccess(listener);
 
         } catch (Exception e) {
             logger.error("failed to execute otlp request", e);

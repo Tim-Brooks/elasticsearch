@@ -1581,8 +1581,8 @@ public class InternalEngine extends Engine {
 
             // Step 3: Batch Lucene add for append-only operations — BYPASSED for benchmark
             // if (appendDocs.isEmpty() == false) {
-            //     batchIndexWriter.batchAddDocuments(appendDocs);
-            //     numDocAppends.inc(appendDocs.size());
+            // batchIndexWriter.batchAddDocuments(appendDocs);
+            // numDocAppends.inc(appendDocs.size());
             // }
 
             // Step 4: Build results for all operations — Lucene writes BYPASSED for benchmark

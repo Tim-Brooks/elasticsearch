@@ -113,11 +113,6 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
             indexRequests.get(i).setBatchRef(batch);
         }
         bulkRequestBuilder.setRowDocumentBatch(batch);
-
-        for (int i = 0; i < indexRequests.size(); i++) {
-            IndexRequest ir = indexRequests.get(i);
-        }
-
         return context;
     }
 
