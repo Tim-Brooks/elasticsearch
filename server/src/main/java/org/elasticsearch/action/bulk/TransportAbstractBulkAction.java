@@ -120,8 +120,8 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
         this.indexingPressure = indexingPressure;
         this.systemIndices = systemIndices;
         this.projectResolver = projectResolver;
-        this.coordinationExecutor = threadPool.executor(ThreadPool.Names.WRITE_COORDINATION);
-        this.systemCoordinationExecutor = threadPool.executor(ThreadPool.Names.SYSTEM_WRITE_COORDINATION);
+        this.coordinationExecutor = EsExecutors.DIRECT_EXECUTOR_SERVICE;
+        this.systemCoordinationExecutor = EsExecutors.DIRECT_EXECUTOR_SERVICE;
         this.ingestForwarder = new IngestActionForwarder(transportService);
         this.featureService = featureService;
         clusterService.addStateApplier(this.ingestForwarder);
