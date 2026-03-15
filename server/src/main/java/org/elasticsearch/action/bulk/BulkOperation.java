@@ -681,14 +681,108 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         Releasable releaseOnFinish,
         boolean redactSeqNo
     ) {
+        ShardId shardId = bulkShardRequest.shardId();
+
+        // Short circuit the shard level request with the existing shard failure.
+        if (shortCircuitShardFailures.containsKey(shardId)) {
+            handleShardFailure(
+                bulkShardRequest,
+                clusterService.state().metadata().getProject(projectId),
+                shortCircuitShardFailures.get(shardId)
+            );
+            releaseOnFinish.close();
+        } else if (bulkShardRequest.isRowBatchMode()) {
+            // Allow normal indexig through because otherwise stuff like security will fail
+            executeBulkShardRequestOtel(bulkShardRequest, projectId, releaseOnFinish, redactSeqNo);
+        } else {
+            client.executeLocally(TransportShardBulkAction.TYPE, bulkShardRequest, new ActionListener<>() {
+
+                // Lazily get the project metadata to avoid keeping it around longer than it is needed
+                private ProjectMetadata projectMetadata = null;
+
+                private ProjectMetadata getProjectMetadata() {
+                    if (projectMetadata == null) {
+                        projectMetadata = clusterService.state().metadata().getProject(projectId);
+                    }
+                    return projectMetadata;
+                }
+
+                private BulkItemResponse maybeRedactSequenceNumber(BulkItemResponse in) {
+                    if (redactSeqNo == false || in == null || in.isFailed()) {
+                        return in;
+                    }
+                    return BulkItemResponse.success(in.getItemId(), in.getOpType(), in.getResponse().withoutSequenceNumber());
+                }
+
+                @Override
+                public void onResponse(BulkShardResponse bulkShardResponse) {
+                    for (int idx = 0; idx < bulkShardResponse.getResponses().length; idx++) {
+                        // We zip the requests and responses together so that we can identify failed documents and potentially store them
+                        BulkItemResponse bulkItemResponse = bulkShardResponse.getResponses()[idx];
+                        BulkItemRequest bulkItemRequest = bulkShardRequest.items()[idx];
+
+                        if (bulkItemResponse.isFailed()) {
+                            assert bulkItemRequest.id() == bulkItemResponse.getItemId() : "Bulk items were returned out of order";
+                            IndexDocFailureStoreStatus failureStoreStatus = processFailure(
+                                bulkItemRequest,
+                                getProjectMetadata(),
+                                bulkItemResponse.getFailure().getCause()
+                            );
+                            bulkItemResponse.getFailure().setFailureStoreStatus(failureStoreStatus);
+                            addFailure(bulkItemResponse);
+                        } else {
+                            bulkItemResponse.getResponse().setShardInfo(bulkShardResponse.getShardInfo());
+                            if (isFailureStoreRequest(bulkItemRequest.request())
+                                && bulkItemResponse.getResponse() instanceof IndexResponse ir) {
+                                ir.setFailureStoreStatus(IndexDocFailureStoreStatus.USED);
+                            }
+                            responses.set(bulkItemResponse.getItemId(), maybeRedactSequenceNumber(bulkItemResponse));
+                        }
+                    }
+                    completeShardOperation();
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    assert shortCircuitShardFailures.containsKey(shardId) == false;
+                    shortCircuitShardFailures.put(shardId, e);
+
+                    // create failures for all relevant requests
+                    handleShardFailure(bulkShardRequest, getProjectMetadata(), e);
+                    completeShardOperation();
+                }
+
+                private void completeShardOperation() {
+                    // Clear our handle on the project metadata to allow it to be cleaned up
+                    projectMetadata = null;
+                    releaseOnFinish.close();
+                }
+            });
+        }
+    }
+
+    private void executeBulkShardRequestOtel(
+        BulkShardRequest bulkShardRequest,
+        ProjectId projectId,
+        Releasable releaseOnFinish,
+        boolean redactSeqNo
+    ) {
         // PERF TEST STUB: skip shard-level execution entirely, return immediate success for every item
         ShardId shardId = bulkShardRequest.shardId();
         for (BulkItemRequest item : bulkShardRequest.items()) {
-            IndexResponse indexResponse = new IndexResponse(shardId, UUIDs.randomBase64UUID(), 1L, 1L, 0L, true);
+            IndexResponse indexResponse = new IndexResponse(
+                shardId,
+                item.request().id() != null ? item.request().id() : UUIDs.base64UUID(),
+                1L,
+                1L,
+                0L,
+                true
+            );
             responses.set(item.id(), BulkItemResponse.success(item.id(), DocWriteRequest.OpType.CREATE, indexResponse));
         }
         releaseOnFinish.close();
     }
+
 
     private void handleShardFailure(BulkShardRequest bulkShardRequest, ProjectMetadata projectMetadata, Exception e) {
         // create failures for all relevant requests
