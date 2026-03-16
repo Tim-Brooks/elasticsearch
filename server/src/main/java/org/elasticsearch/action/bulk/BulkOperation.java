@@ -201,21 +201,11 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     @Override
     protected void doRun() {
         assert bulkRequest != null;
-        for (DocWriteRequest<?> r : bulkRequest.requests()) {
-            if (r instanceof IndexRequest ir) {
-            }
-        }
         final ClusterState clusterState = observer.setAndGetObservedState();
         if (handleBlockExceptions(clusterState, BulkOperation.this, this::onFailure)) {
             return;
         }
         Map<ShardId, List<BulkItemRequest>> requestsByShard = groupBulkRequestsByShards(clusterState);
-        for (List<BulkItemRequest> reqs : requestsByShard.values()) {
-            for (BulkItemRequest bir : reqs) {
-                if (bir.request() instanceof IndexRequest ir) {
-                }
-            }
-        }
         executeBulkRequestsByShard(requestsByShard, clusterState, () -> {
             Releasables.close(sharedBatches);
             sharedBatches.clear();
@@ -311,8 +301,6 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         Iterator<BulkItemRequest> it = Iterators.enumerate(bulkRequest.requests.iterator(), BulkItemRequest::new);
         while (it.hasNext()) {
             BulkItemRequest bulkItemRequest = it.next();
-            if (bulkItemRequest.request() instanceof IndexRequest ir) {
-            }
             DocWriteRequest<?> docWriteRequest = bulkItemRequest.request();
 
             if (docWriteRequest == null) {
@@ -395,8 +383,6 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                     shard -> new ArrayList<>()
                 );
                 shardRequests.add(bulkItemRequest);
-                if (docWriteRequest instanceof IndexRequest ir3) {
-                }
             }
         }
         return requestsByShard;

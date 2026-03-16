@@ -229,10 +229,6 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
             : "TransportBulkAction should never be called with a SimulateBulkRequest";
         assert bulkRequest.getComponentTemplateSubstitutions().isEmpty()
             : "Component template substitutions are not allowed in a non-simulated bulk";
-        for (DocWriteRequest<?> r : bulkRequest.requests()) {
-            if (r instanceof IndexRequest ir) {
-            }
-        }
         trackIndexRequests(bulkRequest);
         Map<String, CreateIndexRequest> indicesToAutoCreate = new HashMap<>();
         Set<String> dataStreamsToBeRolledOver = new HashSet<>();
@@ -600,10 +596,6 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
         Executor executor,
         AtomicArray<BulkItemResponse> responses
     ) {
-        for (DocWriteRequest<?> r : bulkRequest.requests()) {
-            if (r instanceof IndexRequest ir) {
-            }
-        }
         // Determine if we have the feature enabled once for entire bulk operation
         final boolean clusterSupportsFailureStore = featureService.clusterHasFeature(
             clusterService.state(),

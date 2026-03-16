@@ -40,8 +40,20 @@ public class DocumentBatchRowBuilder implements Releasable {
     private boolean inDocument;
 
     public DocumentBatchRowBuilder() {
-        this.schema = new DocBatchSchema();
-        this.scratch = new DocumentBatchRowEncoder.ScratchBuffers(INITIAL_CAPACITY);
+        this(null);
+    }
+
+    /**
+     * Creates a builder with an optional fixed schema. When a fixed schema is provided,
+     * its columns are pre-registered so that lookups for known fields short-circuit
+     * without a HashMap insert.
+     *
+     * @param fixedSchema a pre-built fixed schema (from {@link DocBatchSchema#fixed}), or null
+     */
+    public DocumentBatchRowBuilder(DocBatchSchema fixedSchema) {
+        this.schema = new DocBatchSchema(fixedSchema);
+        int initialCapacity = fixedSchema != null ? Math.max(INITIAL_CAPACITY, fixedSchema.columnCount()) : INITIAL_CAPACITY;
+        this.scratch = new DocumentBatchRowEncoder.ScratchBuffers(initialCapacity);
         this.rowOutput = new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE);
         this.rowOffsets = new int[INITIAL_CAPACITY];
         this.rowLengths = new int[INITIAL_CAPACITY];
@@ -91,89 +103,79 @@ public class DocumentBatchRowBuilder implements Releasable {
         docCount++;
     }
 
-    /**
-     * Sets a string column value.
-     */
+    // ---- Name-based setters (resolve column via schema lookup) ----
+
     public void setString(String path, String value) {
         int colIdx = resolveColumn(path);
-        scratch.typeBytes[colIdx] = RowType.STRING;
-        byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
-        scratch.varData[colIdx] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
+        setStringAt(colIdx, value);
     }
 
-    /**
-     * Sets a string column value from raw UTF-8 bytes.
-     * The bytes are copied, so the caller's array can be reused after this call.
-     */
     public void setString(String path, byte[] utf8, int offset, int length) {
         int colIdx = resolveColumn(path);
-        scratch.typeBytes[colIdx] = RowType.STRING;
-        byte[] copy = new byte[length];
-        System.arraycopy(utf8, offset, copy, 0, length);
-        scratch.varData[colIdx] = new XContentString.UTF8Bytes(copy, 0, length);
+        setStringAt(colIdx, utf8, offset, length);
     }
 
-    /**
-     * Sets a long column value.
-     */
     public void setLong(String path, long value) {
         int colIdx = resolveColumn(path);
-        scratch.typeBytes[colIdx] = RowType.LONG;
-        DocumentBatchRowEncoder.writeLongToFixed(scratch.fixedData, colIdx, value);
+        setLongAt(colIdx, value);
     }
 
-    /**
-     * Sets a double column value.
-     */
     public void setDouble(String path, double value) {
         int colIdx = resolveColumn(path);
-        scratch.typeBytes[colIdx] = RowType.DOUBLE;
-        DocumentBatchRowEncoder.writeLongToFixed(scratch.fixedData, colIdx, Double.doubleToRawLongBits(value));
+        setDoubleAt(colIdx, value);
     }
 
-    /**
-     * Sets a boolean column value.
-     */
     public void setBoolean(String path, boolean value) {
         int colIdx = resolveColumn(path);
         scratch.typeBytes[colIdx] = value ? RowType.TRUE : RowType.FALSE;
     }
 
-    /**
-     * Sets a null column value.
-     */
     public void setNull(String path) {
         int colIdx = resolveColumn(path);
         scratch.typeBytes[colIdx] = RowType.NULL;
     }
 
-    /**
-     * Sets a binary column value from pre-serialized XContent bytes (e.g. a JSON object).
-     * Use this for XContent that is not an array (objects, etc.).
-     */
     public void setBinary(String path, BytesReference bytes) {
         int colIdx = resolveColumn(path);
         scratch.typeBytes[colIdx] = RowType.BINARY;
         scratch.varData[colIdx] = bytes;
     }
 
-    /**
-     * Sets a compact packed array column value (small leaf-only arrays).
-     * The bytes should be produced by {@link DocumentBatchRowEncoder#packSmallArray}.
-     */
     public void setPackedArray(String path, byte[] packed) {
         int colIdx = resolveColumn(path);
         scratch.typeBytes[colIdx] = RowType.ARRAY;
         scratch.varData[colIdx] = new org.elasticsearch.common.bytes.BytesArray(packed);
     }
 
-    /**
-     * Sets an XContent array column value from pre-serialized bytes (e.g. JSON array bytes).
-     */
     public void setXContentArray(String path, BytesReference bytes) {
         int colIdx = resolveColumn(path);
         scratch.typeBytes[colIdx] = RowType.XCONTENT_ARRAY;
         scratch.varData[colIdx] = bytes;
+    }
+
+    // ---- Index-based setters (bypass schema lookup — use for fixed columns with known indices) ----
+
+    public void setStringAt(int colIdx, String value) {
+        byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
+        scratch.typeBytes[colIdx] = RowType.STRING;
+        scratch.varData[colIdx] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
+    }
+
+    public void setStringAt(int colIdx, byte[] utf8, int offset, int length) {
+        byte[] copy = new byte[length];
+        System.arraycopy(utf8, offset, copy, 0, length);
+        scratch.typeBytes[colIdx] = RowType.STRING;
+        scratch.varData[colIdx] = new XContentString.UTF8Bytes(copy, 0, length);
+    }
+
+    public void setLongAt(int colIdx, long value) {
+        scratch.typeBytes[colIdx] = RowType.LONG;
+        DocumentBatchRowEncoder.writeLongToFixed(scratch.fixedData, colIdx, value);
+    }
+
+    public void setDoubleAt(int colIdx, double value) {
+        scratch.typeBytes[colIdx] = RowType.DOUBLE;
+        DocumentBatchRowEncoder.writeLongToFixed(scratch.fixedData, colIdx, Double.doubleToRawLongBits(value));
     }
 
     /**

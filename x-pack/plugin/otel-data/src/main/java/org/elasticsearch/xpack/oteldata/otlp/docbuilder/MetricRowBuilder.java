@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.oteldata.otlp.docbuilder;
 
 import io.opentelemetry.proto.common.v1.AnyValue;
+import io.opentelemetry.proto.common.v1.ArrayValue;
 import io.opentelemetry.proto.common.v1.InstrumentationScope;
 import io.opentelemetry.proto.common.v1.KeyValue;
 import io.opentelemetry.proto.metrics.v1.ExponentialHistogramDataPoint;
@@ -19,6 +20,7 @@ import io.opentelemetry.proto.resource.v1.Resource;
 import com.google.protobuf.ByteString;
 
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.action.bulk.DocBatchSchema;
 import org.elasticsearch.action.bulk.DocumentBatchRowBuilder;
 import org.elasticsearch.action.bulk.DocumentBatchRowEncoder;
 import org.elasticsearch.action.bulk.RowType;
@@ -38,6 +40,7 @@ import org.elasticsearch.xpack.oteldata.otlp.datapoint.TDigestConverter;
 import org.elasticsearch.xpack.oteldata.otlp.proto.BufferedByteStringAccessor;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +54,45 @@ import static org.elasticsearch.action.bulk.RowType.MAX_SMALL_ARRAY_SIZE;
  * and {@link OTelDocumentBuilder} but writes to row-format columns.
  */
 public class MetricRowBuilder {
+
+    // Fixed column indices — order must match FIXED_SCHEMA below
+    static final int COL_TIMESTAMP = 0;
+    static final int COL_START_TIMESTAMP = 1;
+    static final int COL_RESOURCE_SCHEMA_URL = 2;
+    static final int COL_RESOURCE_DROPPED_ATTRIBUTES_COUNT = 3;
+    static final int COL_DATA_STREAM_TYPE = 4;
+    static final int COL_DATA_STREAM_DATASET = 5;
+    static final int COL_DATA_STREAM_NAMESPACE = 6;
+    static final int COL_SCOPE_SCHEMA_URL = 7;
+    static final int COL_SCOPE_NAME = 8;
+    static final int COL_SCOPE_VERSION = 9;
+    static final int COL_SCOPE_DROPPED_ATTRIBUTES_COUNT = 10;
+    static final int COL_UNIT = 11;
+    static final int COL_METRIC_NAMES_HASH = 12;
+    static final int COL_DOC_COUNT = 13;
+
+    /**
+     * Fixed schema for the 14 structural fields that appear on most/all metric documents.
+     * Pre-registering these avoids repeated HashMap lookups in {@link DocBatchSchema#appendColumn}.
+     */
+    public static final DocBatchSchema FIXED_SCHEMA = DocBatchSchema.fixed(
+        List.of(
+            "@timestamp",
+            "start_timestamp",
+            "resource.schema_url",
+            "resource.dropped_attributes_count",
+            "data_stream.type",
+            "data_stream.dataset",
+            "data_stream.namespace",
+            "scope.schema_url",
+            "scope.name",
+            "scope.version",
+            "scope.dropped_attributes_count",
+            "unit",
+            "_metric_names_hash",
+            "_doc_count"
+        )
+    );
 
     private final DocumentBatchRowBuilder rowBuilder;
     private final BufferedByteStringAccessor byteStringAccessor;
@@ -86,11 +128,11 @@ public class MetricRowBuilder {
         List<DataPoint> dataPoints = dataPointGroup.dataPoints();
 
         // @timestamp
-        rowBuilder.setLong("@timestamp", TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getTimestampUnixNano()));
+        rowBuilder.setLongAt(COL_TIMESTAMP, TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getTimestampUnixNano()));
 
         // start_timestamp
         if (dataPointGroup.getStartTimestampUnixNano() != 0) {
-            rowBuilder.setLong("start_timestamp", TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getStartTimestampUnixNano()));
+            rowBuilder.setLongAt(COL_START_TIMESTAMP, TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getStartTimestampUnixNano()));
         }
 
         // Resource fields
@@ -107,12 +149,12 @@ public class MetricRowBuilder {
 
         // unit
         if (Strings.hasLength(dataPointGroup.unit())) {
-            rowBuilder.setString("unit", dataPointGroup.unit());
+            rowBuilder.setStringAt(COL_UNIT, dataPointGroup.unit());
         }
 
         // _metric_names_hash
         String metricNamesHash = dataPointGroup.getMetricNamesHash(hasher);
-        rowBuilder.setString("_metric_names_hash", metricNamesHash);
+        rowBuilder.setStringAt(COL_METRIC_NAMES_HASH, metricNamesHash);
 
         // Metric values
         long docCount = 0;
@@ -135,7 +177,7 @@ public class MetricRowBuilder {
         }
 
         if (docCount > 0) {
-            rowBuilder.setLong("_doc_count", docCount);
+            rowBuilder.setLongAt(COL_DOC_COUNT, docCount);
         }
 
         TsidBuilder tsidBuilder = dataPointGroup.tsidBuilder();
@@ -144,10 +186,10 @@ public class MetricRowBuilder {
     }
 
     private void buildResource(Resource resource, ByteString schemaUrl) {
-        setByteStringIfNotEmpty("resource.schema_url", schemaUrl);
+        setByteStringAtIfNotEmpty(COL_RESOURCE_SCHEMA_URL, schemaUrl);
         int droppedCount = resource.getDroppedAttributesCount();
         if (droppedCount > 0) {
-            rowBuilder.setLong("resource.dropped_attributes_count", droppedCount);
+            rowBuilder.setLongAt(COL_RESOURCE_DROPPED_ATTRIBUTES_COUNT, droppedCount);
         }
         buildKeyValueAttributes("resource.attributes.", resource.getAttributesList());
     }
@@ -156,18 +198,18 @@ public class MetricRowBuilder {
         if (targetIndex.isDataStream() == false) {
             return;
         }
-        rowBuilder.setString("data_stream.type", targetIndex.type());
-        rowBuilder.setString("data_stream.dataset", targetIndex.dataset());
-        rowBuilder.setString("data_stream.namespace", targetIndex.namespace());
+        rowBuilder.setStringAt(COL_DATA_STREAM_TYPE, targetIndex.type());
+        rowBuilder.setStringAt(COL_DATA_STREAM_DATASET, targetIndex.dataset());
+        rowBuilder.setStringAt(COL_DATA_STREAM_NAMESPACE, targetIndex.namespace());
     }
 
     private void buildScope(InstrumentationScope scope, ByteString schemaUrl) {
-        setByteStringIfNotEmpty("scope.schema_url", schemaUrl);
-        setByteStringIfNotEmpty("scope.name", scope.getNameBytes());
-        setByteStringIfNotEmpty("scope.version", scope.getVersionBytes());
+        setByteStringAtIfNotEmpty(COL_SCOPE_SCHEMA_URL, schemaUrl);
+        setByteStringAtIfNotEmpty(COL_SCOPE_NAME, scope.getNameBytes());
+        setByteStringAtIfNotEmpty(COL_SCOPE_VERSION, scope.getVersionBytes());
         int droppedCount = scope.getDroppedAttributesCount();
         if (droppedCount > 0) {
-            rowBuilder.setLong("scope.dropped_attributes_count", droppedCount);
+            rowBuilder.setLongAt(COL_SCOPE_DROPPED_ATTRIBUTES_COUNT, droppedCount);
         }
         buildKeyValueAttributes("scope.attributes.", scope.getAttributesList());
     }
@@ -177,8 +219,7 @@ public class MetricRowBuilder {
     }
 
     private void buildKeyValueAttributes(String prefix, List<KeyValue> attributes) {
-        for (int i = 0, size = attributes.size(); i < size; i++) {
-            KeyValue attribute = attributes.get(i);
+        for (KeyValue attribute : attributes) {
             String key = attribute.getKey();
             if (OTelDocumentBuilder.isIgnoredAttribute(key) == false) {
                 setAnyValue(prefix + key, attribute.getValue());
@@ -220,12 +261,14 @@ public class MetricRowBuilder {
      * and falling back to XContent for larger or nested arrays.
      */
     private void setArrayValue(String path, AnyValue arrayValue) throws IOException {
-        List<AnyValue> values = arrayValue.getArrayValue().getValuesList();
-        if (values.size() <= MAX_SMALL_ARRAY_SIZE) {
+        ArrayValue arr = arrayValue.getArrayValue();
+        int size = arr.getValuesCount();
+        if (size <= MAX_SMALL_ARRAY_SIZE) {
             // Try compact encoding - check all elements are leaves
             boolean allLeaves = true;
             int count = 0;
-            for (AnyValue elem : values) {
+            for (int i = 0; i < size; i++) {
+                AnyValue elem = arr.getValues(i);
                 switch (elem.getValueCase()) {
                     case STRING_VALUE -> {
                         arrayElemTypes[count] = RowType.STRING;
@@ -244,9 +287,7 @@ public class MetricRowBuilder {
                         arrayElemTypes[count] = RowType.DOUBLE;
                         arrayElemFixed[count] = Double.doubleToRawLongBits(elem.getDoubleValue());
                     }
-                    default -> {
-                        allLeaves = false;
-                    }
+                    default -> allLeaves = false;
                 }
                 if (allLeaves == false) break;
                 count++;
@@ -265,9 +306,9 @@ public class MetricRowBuilder {
     private BytesReference serializeArrayAsXContent(AnyValue arrayValue) throws IOException {
         try (XContentBuilder xBuilder = XContentFactory.contentBuilder(XContentType.CBOR)) {
             xBuilder.startArray();
-            List<AnyValue> values = arrayValue.getArrayValue().getValuesList();
-            for (int i = 0, size = values.size(); i < size; i++) {
-                writeAnyValueToXContent(xBuilder, values.get(i));
+            ArrayValue arr = arrayValue.getArrayValue();
+            for (int i = 0, size = arr.getValuesCount(); i < size; i++) {
+                writeAnyValueToXContent(xBuilder, arr.getValues(i));
             }
             xBuilder.endArray();
             return BytesReference.bytes(xBuilder);
@@ -282,9 +323,9 @@ public class MetricRowBuilder {
             case DOUBLE_VALUE -> builder.value(value.getDoubleValue());
             case ARRAY_VALUE -> {
                 builder.startArray();
-                List<AnyValue> values = value.getArrayValue().getValuesList();
-                for (int i = 0, size = values.size(); i < size; i++) {
-                    writeAnyValueToXContent(builder, values.get(i));
+                ArrayValue arr = value.getArrayValue();
+                for (int i = 0, size = arr.getValuesCount(); i < size; i++) {
+                    writeAnyValueToXContent(builder, arr.getValues(i));
                 }
                 builder.endArray();
             }
@@ -410,10 +451,10 @@ public class MetricRowBuilder {
         rowBuilder.setBinary(metricPath, histBytes);
     }
 
-    private void setByteStringIfNotEmpty(String path, ByteString value) {
+    private void setByteStringAtIfNotEmpty(int colIdx, ByteString value) {
         if (value != null && value.isEmpty() == false) {
             byte[] buf = byteStringAccessor.toBytes(value);
-            rowBuilder.setString(path, buf, 0, value.size());
+            rowBuilder.setStringAt(colIdx, buf, 0, value.size());
         }
     }
 }

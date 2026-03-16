@@ -82,7 +82,7 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
             return context;
         }
 
-        DocumentBatchRowBuilder rowBuilder = new DocumentBatchRowBuilder();
+        DocumentBatchRowBuilder rowBuilder = new DocumentBatchRowBuilder(MetricRowBuilder.FIXED_SCHEMA);
         MetricRowBuilder metricRowBuilder = new MetricRowBuilder(rowBuilder, byteStringAccessor, defaultMappingHints);
         List<IndexRequest> indexRequests = new ArrayList<>();
 

@@ -245,10 +245,6 @@ public class BulkRequestBuilder extends ActionRequestLazyBuilder<BulkRequest, Bu
         if (rowDocumentBatch != null) {
             request.setRowDocumentBatch(rowDocumentBatch);
         }
-        for (DocWriteRequest<?> r : request.requests()) {
-            if (r instanceof IndexRequest ir) {
-            }
-        }
         return request;
     }
 
