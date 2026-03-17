@@ -325,8 +325,8 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
                 return utf8ParseShort(bytes.bytes(), bytes.offset(), bytes.length());
             } catch (NumberFormatException e) {
                 // Fall through to back-parsing
+                return super.shortValue(coerce);
             }
-            return shortValue(coerce);
         }
         return doShortValue();
     }
@@ -367,7 +367,7 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
             } catch (NumberFormatException e) {
                 // Fall through to back-parsing
             }
-            return longValue(coerce);
+            return super.longValue(coerce);
 
         }
         return doLongValue();
