@@ -340,6 +340,9 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
     @Override
     protected short doShortValue() throws IOException {
+        if (baseType == RowType.DOUBLE) {
+            return (short) rowDoubleValue();
+        }
         long value = rowLongValue();
         if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
             throw new NumberFormatException();
@@ -374,6 +377,9 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
     @Override
     protected int doIntValue() throws IOException {
+        if (baseType == RowType.DOUBLE) {
+            return (int) rowDoubleValue();
+        }
         return Math.toIntExact(rowLongValue());
     }
 
@@ -448,6 +454,9 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
     @Override
     protected long doLongValue() throws IOException {
+        if (baseType == RowType.DOUBLE) {
+            return (long) rowDoubleValue();
+        }
         return rowLongValue();
     }
 
