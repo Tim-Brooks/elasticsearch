@@ -1975,7 +1975,7 @@ public class NumberFieldMapper extends FieldMapper {
             @Override
             public void parseNonNullValue(XContentParser parser, List<Number> accumulator) throws IOException {
                 // Aligned with implementation of `value(XContentParser)`
-                if (coerce && parser.currentToken() == Token.VALUE_STRING && parser.textLength() == 0) {
+                if (coerce && parser.currentToken() == Token.VALUE_STRING && parser.emptyText()) {
                     if (nullValue != null) {
                         accumulator.add(nullValue);
                     }
@@ -2414,7 +2414,7 @@ public class NumberFieldMapper extends FieldMapper {
         if (currentToken == Token.VALUE_NULL) {
             return nullValue;
         }
-        if (coerce() && currentToken == Token.VALUE_STRING && parser.textLength() == 0) {
+        if (coerce() && currentToken == Token.VALUE_STRING && parser.emptyText()) {
             return nullValue;
         }
         if (currentToken == Token.START_OBJECT) {

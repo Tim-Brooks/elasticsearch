@@ -52,16 +52,13 @@ public class DataPointGroupingContext implements AbstractOTLPTransportAction.Pro
 
     public void groupDataPoints(ExportMetricsServiceRequest exportMetricsServiceRequest) {
         List<ResourceMetrics> resourceMetricsList = exportMetricsServiceRequest.getResourceMetricsList();
-        for (int i = 0; i < resourceMetricsList.size(); i++) {
-            ResourceMetrics resourceMetrics = resourceMetricsList.get(i);
+        for (ResourceMetrics resourceMetrics : resourceMetricsList) {
             ResourceGroup resourceGroup = getOrCreateResourceGroup(resourceMetrics);
             List<ScopeMetrics> scopeMetricsList = resourceMetrics.getScopeMetricsList();
-            for (int j = 0; j < scopeMetricsList.size(); j++) {
-                ScopeMetrics scopeMetrics = scopeMetricsList.get(j);
+            for (ScopeMetrics scopeMetrics : scopeMetricsList) {
                 ScopeGroup scopeGroup = resourceGroup.getOrCreateScope(scopeMetrics);
                 List<Metric> metricsList = scopeMetrics.getMetricsList();
-                for (int k = 0; k < metricsList.size(); k++) {
-                    var metric = metricsList.get(k);
+                for (Metric metric : metricsList) {
                     switch (metric.getDataCase()) {
                         case SUM:
                             scopeGroup.addDataPoints(metric, metric.getSum().getDataPointsList(), DataPoint.Number::new);

@@ -679,6 +679,11 @@ public class AggregateMetricDoubleFieldMapper extends FieldMapper {
     }
 
     @Override
+    public boolean isCompoundField() {
+        return true;
+    }
+
+    @Override
     protected void parseCreateField(DocumentParserContext context) throws IOException {
         context.path().add(leafName());
         XContentParser.Token token;

@@ -101,6 +101,10 @@ public final class RowDocumentBatch implements Releasable, Accountable {
         return BytesReference.toBytes(data);
     }
 
+    public BytesReference getDataReference() {
+        return data;
+    }
+
     public DocBatchRowReader getRowReader(int docIndex) {
         if (docIndex < 0 || docIndex >= docCount) {
             throw new IndexOutOfBoundsException("docIndex " + docIndex + " out of range [0, " + docCount + ")");

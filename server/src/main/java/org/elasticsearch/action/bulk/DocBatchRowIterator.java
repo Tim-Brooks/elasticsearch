@@ -101,7 +101,7 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        baseType = RowType.baseType(typeByte);
+        baseType = typeByte;
         return true;
     }
 
@@ -269,6 +269,12 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     public int textLength() throws IOException {
         String t = text();
         return t != null ? t.length() : 0;
+    }
+
+    @Override
+    public boolean emptyText() throws IOException {
+        XContentString xContentString = optimizedTextOrNull();
+        return xContentString == null || xContentString.bytes().length() == 0;
     }
 
     @Override

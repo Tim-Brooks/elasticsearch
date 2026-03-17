@@ -40,6 +40,13 @@ public class LuceneDocument implements Iterable<IndexableField> {
         this("", null);
     }
 
+    public LuceneDocument(int fieldCountHint) {
+        fields = new ArrayList<>(fieldCountHint);
+        this.path = "";
+        this.prefix = "";
+        this.parent = null;
+    }
+
     /**
      * Return the path associated with this document.
      */

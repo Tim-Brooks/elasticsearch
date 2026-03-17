@@ -53,10 +53,12 @@ public class BufferedByteStringAccessor {
         builder.utf8Value(toBytes(value), 0, value.size());
     }
 
-    /*
-     * Not exposed as a public method to avoid risks of leaking a reference to the reused byte array.
+    /**
+     * Converts a ByteString to bytes using the shared buffer.
+     * WARNING: The returned byte array is reused — callers must consume it immediately
+     * or copy the relevant portion before calling this method again.
      */
-    private byte[] toBytes(ByteString byteString) {
+    public byte[] toBytes(ByteString byteString) {
         int size = byteString.size();
         if (bytes.length < size) {
             bytes = new byte[size];

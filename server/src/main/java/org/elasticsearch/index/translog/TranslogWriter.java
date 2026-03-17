@@ -272,6 +272,48 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
         return location;
     }
 
+    /**
+     * Add a serialized batch operation to the translog, tracking all sequence numbers from the batch's doc metas.
+     */
+    public Translog.Location addBatch(final Translog.Serialized operation, final List<Translog.Batch.DocMeta> docMetas) throws IOException {
+        long bufferedBytesBeforeAdd = this.bufferedBytes;
+        if (bufferedBytesBeforeAdd >= forceWriteThreshold) {
+            writeBufferedOps(Long.MAX_VALUE, bufferedBytesBeforeAdd >= forceWriteThreshold * 4);
+        }
+
+        final Translog.Location location;
+        synchronized (this) {
+            ensureOpen();
+            if (buffer == null) {
+                buffer = new RecyclerBytesStreamOutput(bigArrays.bytesRefRecycler());
+            }
+            assert bufferedBytes == buffer.size();
+            final long offset = totalOffset;
+            totalOffset += operation.length();
+            operation.writeToTranslogBuffer(buffer);
+
+            assert minSeqNo != SequenceNumbers.NO_OPS_PERFORMED || operationCounter == 0;
+            assert maxSeqNo != SequenceNumbers.NO_OPS_PERFORMED || operationCounter == 0;
+
+            for (Translog.Batch.DocMeta meta : docMetas) {
+                long seqNo = meta.seqNo();
+                minSeqNo = SequenceNumbers.min(minSeqNo, seqNo);
+                maxSeqNo = SequenceNumbers.max(maxSeqNo, seqNo);
+                nonFsyncedSequenceNumbers.add(seqNo);
+            }
+
+            operationCounter++;
+
+            location = new Translog.Location(generation, offset, operation.length());
+            // Use the min seqNo for the operation listener (matches the Batch's seqNo)
+            long batchSeqNo = docMetas.stream().mapToLong(Translog.Batch.DocMeta::seqNo).min().orElseThrow();
+            operationListener.operationAdded(operation, batchSeqNo, location);
+            bufferedBytes = buffer.size();
+        }
+
+        return location;
+    }
+
     private synchronized boolean assertNoSeqNumberConflict(long seqNo, Translog.Serialized serialized) throws IOException {
         if (seqNo == SequenceNumbers.UNASSIGNED_SEQ_NO) {
             // nothing to do

@@ -344,23 +344,26 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             }
         }
 
-        // Batch encode between passes: for each batch-eligible index, encode with routing metadata extraction
-        for (Map.Entry<Index, List<BulkItemRequest>> entry : requestsByIndex.entrySet()) {
-            Index concreteIndex = entry.getKey();
-            List<BulkItemRequest> requests = entry.getValue();
-            IndexMetadata indexMetadata = project.getIndexSafe(concreteIndex);
-            if (isBatchEligible(indexMetadata, requests)) {
-                IndexRouting indexRouting = concreteIndices.routing(concreteIndex);
-                RoutingMetadataExtractor extractor = createRoutingExtractor(indexRouting, indexMetadata);
-                try {
-                    List<IndexRequest> indexRequests = new ArrayList<>(requests.size());
-                    for (BulkItemRequest r : requests) {
-                        indexRequests.add((IndexRequest) r.request());
+        // Batch encode between passes: for each batch-eligible index, encode with routing metadata extraction.
+        // Skip if the BulkRequest already has a pre-built batch (e.g., from OTEL direct row building).
+        if (bulkRequest.getRowDocumentBatch() == null) {
+            for (Map.Entry<Index, List<BulkItemRequest>> entry : requestsByIndex.entrySet()) {
+                Index concreteIndex = entry.getKey();
+                List<BulkItemRequest> requests = entry.getValue();
+                IndexMetadata indexMetadata = project.getIndexSafe(concreteIndex);
+                if (isBatchEligible(indexMetadata, requests)) {
+                    IndexRouting indexRouting = concreteIndices.routing(concreteIndex);
+                    RoutingMetadataExtractor extractor = createRoutingExtractor(indexRouting, indexMetadata);
+                    try {
+                        List<IndexRequest> indexRequests = new ArrayList<>(requests.size());
+                        for (BulkItemRequest r : requests) {
+                            indexRequests.add((IndexRequest) r.request());
+                        }
+                        RowDocumentBatch batch = DocumentBatchRowEncoder.encode(indexRequests, refRecycler, extractor);
+                        sharedBatches.add(batch);
+                    } catch (Exception e) {
+                        logger.debug("Failed to encode document batch for pre-routing, falling back to standard path", e);
                     }
-                    RowDocumentBatch batch = DocumentBatchRowEncoder.encode(indexRequests, refRecycler, extractor);
-                    sharedBatches.add(batch);
-                } catch (Exception e) {
-                    logger.debug("Failed to encode document batch for pre-routing, falling back to standard path", e);
                 }
             }
         }
@@ -509,6 +512,10 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                 var indexMetadata = project.getIndexSafe(shardId.getIndex());
                 SplitShardCountSummary reshardSplitShardCountSummary = SplitShardCountSummary.forIndexing(indexMetadata, shardId.getId());
 
+                for (BulkItemRequest bir : requests) {
+                    if (bir.request() instanceof IndexRequest ir2) {
+                    }
+                }
                 BulkShardRequest bulkShardRequest = new BulkShardRequest(
                     shardId,
                     reshardSplitShardCountSummary,
@@ -534,6 +541,10 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                     // Use the shared batch from pre-routing encoding
                     bulkShardRequest.setRowDocumentBatch(indexReq.batchRef());
                     // Shared batch is released separately — don't set releasable here
+                } else if (bulkRequest.getRowDocumentBatch() != null) {
+                    // Use the pre-built batch from the BulkRequest (e.g., from OTEL direct row building)
+                    bulkShardRequest.setRowDocumentBatch(bulkRequest.getRowDocumentBatch());
+                    // Shared batch is released separately — don't set releasable here
                 } else if (isBatchEligible(indexMetadata, requests)) {
                     // Fallback: encode per-shard if not pre-encoded
                     try {
@@ -552,10 +563,13 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
 
                 Releasable bulkItemRequestComplete = bulkItemRequestCompleteRefCount.acquire();
                 Releasable finalReleasable = releasable;
+                boolean redactSeqNo = IndexSettings.DISABLE_SEQUENCE_NUMBERS_FEATURE_FLAG
+                    && IndexSettings.DISABLE_SEQUENCE_NUMBERS.get(indexMetadata.getSettings());
                 executeBulkShardRequest(
                     bulkShardRequest,
                     project.id(),
-                    () -> { Releasables.close(bulkItemRequestComplete, finalReleasable); }
+                    () -> { Releasables.close(bulkItemRequestComplete, finalReleasable); },
+                    redactSeqNo
                 );
             }
         }
@@ -611,9 +625,10 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     }
 
     private void completeBulkOperation() {
+        BulkItemResponse[] bulkItemResponses = responses.toArray(new BulkItemResponse[responses.length()]);
         listener.onResponse(
             new BulkResponse(
-                responses.toArray(new BulkItemResponse[responses.length()]),
+                bulkItemResponses,
                 buildTookInMillis(startTimeNanos),
                 BulkResponse.NO_INGEST_TOOK,
                 new BulkRequest.IncrementalState(shortCircuitShardFailures, bulkRequest.incrementalState().indexingPressureAccounted())
@@ -645,7 +660,12 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         completeBulkOperation();
     }
 
-    private void executeBulkShardRequest(BulkShardRequest bulkShardRequest, ProjectId projectId, Releasable releaseOnFinish) {
+    private void executeBulkShardRequest(
+        BulkShardRequest bulkShardRequest,
+        ProjectId projectId,
+        Releasable releaseOnFinish,
+        boolean redactSeqNo
+    ) {
         ShardId shardId = bulkShardRequest.shardId();
 
         // Short circuit the shard level request with the existing shard failure.
@@ -667,6 +687,13 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                         projectMetadata = clusterService.state().metadata().getProject(projectId);
                     }
                     return projectMetadata;
+                }
+
+                private BulkItemResponse maybeRedactSequenceNumber(BulkItemResponse in) {
+                    if (redactSeqNo == false || in == null || in.isFailed()) {
+                        return in;
+                    }
+                    return BulkItemResponse.success(in.getItemId(), in.getOpType(), in.getResponse().withoutSequenceNumber());
                 }
 
                 @Override
@@ -691,7 +718,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                                 && bulkItemResponse.getResponse() instanceof IndexResponse ir) {
                                 ir.setFailureStoreStatus(IndexDocFailureStoreStatus.USED);
                             }
-                            responses.set(bulkItemResponse.getItemId(), bulkItemResponse);
+                            responses.set(bulkItemResponse.getItemId(), maybeRedactSequenceNumber(bulkItemResponse));
                         }
                     }
                     completeShardOperation();

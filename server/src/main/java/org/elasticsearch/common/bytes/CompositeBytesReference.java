@@ -169,8 +169,14 @@ public final class CompositeBytesReference extends AbstractBytesReference {
     }
 
     private int getOffsetIndex(int offset) {
-        final int i = Arrays.binarySearch(offsets, offset);
-        return i < 0 ? (-(i + 1)) - 1 : i;
+        return switch (offsets.length) {
+            case 1 -> 0;
+            case 2 -> offset < offsets[1] ? 0 : 1;
+            default -> {
+                final int i = Arrays.binarySearch(offsets, offset);
+                yield i < 0 ? (-(i + 1)) - 1 : i;
+            }
+        };
     }
 
     @Override

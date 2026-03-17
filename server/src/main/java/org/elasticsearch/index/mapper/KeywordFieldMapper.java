@@ -97,6 +97,7 @@ import org.elasticsearch.xcontent.XContentString;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -550,6 +551,7 @@ public final class KeywordFieldMapper extends FieldMapper {
 
         private final IgnoreAbove ignoreAbove;
         private final String nullValue;
+        private final Text nullUTF8Value;
         private final NamedAnalyzer normalizer;
         private final boolean eagerGlobalOrdinals;
         private final FieldValues<String> scriptValues;
@@ -582,6 +584,9 @@ public final class KeywordFieldMapper extends FieldMapper {
                 builder.indexSettings.getIndexVersionCreated()
             );
             this.nullValue = builder.nullValue.getValue();
+            this.nullUTF8Value = nullValue != null
+                ? new Text(new XContentString.UTF8Bytes(nullValue.getBytes(StandardCharsets.UTF_8)))
+                : null;
             this.scriptValues = builder.scriptValues();
             this.isDimension = builder.dimension.getValue();
             this.usesBinaryDocValues = builder.usesBinaryDocValues();
@@ -608,6 +613,7 @@ public final class KeywordFieldMapper extends FieldMapper {
             this.normalizer = Lucene.KEYWORD_ANALYZER;
             this.ignoreAbove = IGNORE_ABOVE_DEFAULT;
             this.nullValue = null;
+            this.nullUTF8Value = null;
             this.eagerGlobalOrdinals = false;
             this.scriptValues = null;
             this.isDimension = false;
@@ -628,6 +634,7 @@ public final class KeywordFieldMapper extends FieldMapper {
             this.normalizer = Lucene.KEYWORD_ANALYZER;
             this.ignoreAbove = IGNORE_ABOVE_DEFAULT;
             this.nullValue = null;
+            this.nullUTF8Value = null;
             this.eagerGlobalOrdinals = false;
             this.scriptValues = null;
             this.isDimension = false;
@@ -648,6 +655,7 @@ public final class KeywordFieldMapper extends FieldMapper {
             this.normalizer = Lucene.KEYWORD_ANALYZER;
             this.ignoreAbove = IGNORE_ABOVE_DEFAULT;
             this.nullValue = null;
+            this.nullUTF8Value = null;
             this.eagerGlobalOrdinals = false;
             this.scriptValues = null;
             this.isDimension = false;
@@ -879,15 +887,8 @@ public final class KeywordFieldMapper extends FieldMapper {
                     }
                 }
                 return switch (cfg.function()) {
-                    case BYTE_LENGTH -> new ByteLengthFromBytesRefDocValuesBlockLoader(
-                        ((BlockLoaderFunctionConfig.JustWarnings) cfg).warnings(),
-                        name()
-                    );
-                    case LENGTH -> new Utf8CodePointsFromOrdsBlockLoader(
-                        ((BlockLoaderFunctionConfig.JustWarnings) cfg).warnings(),
-                        name(),
-                        blContext.ordinalsByteSize()
-                    );
+                    case BYTE_LENGTH -> new ByteLengthFromBytesRefDocValuesBlockLoader(blContext.warnings(), name());
+                    case LENGTH -> new Utf8CodePointsFromOrdsBlockLoader(blContext.warnings(), name(), blContext.ordinalsByteSize());
                     case MV_MAX -> usesBinaryDocValues
                         ? new MvMaxBytesRefsFromBinaryBlockLoader(name())
                         : new MvMaxBytesRefsFromOrdsBlockLoader(name(), blContext.ordinalsByteSize());
@@ -1300,8 +1301,8 @@ public final class KeywordFieldMapper extends FieldMapper {
     protected void parseCreateField(DocumentParserContext context) throws IOException {
         var value = context.parser().optimizedTextOrNull();
 
-        if (value == null && fieldType().nullValue != null) {
-            value = new Text(fieldType().nullValue);
+        if (value == null && fieldType().nullUTF8Value != null) {
+            value = fieldType().nullUTF8Value;
         }
 
         boolean indexed = indexValue(context, value);
