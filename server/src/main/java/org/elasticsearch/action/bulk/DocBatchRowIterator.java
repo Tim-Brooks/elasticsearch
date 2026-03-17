@@ -11,7 +11,6 @@ package org.elasticsearch.action.bulk;
 
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.core.RestApiVersion;
 import org.elasticsearch.xcontent.DeprecationHandler;
@@ -24,7 +23,6 @@ import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.support.AbstractXContentParser;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 
@@ -51,7 +49,8 @@ import java.nio.charset.StandardCharsets;
  */
 public final class DocBatchRowIterator extends AbstractXContentParser {
 
-    private final StreamInput typeData;
+    private final byte[] typeBytes;
+    private final int typeBytesOffset;
     private final BytesReference fixedData;
     private final BytesReference varData;
     private final boolean fixedDataHasArray;
@@ -70,14 +69,18 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
     DocBatchRowIterator(BytesReference data, int rowColumnCount, int fixedSectionOffset, int varSectionOffset) {
         super(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, RestApiVersion.current());
-        try {
-            this.typeData = data.slice(DocBatchRowReader.TYPE_BYTES_OFFSET, fixedSectionOffset - DocBatchRowReader.TYPE_BYTES_OFFSET)
-                .streamInput();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+        BytesReference typeSlice = data.slice(DocBatchRowReader.TYPE_BYTES_OFFSET, rowColumnCount);
+        if (typeSlice.hasArray()) {
+            this.typeBytes = typeSlice.array();
+            this.typeBytesOffset = typeSlice.arrayOffset();
+        } else {
+            // Fallback: materialize into a contiguous BytesRef (rare — only if data spans multiple byte[] segments)
+            BytesRef typeBytesRef = typeSlice.toBytesRef();
+            this.typeBytes = typeBytesRef.bytes;
+            this.typeBytesOffset = typeBytesRef.offset;
         }
-        this.fixedData = data.slice(fixedSectionOffset, varSectionOffset - fixedSectionOffset);
-        this.varData = data.slice(varSectionOffset, data.length() - varSectionOffset);
+        this.fixedData = data.slice(fixedSectionOffset, varSectionOffset - fixedSectionOffset).unwrap();
+        this.varData = data.slice(varSectionOffset, data.length() - varSectionOffset).unwrap();
         this.fixedDataHasArray = fixedData.hasArray();
         this.varDataHasArray = varData.hasArray();
         this.rowColumnCount = rowColumnCount;
@@ -96,11 +99,7 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         if (col >= rowColumnCount) {
             return false;
         }
-        try {
-            typeByte = typeData.readByte();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        typeByte = typeBytes[typeBytesOffset + col];
         baseType = typeByte;
         return true;
     }
@@ -273,8 +272,15 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
     @Override
     public boolean emptyText() throws IOException {
-        XContentString xContentString = optimizedTextOrNull();
-        return xContentString == null || xContentString.bytes().length() == 0;
+        if (baseType == RowType.NULL) {
+            return true;
+        } else if (baseType == RowType.STRING) {
+            long packed = readFixedLong();
+            int varLength = (int) packed;
+            return varLength == 0;
+        } else {
+            return textLength() == 0;
+        }
     }
 
     @Override
@@ -306,17 +312,151 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     }
 
     @Override
+    public short shortValue(boolean coerce) throws IOException {
+        Token token = currentToken();
+        if (token == Token.VALUE_STRING) {
+            checkCoerceString(coerce, Long.class);
+            XContentString contentString = optimizedText();
+            XContentString.UTF8Bytes bytes = contentString.bytes();
+            try {
+                // TODO: Uncertain of purpose:
+                // ensureNumberConversion(coerce, result, Long.class);
+                return utf8ParseShort(bytes.bytes(), bytes.offset(), bytes.length());
+            } catch (NumberFormatException e) {
+                // Fall through to back-parsing
+                return super.shortValue(coerce);
+            }
+        }
+        return doShortValue();
+    }
+
+    public static short utf8ParseShort(byte[] bytes, int offset, int length) {
+        long value = utf8ParseCoercedLong(bytes, offset, length);
+        if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
+            throw new NumberFormatException();
+        }
+        return (short) value;
+    }
+
+    @Override
     protected short doShortValue() throws IOException {
-        return (short) rowLongValue();
+        if (baseType == RowType.DOUBLE) {
+            return (short) rowDoubleValue();
+        }
+        long value = rowLongValue();
+        if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
+            throw new NumberFormatException();
+        }
+        return (short) value;
+    }
+
+    @Override
+    public int intValue(boolean coerce) throws IOException {
+        Token token = currentToken();
+        if (token == Token.VALUE_STRING) {
+            checkCoerceString(coerce, Integer.class);
+            XContentString contentString = optimizedText();
+            XContentString.UTF8Bytes bytes = contentString.bytes();
+            try {
+                return utf8ParseInt(bytes.bytes(), bytes.offset(), bytes.length());
+            } catch (NumberFormatException e) {
+                // Fall through to super for scientific notation, etc.
+            }
+            return super.intValue(coerce);
+        }
+        return doIntValue();
+    }
+
+    public static int utf8ParseInt(byte[] bytes, int offset, int length) {
+        long value = utf8ParseCoercedLong(bytes, offset, length);
+        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+            throw new NumberFormatException();
+        }
+        return (int) value;
     }
 
     @Override
     protected int doIntValue() throws IOException {
-        return (int) rowLongValue();
+        if (baseType == RowType.DOUBLE) {
+            return (int) rowDoubleValue();
+        }
+        return Math.toIntExact(rowLongValue());
+    }
+
+    @Override
+    public long longValue(boolean coerce) throws IOException {
+        Token token = currentToken();
+        if (token == Token.VALUE_STRING) {
+            checkCoerceString(coerce, Long.class);
+            XContentString contentString = optimizedText();
+            XContentString.UTF8Bytes bytes = contentString.bytes();
+            try {
+                return utf8ParseCoercedLong(bytes.bytes(), bytes.offset(), bytes.length());
+            } catch (NumberFormatException e) {
+                // Fall through to super for scientific notation, etc.
+            }
+            return super.longValue(coerce);
+        }
+        return doLongValue();
+    }
+
+    /**
+     * Parses a decimal string like "1.5" or "-3.99" from UTF-8 bytes, truncating the fractional part.
+     * Handles simple decimal notation only — falls through (throws) for scientific notation (e, E).
+     */
+    public static long utf8ParseCoercedLong(byte[] bytes, int offset, int length) {
+        if (length == 0) throw new NumberFormatException();
+
+        int i = offset;
+        int end = offset + length;
+        boolean negative = false;
+
+        if (bytes[i] == '-') {
+            negative = true;
+            i++;
+        } else if (bytes[i] == '+') {
+            i++;
+        }
+
+        if (i == end) throw new NumberFormatException();
+
+        long limit = negative ? Long.MIN_VALUE : -Long.MAX_VALUE;
+        long result = 0;
+        while (i < end) {
+            byte b = bytes[i];
+            if (b == '.') {
+                // Truncate: ignore everything after the decimal point, but validate remaining chars are digits
+                i++;
+                while (i < end) {
+                    int d = bytes[i++] - '0';
+                    if (d < 0 || d > 9) {
+                        throw new NumberFormatException();
+                    }
+                }
+                break;
+            }
+            int digit = b - '0';
+            if (digit < 0 || digit > 9) {
+                throw new NumberFormatException();
+            }
+            if (result < limit / 10) {
+                throw new NumberFormatException();
+            }
+            result = result * 10 - digit;
+            if (result < limit) {
+                throw new NumberFormatException();
+            }
+            i++;
+        }
+
+        return negative ? result : -result;
     }
 
     @Override
     protected long doLongValue() throws IOException {
+        if (baseType == RowType.DOUBLE) {
+            return (long) rowDoubleValue();
+        }
         return rowLongValue();
     }
 
@@ -388,6 +528,5 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     @Override
     public void close() throws IOException {
         parserClosed = true;
-        typeData.close();
     }
 }

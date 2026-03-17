@@ -1861,12 +1861,12 @@ public class NumberFieldMapper extends FieldMapper {
             boolean ignoreMalformed,
             IndexVersion indexVersion
         ) {
-            return new SortedNumericDocValuesSyntheticFieldLoader(fieldName, fieldSimpleName, ignoreMalformed, indexVersion) {
-                @Override
-                public void writeValue(XContentBuilder b, long value) throws IOException {
-                    NumberType.this.writeValue(b, value);
-                }
-            };
+            var layers = new ArrayList<CompositeSyntheticFieldLoader.Layer>(2);
+            layers.add(new SortedNumericDocValuesSyntheticFieldLoaderLayer(fieldName, NumberType.this::writeValue));
+            if (ignoreMalformed) {
+                layers.add(CompositeSyntheticFieldLoader.malformedValuesLayer(fieldName, indexVersion));
+            }
+            return new CompositeSyntheticFieldLoader(fieldSimpleName, fieldName, layers);
         }
 
         abstract BlockLoader blockLoaderFromDocValues(String fieldName);
@@ -2308,6 +2308,7 @@ public class NumberFieldMapper extends FieldMapper {
     private final MetricType metricType;
     private boolean allowMultipleValues;
     private final boolean isSyntheticSource;
+    private final boolean shouldCoerce;
     private final String offsetsFieldName;
 
     private final IndexSettings indexSettings;
@@ -2327,6 +2328,7 @@ public class NumberFieldMapper extends FieldMapper {
         this.stored = builder.stored.getValue();
         this.ignoreMalformed = builder.ignoreMalformed.getValue();
         this.coerce = builder.coerce.getValue();
+        this.shouldCoerce = this.coerce.value();
         this.nullValue = builder.nullValue.getValue();
         this.scriptValues = builder.scriptValues();
         this.dimension = builder.dimension.getValue();
@@ -2340,7 +2342,7 @@ public class NumberFieldMapper extends FieldMapper {
     }
 
     boolean coerce() {
-        return coerce.value();
+        return shouldCoerce;
     }
 
     @Override
@@ -2414,14 +2416,14 @@ public class NumberFieldMapper extends FieldMapper {
         if (currentToken == Token.VALUE_NULL) {
             return nullValue;
         }
-        if (coerce() && currentToken == Token.VALUE_STRING && parser.emptyText()) {
+        boolean coerce = coerce();
+        if (coerce && currentToken == Token.VALUE_STRING && parser.emptyText()) {
             return nullValue;
         }
         if (currentToken == Token.START_OBJECT) {
             throw new IllegalArgumentException("Cannot parse object as number");
         }
         // Switch avoids megamorphic virtual dispatch on the NumberType enum (visible in flamegraphs for bulk indexing).
-        boolean coerce = coerce();
         return switch (type) {
             case BYTE -> {
                 int value = parser.intValue(coerce);

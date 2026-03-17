@@ -1421,9 +1421,10 @@ public final class KeywordFieldMapper extends FieldMapper {
         if (fieldType().usesBinaryDocValues()) {
             assert fieldType.docValuesType() == DocValuesType.NONE;
             MultiValuedBinaryDocValuesField.SeparateCount.addToSeparateCountMultiBinaryFieldInDoc(
-                context.doc(),
+                context,
                 fieldType().name(),
-                binaryValue
+                binaryValue,
+                false
             );
         }
 

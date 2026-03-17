@@ -827,13 +827,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         final var mapperService = primary.mapperService();
         final long initialMappingVersion = mapperService.mappingVersion();
         try {
-            CompressedXContent mergedSource = mapperService.merge(
-                MapperService.SINGLE_MAPPING_NAME,
-                result.getRequiredMappingUpdate(),
-                MapperService.MergeReason.MAPPING_AUTO_UPDATE_PREFLIGHT
-            ).mappingSource();
-            final DocumentMapper existingDocumentMapper = mapperService.documentMapper();
-            if (existingDocumentMapper != null && mergedSource.equals(existingDocumentMapper.mappingSource())) {
+            if (mapperService.isNoOpUpdate(result.getRequiredMappingUpdate())) {
                 context.resetForNoopMappingUpdateRetry(mapperService.mappingVersion());
                 return true;
             }
