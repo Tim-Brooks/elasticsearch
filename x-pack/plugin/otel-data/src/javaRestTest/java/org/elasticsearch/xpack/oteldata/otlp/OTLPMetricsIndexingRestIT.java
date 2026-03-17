@@ -62,6 +62,11 @@ public class OTLPMetricsIndexingRestIT extends AbstractOTLPIndexingRestIT {
     private OtlpHttpMetricExporter exporter;
     private SdkMeterProvider meterProvider;
 
+    @Override
+    protected String otlpEndpointPath() {
+        return "/_otlp/v1/metrics";
+    }
+
     @Before
     @Override
     public void setUp() throws Exception {
