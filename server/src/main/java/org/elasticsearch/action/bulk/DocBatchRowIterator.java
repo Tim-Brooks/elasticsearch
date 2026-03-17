@@ -11,7 +11,6 @@ package org.elasticsearch.action.bulk;
 
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.core.RestApiVersion;
 import org.elasticsearch.xcontent.DeprecationHandler;
@@ -24,7 +23,6 @@ import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.support.AbstractXContentParser;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 
@@ -51,7 +49,8 @@ import java.nio.charset.StandardCharsets;
  */
 public final class DocBatchRowIterator extends AbstractXContentParser {
 
-    private final StreamInput typeData;
+    private final byte[] typeBytes;
+    private final int typeBytesOffset;
     private final BytesReference fixedData;
     private final BytesReference varData;
     private final boolean fixedDataHasArray;
@@ -70,11 +69,15 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
     DocBatchRowIterator(BytesReference data, int rowColumnCount, int fixedSectionOffset, int varSectionOffset) {
         super(NamedXContentRegistry.EMPTY, DeprecationHandler.IGNORE_DEPRECATIONS, RestApiVersion.current());
-        try {
-            this.typeData = data.slice(DocBatchRowReader.TYPE_BYTES_OFFSET, fixedSectionOffset - DocBatchRowReader.TYPE_BYTES_OFFSET)
-                .streamInput();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+        BytesReference typeSlice = data.slice(DocBatchRowReader.TYPE_BYTES_OFFSET, rowColumnCount);
+        if (typeSlice.hasArray()) {
+            this.typeBytes = typeSlice.array();
+            this.typeBytesOffset = typeSlice.arrayOffset();
+        } else {
+            // Fallback: materialize into a contiguous BytesRef (rare — only if data spans multiple byte[] segments)
+            BytesRef typeBytesRef = typeSlice.toBytesRef();
+            this.typeBytes = typeBytesRef.bytes;
+            this.typeBytesOffset = typeBytesRef.offset;
         }
         this.fixedData = data.slice(fixedSectionOffset, varSectionOffset - fixedSectionOffset);
         this.varData = data.slice(varSectionOffset, data.length() - varSectionOffset);
@@ -96,11 +99,7 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         if (col >= rowColumnCount) {
             return false;
         }
-        try {
-            typeByte = typeData.readByte();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        typeByte = typeBytes[typeBytesOffset + col];
         baseType = typeByte;
         return true;
     }
@@ -388,6 +387,5 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     @Override
     public void close() throws IOException {
         parserClosed = true;
-        typeData.close();
     }
 }
