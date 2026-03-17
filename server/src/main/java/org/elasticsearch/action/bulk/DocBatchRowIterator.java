@@ -10,6 +10,7 @@
 package org.elasticsearch.action.bulk;
 
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.common.Numbers;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.core.RestApiVersion;
@@ -272,8 +273,15 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
     @Override
     public boolean emptyText() throws IOException {
-        XContentString xContentString = optimizedTextOrNull();
-        return xContentString == null || xContentString.bytes().length() == 0;
+        if (baseType == RowType.NULL) {
+            return true;
+        } else if (baseType == RowType.STRING) {
+            long packed = readFixedLong();
+            int varLength = (int) packed;
+            return varLength == 0;
+        } else {
+            return textLength() == 0;
+        }
     }
 
     @Override
@@ -305,13 +313,92 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     }
 
     @Override
+    public short shortValue(boolean coerce) throws IOException {
+        Token token = currentToken();
+        if (token == Token.VALUE_STRING) {
+            checkCoerceString(coerce, Long.class);
+            XContentString contentString = optimizedText();
+            XContentString.UTF8Bytes bytes = contentString.bytes();
+            try {
+                // TODO: Uncertain of purpose:
+                // ensureNumberConversion(coerce, result, Long.class);
+                return utf8ParseShort(bytes.bytes(), bytes.offset(), bytes.length());
+            } catch (NumberFormatException e) {
+                // Fall through to back-parsing
+            }
+            return shortValue(coerce);
+        }
+        return doShortValue();
+    }
+
+    public static short utf8ParseShort(byte[] bytes, int offset, int length) {
+        long value = utf8ParseLong(bytes, offset, length);
+        if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
+            throw new NumberFormatException();
+        }
+        return (short) value;
+    }
+
+    @Override
     protected short doShortValue() throws IOException {
-        return (short) rowLongValue();
+        long value = rowLongValue();
+        if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
+            throw new NumberFormatException();
+        }
+        return (short) value;
     }
 
     @Override
     protected int doIntValue() throws IOException {
-        return (int) rowLongValue();
+        return Math.toIntExact(rowLongValue());
+    }
+
+    @Override
+    public long longValue(boolean coerce) throws IOException {
+        Token token = currentToken();
+        if (token == Token.VALUE_STRING) {
+            checkCoerceString(coerce, Long.class);
+            XContentString contentString = optimizedText();
+            XContentString.UTF8Bytes bytes = contentString.bytes();
+            try {
+                // TODO: Uncertain of purpose:
+                // ensureNumberConversion(coerce, result, Long.class);
+                return utf8ParseLong(bytes.bytes(), bytes.offset(), bytes.length());
+            } catch (NumberFormatException e) {
+                // Fall through to back-parsing
+            }
+            return longValue(coerce);
+
+        }
+        return doLongValue();
+    }
+
+    public static long utf8ParseLong(byte[] bytes, int offset, int length) {
+        if (length == 0) throw new NumberFormatException();
+
+        int i = offset;
+        int end = offset + length;
+        boolean negative = false;
+
+        if (bytes[i] == '-') {
+            negative = true;
+            i++;
+        } else if (bytes[i] == '+') {
+            i++;
+        }
+
+        if (i == end) throw new NumberFormatException();
+
+        long result = 0;
+        while (i < end) {
+            int digit = bytes[i++] - '0';
+            if (digit < 0 || digit > 9) {
+                throw new NumberFormatException();
+            }
+            result = result * 10 + digit;
+        }
+
+        return negative ? -result : result;
     }
 
     @Override

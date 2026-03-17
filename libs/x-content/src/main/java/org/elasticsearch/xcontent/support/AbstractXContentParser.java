@@ -41,7 +41,7 @@ public abstract class AbstractXContentParser implements XContentParser {
     // and change any code that needs to apply an alternative policy.
     public static final boolean DEFAULT_NUMBER_COERCE_POLICY = true;
 
-    private static void checkCoerceString(boolean coerce, Class<? extends Number> clazz) {
+    protected static void checkCoerceString(boolean coerce, Class<? extends Number> clazz) {
         if (coerce == false) {
             // Need to throw type IllegalArgumentException as current catch logic in
             // NumberFieldMapper.parseCreateField relies on this for "malformed" value detection
