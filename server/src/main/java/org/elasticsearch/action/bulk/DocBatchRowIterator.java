@@ -389,16 +389,24 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
         if (i == end) throw new NumberFormatException();
 
+        // Accumulate as negative to handle Long.MIN_VALUE correctly
+        long limit = negative ? Long.MIN_VALUE : -Long.MAX_VALUE;
         long result = 0;
         while (i < end) {
             int digit = bytes[i++] - '0';
             if (digit < 0 || digit > 9) {
                 throw new NumberFormatException();
             }
-            result = result * 10 + digit;
+            if (result < limit / 10) {
+                throw new NumberFormatException();
+            }
+            result = result * 10 - digit;
+            if (result < limit) {
+                throw new NumberFormatException();
+            }
         }
 
-        return negative ? -result : result;
+        return negative ? result : -result;
     }
 
     @Override
