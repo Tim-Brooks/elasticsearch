@@ -32,16 +32,28 @@ public abstract class MultiValuedBinaryDocValuesField extends CustomDocValuesFie
     // vints are unlike normal ints in that they may require 5 bytes instead of 4
     // see BytesStreamOutput.writeVInt()
     private static final int VINT_MAX_BYTES = 5;
+    private final boolean keepDuplicates;
 
-    protected final Collection<BytesRef> values;
     protected int docValuesByteCount = 0;
+    private BytesRef singleValue;
+    private Collection<BytesRef> values;
 
     MultiValuedBinaryDocValuesField(String name, boolean keepDuplicates) {
         super(name);
-        this.values = keepDuplicates ? new ArrayList<>() : new TreeSet<>();
+        this.keepDuplicates = keepDuplicates;
     }
 
     public void add(BytesRef value) {
+        if (singleValue == null) {
+            singleValue = value;
+            // might as well track these on the go as opposed to having to loop through all entries later
+            docValuesByteCount += value.length;
+            return;
+        } else if (values == null) {
+            this.values = this.keepDuplicates ? new ArrayList<>() : new TreeSet<>();
+            this.values.add(singleValue);
+        }
+
         if (values.add(value)) {
             // might as well track these on the go as opposed to having to loop through all entries later
             docValuesByteCount += value.length;
@@ -49,7 +61,14 @@ public abstract class MultiValuedBinaryDocValuesField extends CustomDocValuesFie
     }
 
     public int count() {
-        return values.size();
+        if (values != null) {
+            return values.size();
+        }
+        return singleValue == null ? 0 : 1;
+    }
+
+    public BytesRef singleValue() {
+        return singleValue;
     }
 
     protected void writeLenAndValues(BytesStreamOutput out) throws IOException {
@@ -79,13 +98,19 @@ public abstract class MultiValuedBinaryDocValuesField extends CustomDocValuesFie
          */
         @Override
         public BytesRef binaryValue() {
-            int docValuesCount = values.size();
+            int docValuesCount = count();
             // the + 1 is for the total doc values count, which is prefixed at the start of the array
             int streamSize = docValuesByteCount + (docValuesCount + 1) * VINT_MAX_BYTES;
 
             try (BytesStreamOutput out = new BytesStreamOutput(streamSize)) {
                 out.writeVInt(docValuesCount);
-                writeLenAndValues(out);
+                if (docValuesCount == 1) {
+                    BytesRef value = singleValue();
+                    out.writeVInt(value.length);
+                    out.writeBytes(value.bytes, value.offset, value.length);
+                } else {
+                    writeLenAndValues(out);
+                }
                 return out.bytes().toBytesRef();
             } catch (IOException e) {
                 throw new UncheckedIOException("Failed to get binary value", e);
@@ -108,10 +133,10 @@ public abstract class MultiValuedBinaryDocValuesField extends CustomDocValuesFie
          */
         @Override
         public BytesRef binaryValue() {
-            int docValuesCount = values.size();
+            int docValuesCount = count();
 
             if (docValuesCount == 1) {
-                return values.iterator().next();
+                return singleValue();
             }
 
             int streamSize = docValuesByteCount + docValuesCount * VINT_MAX_BYTES;
