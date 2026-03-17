@@ -10,7 +10,6 @@
 package org.elasticsearch.action.bulk;
 
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.Numbers;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.core.RestApiVersion;
@@ -321,7 +320,7 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
             XContentString.UTF8Bytes bytes = contentString.bytes();
             try {
                 // TODO: Uncertain of purpose:
-                // ensureNumberConversion(coerce, result, Long.class);
+//                 ensureNumberConversion(coerce, result, Long.class);
                 return utf8ParseShort(bytes.bytes(), bytes.offset(), bytes.length());
             } catch (NumberFormatException e) {
                 // Fall through to back-parsing
@@ -332,7 +331,7 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     }
 
     public static short utf8ParseShort(byte[] bytes, int offset, int length) {
-        long value = utf8ParseLong(bytes, offset, length);
+        long value = utf8ParseCoercedLong(bytes, offset, length);
         if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
             throw new NumberFormatException();
         }
@@ -349,6 +348,31 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     }
 
     @Override
+    public int intValue(boolean coerce) throws IOException {
+        Token token = currentToken();
+        if (token == Token.VALUE_STRING) {
+            checkCoerceString(coerce, Integer.class);
+            XContentString contentString = optimizedText();
+            XContentString.UTF8Bytes bytes = contentString.bytes();
+            try {
+                return utf8ParseInt(bytes.bytes(), bytes.offset(), bytes.length());
+            } catch (NumberFormatException e) {
+                // Fall through to super for scientific notation, etc.
+            }
+            return super.intValue(coerce);
+        }
+        return doIntValue();
+    }
+
+    public static int utf8ParseInt(byte[] bytes, int offset, int length) {
+        long value = utf8ParseCoercedLong(bytes, offset, length);
+        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+            throw new NumberFormatException();
+        }
+        return (int) value;
+    }
+
+    @Override
     protected int doIntValue() throws IOException {
         return Math.toIntExact(rowLongValue());
     }
@@ -361,19 +385,20 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
             XContentString contentString = optimizedText();
             XContentString.UTF8Bytes bytes = contentString.bytes();
             try {
-                // TODO: Uncertain of purpose:
-                // ensureNumberConversion(coerce, result, Long.class);
-                return utf8ParseLong(bytes.bytes(), bytes.offset(), bytes.length());
+                return utf8ParseCoercedLong(bytes.bytes(), bytes.offset(), bytes.length());
             } catch (NumberFormatException e) {
-                // Fall through to back-parsing
+                // Fall through to super for scientific notation, etc.
             }
             return super.longValue(coerce);
-
         }
         return doLongValue();
     }
 
-    public static long utf8ParseLong(byte[] bytes, int offset, int length) {
+    /**
+     * Parses a decimal string like "1.5" or "-3.99" from UTF-8 bytes, truncating the fractional part.
+     * Handles simple decimal notation only — falls through (throws) for scientific notation (e, E).
+     */
+    public static long utf8ParseCoercedLong(byte[] bytes, int offset, int length) {
         if (length == 0) throw new NumberFormatException();
 
         int i = offset;
@@ -389,11 +414,22 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
 
         if (i == end) throw new NumberFormatException();
 
-        // Accumulate as negative to handle Long.MIN_VALUE correctly
         long limit = negative ? Long.MIN_VALUE : -Long.MAX_VALUE;
         long result = 0;
         while (i < end) {
-            int digit = bytes[i++] - '0';
+            byte b = bytes[i];
+            if (b == '.') {
+                // Truncate: ignore everything after the decimal point, but validate remaining chars are digits
+                i++;
+                while (i < end) {
+                    int d = bytes[i++] - '0';
+                    if (d < 0 || d > 9) {
+                        throw new NumberFormatException();
+                    }
+                }
+                break;
+            }
+            int digit = b - '0';
             if (digit < 0 || digit > 9) {
                 throw new NumberFormatException();
             }
@@ -404,6 +440,7 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
             if (result < limit) {
                 throw new NumberFormatException();
             }
+            i++;
         }
 
         return negative ? result : -result;
