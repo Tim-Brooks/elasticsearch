@@ -220,4 +220,8 @@ public interface BytesReference extends Comparable<BytesReference>, ToXContentFr
     default int arrayOffset() {
         throw new UnsupportedOperationException();
     }
+
+    default BytesReference unwrap() {
+        return this;
+    }
 }
