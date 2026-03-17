@@ -311,24 +311,24 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         return rowBooleanValue();
     }
 
-//    @Override
-//    public short shortValue(boolean coerce) throws IOException {
-//        Token token = currentToken();
-//        if (token == Token.VALUE_STRING) {
-//            checkCoerceString(coerce, Long.class);
-//            XContentString contentString = optimizedText();
-//            XContentString.UTF8Bytes bytes = contentString.bytes();
-//            try {
-//                // TODO: Uncertain of purpose:
-////                 ensureNumberConversion(coerce, result, Long.class);
-//                return utf8ParseShort(bytes.bytes(), bytes.offset(), bytes.length());
-//            } catch (NumberFormatException e) {
-//                // Fall through to back-parsing
-//                return super.shortValue(coerce);
-//            }
-//        }
-//        return doShortValue();
-//    }
+    @Override
+    public short shortValue(boolean coerce) throws IOException {
+        Token token = currentToken();
+        if (token == Token.VALUE_STRING) {
+            checkCoerceString(coerce, Long.class);
+            XContentString contentString = optimizedText();
+            XContentString.UTF8Bytes bytes = contentString.bytes();
+            try {
+                // TODO: Uncertain of purpose:
+                // ensureNumberConversion(coerce, result, Long.class);
+                return utf8ParseShort(bytes.bytes(), bytes.offset(), bytes.length());
+            } catch (NumberFormatException e) {
+                // Fall through to back-parsing
+                return super.shortValue(coerce);
+            }
+        }
+        return doShortValue();
+    }
 
     public static short utf8ParseShort(byte[] bytes, int offset, int length) {
         long value = utf8ParseCoercedLong(bytes, offset, length);
@@ -350,22 +350,22 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         return (short) value;
     }
 
-//    @Override
-//    public int intValue(boolean coerce) throws IOException {
-//        Token token = currentToken();
-//        if (token == Token.VALUE_STRING) {
-//            checkCoerceString(coerce, Integer.class);
-//            XContentString contentString = optimizedText();
-//            XContentString.UTF8Bytes bytes = contentString.bytes();
-//            try {
-//                return utf8ParseInt(bytes.bytes(), bytes.offset(), bytes.length());
-//            } catch (NumberFormatException e) {
-//                // Fall through to super for scientific notation, etc.
-//            }
-//            return super.intValue(coerce);
-//        }
-//        return doIntValue();
-//    }
+    @Override
+    public int intValue(boolean coerce) throws IOException {
+        Token token = currentToken();
+        if (token == Token.VALUE_STRING) {
+            checkCoerceString(coerce, Integer.class);
+            XContentString contentString = optimizedText();
+            XContentString.UTF8Bytes bytes = contentString.bytes();
+            try {
+                return utf8ParseInt(bytes.bytes(), bytes.offset(), bytes.length());
+            } catch (NumberFormatException e) {
+                // Fall through to super for scientific notation, etc.
+            }
+            return super.intValue(coerce);
+        }
+        return doIntValue();
+    }
 
     public static int utf8ParseInt(byte[] bytes, int offset, int length) {
         long value = utf8ParseCoercedLong(bytes, offset, length);
@@ -383,22 +383,22 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         return Math.toIntExact(rowLongValue());
     }
 
-//    @Override
-//    public long longValue(boolean coerce) throws IOException {
-//        Token token = currentToken();
-//        if (token == Token.VALUE_STRING) {
-//            checkCoerceString(coerce, Long.class);
-//            XContentString contentString = optimizedText();
-//            XContentString.UTF8Bytes bytes = contentString.bytes();
-//            try {
-//                return utf8ParseCoercedLong(bytes.bytes(), bytes.offset(), bytes.length());
-//            } catch (NumberFormatException e) {
-//                // Fall through to super for scientific notation, etc.
-//            }
-//            return super.longValue(coerce);
-//        }
-//        return doLongValue();
-//    }
+    @Override
+    public long longValue(boolean coerce) throws IOException {
+        Token token = currentToken();
+        if (token == Token.VALUE_STRING) {
+            checkCoerceString(coerce, Long.class);
+            XContentString contentString = optimizedText();
+            XContentString.UTF8Bytes bytes = contentString.bytes();
+            try {
+                return utf8ParseCoercedLong(bytes.bytes(), bytes.offset(), bytes.length());
+            } catch (NumberFormatException e) {
+                // Fall through to super for scientific notation, etc.
+            }
+            return super.longValue(coerce);
+        }
+        return doLongValue();
+    }
 
     /**
      * Parses a decimal string like "1.5" or "-3.99" from UTF-8 bytes, truncating the fractional part.
