@@ -1070,6 +1070,7 @@ public class InternalEngine extends Engine {
     /** resolves the current version of the document, returning null if not found */
     private VersionValue resolveDocVersion(final Operation op, boolean loadSeqNo) throws IOException {
         assert incrementVersionLookup(); // used for asserting in tests
+        notifyLastDocIdAndVersionLookup();
         VersionValue versionValue = getVersionFromMap(op.uid());
         if (versionValue == null) {
             assert incrementIndexVersionLookup(); // used for asserting in tests
@@ -4169,4 +4170,6 @@ public class InternalEngine extends Engine {
     private boolean sequenceNumbersAreDisabled() {
         return engineConfig.getIndexSettings().sequenceNumbersDisabled();
     }
+
+    protected void notifyLastDocIdAndVersionLookup() {};
 }

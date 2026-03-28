@@ -611,7 +611,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         if (indexRouting instanceof IndexRouting.ExtractFromSource.ForRoutingPath forRoutingPath) {
             return new SortFieldRoutingExtractor(forRoutingPath::matchesField);
         } else if (indexRouting instanceof IndexRouting.ExtractFromSource.ForIndexDimensions) {
-            return new TsidRoutingExtractor(Set.copyOf(indexMetadata.getTimeSeriesDimensions()));
+            return new TsidRoutingExtractor(Set.copyOf(indexMetadata.getTimeSeriesDimensions()), indexMetadata.getCreationVersion());
         }
         return null;
     }

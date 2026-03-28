@@ -124,5 +124,16 @@ public final class DocBatchSchema {
         public int hashCode() {
             return name.hashCode();
         }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (obj == this) {
+                return true;
+            }
+            if (obj instanceof LeafField leafField) {
+                return name.equals(leafField.name);
+            }
+            return false;
+        }
     }
 }

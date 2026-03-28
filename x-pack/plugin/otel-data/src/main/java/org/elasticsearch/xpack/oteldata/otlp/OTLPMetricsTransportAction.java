@@ -20,9 +20,15 @@ import org.elasticsearch.action.bulk.RowDocumentBatch;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.client.internal.Client;
+import org.elasticsearch.cluster.metadata.DataStream;
+import org.elasticsearch.cluster.metadata.DataStreamAlias;
+import org.elasticsearch.cluster.metadata.ProjectId;
+import org.elasticsearch.cluster.metadata.ProjectMetadata;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.util.Maps;
+import org.elasticsearch.index.IndexVersion;
+import org.elasticsearch.index.IndexVersions;
 import org.elasticsearch.injection.guice.Inject;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
@@ -35,6 +41,7 @@ import org.elasticsearch.xpack.oteldata.otlp.proto.BufferedByteStringAccessor;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -55,6 +62,7 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
 
     // visible for testing
     volatile MappingHints defaultMappingHints;
+    private final ClusterService clusterService;
 
     @Inject
     public OTLPMetricsTransportAction(
@@ -70,6 +78,7 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
         clusterSettings.addSettingsUpdateConsumer(OTelPlugin.USE_EXPONENTIAL_HISTOGRAM_FIELD_TYPE, histogramFieldTypeSetting -> {
             defaultMappingHints = MappingHints.fromSettings(histogramFieldTypeSetting);
         });
+        this.clusterService = clusterService;
     }
 
     @Override
@@ -82,6 +91,9 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
             return context;
         }
 
+        ProjectMetadata projectMetadata = clusterService.state().projectState(ProjectId.DEFAULT).metadata();
+        Map<String, IndexVersion> indexVersions = new HashMap<>();
+
         DocumentBatchRowBuilder rowBuilder = new DocumentBatchRowBuilder(MetricRowBuilder.FIXED_SCHEMA);
         MetricRowBuilder metricRowBuilder = new MetricRowBuilder(rowBuilder, byteStringAccessor, defaultMappingHints);
         List<IndexRequest> indexRequests = new ArrayList<>();
@@ -90,17 +102,22 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
             rowBuilder.startDocument();
             var dynamicTemplates = Maps.<String, String>newHashMapWithExpectedSize(dataPointGroup.dataPoints().size());
             var dynamicTemplateParams = Maps.<String, Map<String, String>>newHashMapWithExpectedSize(dataPointGroup.dataPoints().size());
-            BytesRef tsid = metricRowBuilder.buildMetricRow(dataPointGroup, dynamicTemplates, dynamicTemplateParams);
+            String dataStreamName = dataPointGroup.targetIndex().index();
+            IndexVersion indexVersion = indexVersions.computeIfAbsent(dataStreamName, name -> resolveIndexVersion(projectMetadata, name));
+            BytesRef tsid = metricRowBuilder.buildMetricRow(dataPointGroup, dynamicTemplates, dynamicTemplateParams, indexVersion);
             rowBuilder.endDocument();
 
-            long timestampMillis = TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getTimestampUnixNano());
-            IndexRequest indexRequest = new IndexRequest(dataPointGroup.targetIndex().index()).opType(DocWriteRequest.OpType.CREATE)
+            IndexRequest indexRequest = new IndexRequest(dataStreamName).opType(DocWriteRequest.OpType.CREATE)
                 .setRequireDataStream(true)
                 .source("{}", XContentType.CBOR)
-                .tsid(tsid)
                 .setIncludeSourceOnError(false)
                 .setDynamicTemplates(dynamicTemplates)
                 .setDynamicTemplateParams(dynamicTemplateParams);
+            // For old write indices, let the indexing layer compute the TSID — avoids layout mismatch if a rollover occurs mid-request.
+            if (indexVersion.onOrAfter(IndexVersions.TSID_SINGLE_PREFIX_BYTE_FEATURE_FLAG)) {
+                indexRequest.tsid(tsid);
+            }
+            long timestampMillis = TimeUnit.NANOSECONDS.toMillis(dataPointGroup.getTimestampUnixNano());
             indexRequest.setRawTimestamp(timestampMillis);
             indexRequests.add(indexRequest);
             bulkRequestBuilder.add(indexRequest);
@@ -114,10 +131,6 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
         }
         bulkRequestBuilder.setRowDocumentBatch(batch);
 
-        for (int i = 0; i < indexRequests.size(); i++) {
-            IndexRequest ir = indexRequests.get(i);
-        }
-
         return context;
     }
 
@@ -128,5 +141,20 @@ public class OTLPMetricsTransportAction extends AbstractOTLPTransportAction {
             .setErrorMessage(message)
             .build();
         return ExportMetricsServiceResponse.newBuilder().setPartialSuccess(partialSuccess).build();
+    }
+
+    private static IndexVersion resolveIndexVersion(ProjectMetadata projectMetadata, String dataStreamName) {
+        DataStream dataStream = projectMetadata.dataStreams().get(dataStreamName);
+        if (dataStream == null) {
+            DataStreamAlias alias = projectMetadata.dataStreamAliases().get(dataStreamName);
+            if (alias != null && alias.getWriteDataStream() != null) {
+                dataStream = projectMetadata.dataStreams().get(alias.getWriteDataStream());
+            }
+        }
+        if (dataStream != null && dataStream.getWriteIndex() != null) {
+            return projectMetadata.getIndexSafe(dataStream.getWriteIndex()).getCreationVersion();
+        }
+        // non-existent data-stream will be created with the current index version
+        return IndexVersion.current();
     }
 }

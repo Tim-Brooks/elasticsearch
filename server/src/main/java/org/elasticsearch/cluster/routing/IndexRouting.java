@@ -585,7 +585,7 @@ public abstract class IndexRouting {
                 } catch (IOException | ParsingException e) {
                     throw new IllegalArgumentException("Error extracting tsid: " + e.getMessage(), e);
                 }
-                return b.buildTsid();
+                return b.buildTsid(creationVersion);
             }
         }
     }

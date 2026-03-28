@@ -11,6 +11,7 @@ package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.util.ByteUtils;
+import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xcontent.XContentString;
 
@@ -20,7 +21,7 @@ import java.util.Set;
 public class TsidRoutingExtractorTests extends ESTestCase {
 
     public void testExactDimensionFieldMatch() {
-        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("scope.name", "unit"));
+        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("scope.name", "unit"), IndexVersion.current());
 
         extractor.resolveColumn(0, "scope.name");
         extractor.resolveColumn(1, "unit");
@@ -38,7 +39,7 @@ public class TsidRoutingExtractorTests extends ESTestCase {
     }
 
     public void testWildcardDimensionFieldMatch() {
-        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("attributes.*", "resource.attributes.*"));
+        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("attributes.*", "resource.attributes.*"), IndexVersion.current());
 
         extractor.resolveColumn(0, "attributes.host.name");
         extractor.resolveColumn(1, "resource.attributes.service.name");
@@ -55,7 +56,7 @@ public class TsidRoutingExtractorTests extends ESTestCase {
     }
 
     public void testWildcardDoesNotMatchNonPrefix() {
-        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("attributes.*"));
+        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("attributes.*"), IndexVersion.current());
 
         extractor.resolveColumn(0, "other.field");
         extractor.resolveColumn(1, "attributesXfoo");
@@ -71,7 +72,8 @@ public class TsidRoutingExtractorTests extends ESTestCase {
 
     public void testMixedExactAndWildcard() {
         TsidRoutingExtractor extractor = new TsidRoutingExtractor(
-            Set.of("scope.name", "scope.attributes.*", "resource.attributes.*", "unit", "_metric_names_hash", "attributes.*")
+            Set.of("scope.name", "scope.attributes.*", "resource.attributes.*", "unit", "_metric_names_hash", "attributes.*"),
+            IndexVersion.current()
         );
 
         extractor.resolveColumn(0, "scope.name");
@@ -91,7 +93,7 @@ public class TsidRoutingExtractorTests extends ESTestCase {
     }
 
     public void testLongDimensionWithWildcard() {
-        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("metrics.*"));
+        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("metrics.*"), IndexVersion.current());
 
         extractor.resolveColumn(0, "metrics.count");
 
@@ -105,7 +107,7 @@ public class TsidRoutingExtractorTests extends ESTestCase {
     }
 
     public void testIsColumnResolved() {
-        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("attributes.*"));
+        TsidRoutingExtractor extractor = new TsidRoutingExtractor(Set.of("attributes.*"), IndexVersion.current());
 
         assertFalse(extractor.isColumnResolved(0));
         extractor.resolveColumn(0, "attributes.foo");

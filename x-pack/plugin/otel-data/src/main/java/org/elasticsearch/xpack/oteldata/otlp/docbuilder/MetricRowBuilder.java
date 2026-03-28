@@ -28,6 +28,7 @@ import org.elasticsearch.cluster.routing.TsidBuilder;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.hash.BufferedMurmur3Hasher;
+import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentString;
@@ -35,13 +36,11 @@ import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.oteldata.otlp.datapoint.DataPoint;
 import org.elasticsearch.xpack.oteldata.otlp.datapoint.DataPointGroupingContext;
 import org.elasticsearch.xpack.oteldata.otlp.datapoint.ExponentialHistogramConverter;
-import org.elasticsearch.xpack.oteldata.otlp.datapoint.TargetIndex;
 import org.elasticsearch.xpack.oteldata.otlp.datapoint.TDigestConverter;
+import org.elasticsearch.xpack.oteldata.otlp.datapoint.TargetIndex;
 import org.elasticsearch.xpack.oteldata.otlp.proto.BufferedByteStringAccessor;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -123,7 +122,8 @@ public class MetricRowBuilder {
     public BytesRef buildMetricRow(
         DataPointGroupingContext.DataPointGroup dataPointGroup,
         Map<String, String> dynamicTemplates,
-        Map<String, Map<String, String>> dynamicTemplateParams
+        Map<String, Map<String, String>> dynamicTemplateParams,
+        IndexVersion indexVersion
     ) throws IOException {
         List<DataPoint> dataPoints = dataPointGroup.dataPoints();
 
@@ -182,7 +182,7 @@ public class MetricRowBuilder {
 
         TsidBuilder tsidBuilder = dataPointGroup.tsidBuilder();
         tsidBuilder.addStringDimension("_metric_names_hash", metricNamesHash);
-        return tsidBuilder.buildTsid();
+        return tsidBuilder.buildTsid(indexVersion);
     }
 
     private void buildResource(Resource resource, ByteString schemaUrl) {

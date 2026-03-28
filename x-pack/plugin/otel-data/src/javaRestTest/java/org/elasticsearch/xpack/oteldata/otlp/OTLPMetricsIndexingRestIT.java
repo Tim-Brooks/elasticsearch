@@ -49,9 +49,9 @@ import static io.opentelemetry.sdk.metrics.data.AggregationTemporality.DELTA;
 import static org.elasticsearch.test.rest.ObjectPath.evaluate;
 import static org.elasticsearch.xpack.oteldata.otlp.OTLPMetricsIndexingRestIT.Monotonicity.MONOTONIC;
 import static org.elasticsearch.xpack.oteldata.otlp.OTLPMetricsIndexingRestIT.Monotonicity.NON_MONOTONIC;
-import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.anEmptyMap;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.isA;
@@ -450,9 +450,7 @@ public class OTLPMetricsIndexingRestIT extends AbstractOTLPIndexingRestIT {
             List.of(
                 createDoubleGauge(
                     TEST_RESOURCE,
-                    Attributes.builder()
-                        .put(AttributeKey.stringArrayKey("host.ip"), List.of("127.0.0.1", "0.0.0.0"))
-                        .build(),
+                    Attributes.builder().put(AttributeKey.stringArrayKey("host.ip"), List.of("127.0.0.1", "0.0.0.0")).build(),
                     "metric_with_ip_array",
                     42,
                     "By",

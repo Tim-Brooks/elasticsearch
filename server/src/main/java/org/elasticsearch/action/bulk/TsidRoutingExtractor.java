@@ -13,6 +13,7 @@ import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.routing.TsidBuilder;
 import org.elasticsearch.common.regex.Regex;
 import org.elasticsearch.common.util.ByteUtils;
+import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.xcontent.XContentString;
@@ -32,6 +33,7 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
 
     private final Set<String> dimensionFields;
     private final List<String> wildcardPatterns;
+    private final IndexVersion indexVersion;
 
     // Track which columns are dimension columns
     private int[] dimColIndices = new int[4];
@@ -41,8 +43,9 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
     // Track which column indices have been resolved
     private boolean[] resolved = new boolean[16];
 
-    TsidRoutingExtractor(Set<String> dimensionFields) {
+    TsidRoutingExtractor(Set<String> dimensionFields, IndexVersion indexVersion) {
         this.dimensionFields = dimensionFields;
+        this.indexVersion = indexVersion;
         List<String> wildcards = new ArrayList<>();
         for (String field : dimensionFields) {
             if (field.contains("*")) {
@@ -105,7 +108,7 @@ class TsidRoutingExtractor implements RoutingMetadataExtractor {
             }
         }
         if (tsidBuilder.size() > 0) {
-            request.tsid(tsidBuilder.buildTsid());
+            request.tsid(tsidBuilder.buildTsid(indexVersion));
         }
     }
 

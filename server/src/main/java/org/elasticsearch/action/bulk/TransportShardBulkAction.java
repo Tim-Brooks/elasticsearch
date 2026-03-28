@@ -502,7 +502,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         // fields were unmapped at that time (common during dynamic mapping bootstrapping),
         // the tsid will be null. Re-extract here using the current (post-mapping-update) mapping.
         if (primary.indexSettings().getMode() == org.elasticsearch.index.IndexMode.TIME_SERIES) {
-            extractTsidsFromBatch(rowBatch, indexRequests, mappingLookup);
+            extractTsidsFromBatch(rowBatch, indexRequests, mappingLookup, primary.indexSettings().getIndexVersionCreated());
         }
 
         // Phase 2: Parse batch using RowBatchDocumentParser
@@ -624,7 +624,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     private static void extractTsidsFromBatch(
         RowDocumentBatch rowBatch,
         java.util.List<IndexRequest> indexRequests,
-        MappingLookup mappingLookup
+        MappingLookup mappingLookup,
+        org.elasticsearch.index.IndexVersion indexVersion
     ) {
         // Collect dimension field names from the current mapping
         java.util.Set<String> dimensionFields = new java.util.HashSet<>();
@@ -704,7 +705,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 }
             }
             if (tsidBuilder.size() > 0) {
-                request.tsid(tsidBuilder.buildTsid());
+                request.tsid(tsidBuilder.buildTsid(indexVersion));
             }
         }
     }
