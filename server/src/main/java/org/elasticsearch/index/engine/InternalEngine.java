@@ -1394,7 +1394,7 @@ public class InternalEngine extends Engine {
                 remainingCount = deferredCount;
             }
 
-            return java.util.Arrays.asList(allResults);
+            return Arrays.asList(allResults);
         }
     }
 
@@ -1416,8 +1416,7 @@ public class InternalEngine extends Engine {
         }
     }
 
-    private void processSubBatch(List<Index> operations, int[] acquired, int subBatchSize, IndexResult[] allResults)
-        throws IOException {
+    private void processSubBatch(List<Index> operations, int[] acquired, int subBatchSize, IndexResult[] allResults) throws IOException {
 
         final Index[] updatedOps = new Index[subBatchSize];
         final IndexingStrategy[] plans = new IndexingStrategy[subBatchSize];
