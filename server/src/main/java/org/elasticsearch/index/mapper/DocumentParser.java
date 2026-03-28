@@ -374,7 +374,7 @@ public final class DocumentParser {
         );
     }
 
-    private static void innerParseObject(DocumentParserContext context) throws IOException {
+    static void innerParseObject(DocumentParserContext context) throws IOException {
 
         final XContentParser parser = context.parser();
         XContentParser.Token token = parser.currentToken();
