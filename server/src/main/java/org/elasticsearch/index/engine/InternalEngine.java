@@ -1346,59 +1346,81 @@ public class InternalEngine extends Engine {
 
             // Build initial remaining indices [0, 1, 2, ..., N-1]
             int[] remaining = new int[batchSize];
+            int remainingCount = batchSize;
             for (int i = 0; i < batchSize; i++) {
                 remaining[i] = i;
             }
 
-            while (remaining.length > 0) {
-                // Lock acquisition phase: block on first, tryAcquire the rest
-                final List<Releasable> locks = new java.util.ArrayList<>(remaining.length);
-                final int[] acquired;
-                final int[] deferred;
-                try {
-                    final java.util.List<Integer> acquiredList = new java.util.ArrayList<>(remaining.length);
-                    final java.util.List<Integer> deferredList = new java.util.ArrayList<>();
+            int[] acquired = new int[batchSize];
+            int[] deferred = new int[batchSize];
 
+            while (remainingCount > 0) {
+                final boolean doThrottle = operations.get(remaining[0]).origin().isRecovery() == false;
+                // Lock acquisition phase: block on first, tryAcquire the rest
+                final List<Releasable> locks = new java.util.ArrayList<>(remainingCount);
+                int acquiredCount = 0;
+                int deferredCount = 0;
+                try (Releasable indexThrottle = doThrottle ? throttle.acquireThrottle() : () -> {}) {
                     // Blocking acquire for the first remaining operation
                     locks.add(versionMap.acquireLock(operations.get(remaining[0]).uid()));
-                    acquiredList.add(remaining[0]);
+                    acquired[acquiredCount++] = remaining[0];
 
                     // Try-acquire for the rest
-                    for (int r = 1; r < remaining.length; r++) {
+                    for (int r = 1; r < remainingCount; r++) {
                         int idx = remaining[r];
                         Releasable lock = versionMap.tryAcquireLock(operations.get(idx).uid());
                         if (lock != null) {
                             locks.add(lock);
-                            acquiredList.add(idx);
+                            acquired[acquiredCount++] = idx;
                         } else {
-                            deferredList.add(idx);
+                            deferred[deferredCount++] = idx;
                         }
                     }
 
-                    acquired = acquiredList.stream().mapToInt(Integer::intValue).toArray();
-                    deferred = deferredList.stream().mapToInt(Integer::intValue).toArray();
-
-                    processSubBatch(operations, acquired, allResults);
+                    processSubBatch(operations, acquired, acquiredCount, allResults);
+                } catch (RuntimeException | IOException e) {
+                    failOnTragicEvent(acquired, acquiredCount, operations, e);
+                    throw e;
                 } finally {
                     for (Releasable lock : locks) {
                         lock.close();
                     }
                 }
 
+                // Swap deferred into remaining for next iteration
+                int[] temp = remaining;
                 remaining = deferred;
+                deferred = temp;
+                remainingCount = deferredCount;
             }
 
             return java.util.Arrays.asList(allResults);
         }
     }
 
-    private void processSubBatch(List<Index> operations, int[] acquired, IndexResult[] allResults)
+    private void failOnTragicEvent(int[] indices, int count, List<Index> operations, Exception e) {
+        for (int i = 0; i < count; i++) {
+            Index op = operations.get(indices[i]);
+            try {
+                if (e instanceof AlreadyClosedException == false && treatDocumentFailureAsTragicError(op)) {
+                    failEngine("index id[" + op.id() + "] origin[" + op.origin() + "] seq#[" + op.seqNo() + "]", e);
+                } else {
+                    maybeFailEngine("index id[" + op.id() + "] origin[" + op.origin() + "] seq#[" + op.seqNo() + "]", e);
+                }
+            } catch (Exception inner) {
+                e.addSuppressed(inner);
+            }
+            if (isClosed.get()) {
+                return;
+            }
+        }
+    }
+
+    private void processSubBatch(List<Index> operations, int[] acquired, int subBatchSize, IndexResult[] allResults)
         throws IOException {
-        final int subBatchSize = acquired.length;
 
         final Index[] updatedOps = new Index[subBatchSize];
         final IndexingStrategy[] plans = new IndexingStrategy[subBatchSize];
-        final List<LuceneDocument> appendDocs = new java.util.ArrayList<>();
 
         // Phase A: Classify ops into append-only vs needs-version-check
         int needsVersionCount = 0;
@@ -1409,6 +1431,7 @@ public class InternalEngine extends Engine {
         for (int s = 0; s < subBatchSize; s++) {
             int origIdx = acquired[s];
             Index op = operations.get(origIdx);
+            assert assertIncomingSequenceNumber(op.origin(), op.seqNo());
             updatedOps[s] = op;
 
             if (op.origin() == Operation.Origin.PRIMARY) {
@@ -1510,25 +1533,17 @@ public class InternalEngine extends Engine {
                     markSeqNoAsSeen(op.seqNo());
                 }
 
+                assert op.seqNo() >= 0 : "ops should have an assigned seq no.; origin: " + op.origin();
                 updatedOps[s] = op;
 
                 if (plan.indexIntoLucene && plan.useLuceneUpdateDocument == false) {
                     // Update Lucene doc fields with the assigned seqNo/primaryTerm/version before indexing
                     op.parsedDoc().updateSeqID(op.seqNo(), op.primaryTerm());
                     op.parsedDoc().version().setLongValue(plan.versionForIndexing);
-                    appendDocs.addAll(op.parsedDoc().docs());
                 }
             }
 
-            // Step 3: Batch Lucene add for append-only operations
-            if (appendDocs.isEmpty() == false) {
-                for (LuceneDocument document : appendDocs) {
-                    indexWriter.addDocument(document);
-                }
-                numDocAppends.inc(appendDocs.size());
-            }
-
-            // Step 4: Index non-append operations individually into Lucene
+            // Step 3: Write to Lucene
             for (int s = 0; s < subBatchSize; s++) {
                 int origIdx = acquired[s];
                 if (allResults[origIdx] != null) continue; // early result already set
@@ -1538,13 +1553,25 @@ public class InternalEngine extends Engine {
                 if (plan.indexIntoLucene && plan.useLuceneUpdateDocument) {
                     allResults[origIdx] = indexIntoLucene(op, plan);
                 } else if (plan.indexIntoLucene) {
-                    allResults[origIdx] = new IndexResult(
-                        plan.versionForIndexing,
-                        op.primaryTerm(),
-                        op.seqNo(),
-                        plan.currentNotFoundOrDeleted,
-                        op.id()
-                    );
+                    // Append-only path
+                    try {
+                        addDocs(op.parsedDoc().docs(), indexWriter);
+                        allResults[origIdx] = new IndexResult(
+                            plan.versionForIndexing,
+                            op.primaryTerm(),
+                            op.seqNo(),
+                            plan.currentNotFoundOrDeleted,
+                            op.id()
+                        );
+                    } catch (Exception ex) {
+                        if (ex instanceof AlreadyClosedException == false
+                            && indexWriter.getTragicException() == null
+                            && treatDocumentFailureAsTragicError(op) == false) {
+                            allResults[origIdx] = new IndexResult(ex, Versions.MATCH_ANY, op.primaryTerm(), op.seqNo(), op.id());
+                        } else {
+                            throw ex;
+                        }
+                    }
                 } else if (plan.addStaleOpToLucene) {
                     allResults[origIdx] = indexIntoLucene(op, plan);
                 } else {

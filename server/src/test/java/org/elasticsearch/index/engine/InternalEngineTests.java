@@ -7936,6 +7936,126 @@ public class InternalEngineTests extends EngineTestCase {
         }
     }
 
+    public void testIndexBatchMultipleDocuments() throws IOException {
+        List<Engine.Index> ops = new ArrayList<>();
+        for (int i = 0; i < randomIntBetween(2, 20); i++) {
+            ParsedDocument doc = createParsedDoc(Integer.toString(i), null);
+            ops.add(indexForDoc(doc));
+        }
+        List<Engine.IndexResult> results = engine.indexBatch(ops);
+        assertThat(results, hasSize(ops.size()));
+        for (int i = 0; i < results.size(); i++) {
+            Engine.IndexResult result = results.get(i);
+            assertThat(result.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+            assertThat(result.getSeqNo(), greaterThanOrEqualTo(0L));
+        }
+        engine.refresh("test");
+        try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
+            assertThat(searcher.getIndexReader().numDocs(), equalTo(ops.size()));
+        }
+    }
+
+    public void testIndexBatchWithDuplicateIds() throws IOException {
+        // First index the doc so a subsequent batch update hits the version-check (updateDocument) path
+        ParsedDocument doc = createParsedDoc("1", null);
+        engine.index(indexForDoc(doc));
+
+        // Two operations targeting the same id — one should be deferred to second iteration
+        Engine.Index op1 = indexForDoc(doc);
+        Engine.Index op2 = indexForDoc(doc);
+        List<Engine.IndexResult> results = engine.indexBatch(List.of(op1, op2));
+        assertThat(results, hasSize(2));
+        for (Engine.IndexResult result : results) {
+            assertThat(result.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+        }
+        // Second write should have a higher seqNo
+        assertThat(results.get(1).getSeqNo(), greaterThan(results.get(0).getSeqNo()));
+
+        engine.refresh("test");
+        try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
+            // Both ops target the same id via update path, second overwrites first
+            assertThat(searcher.getIndexReader().numDocs(), equalTo(1));
+        }
+    }
+
+    public void testIndexBatchSequenceNumbersAreMonotonic() throws IOException {
+        int batchSize = randomIntBetween(5, 50);
+        List<Engine.Index> ops = new ArrayList<>(batchSize);
+        for (int i = 0; i < batchSize; i++) {
+            ops.add(indexForDoc(createParsedDoc(Integer.toString(i), null)));
+        }
+        List<Engine.IndexResult> results = engine.indexBatch(ops);
+        long prevSeqNo = -1;
+        for (Engine.IndexResult result : results) {
+            assertThat(result.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+            assertThat(result.getSeqNo(), greaterThan(prevSeqNo));
+            prevSeqNo = result.getSeqNo();
+        }
+    }
+
+    public void testIndexBatchSingletonEquivalentToIndex() throws IOException {
+        ParsedDocument doc = createParsedDoc("1", null);
+        Engine.Index op = indexForDoc(doc);
+        List<Engine.IndexResult> batchResults = engine.indexBatch(List.of(op));
+        assertThat(batchResults, hasSize(1));
+        Engine.IndexResult result = batchResults.get(0);
+        assertThat(result.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+        assertThat(result.getSeqNo(), greaterThanOrEqualTo(0L));
+
+        engine.refresh("test");
+        try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
+            assertThat(searcher.getIndexReader().numDocs(), equalTo(1));
+        }
+    }
+
+    public void testIndexBatchVersionConflict() throws IOException {
+        // First, index a document
+        ParsedDocument doc = createParsedDoc("1", null);
+        Engine.IndexResult firstResult = engine.index(indexForDoc(doc));
+        assertThat(firstResult.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+
+        // Now batch-index with a wrong if_seq_no — should produce a version conflict
+        Engine.Index conflictingOp = new Engine.Index(
+            newUid(doc),
+            doc,
+            UNASSIGNED_SEQ_NO,
+            primaryTerm.get(),
+            Versions.MATCH_ANY,
+            VersionType.INTERNAL,
+            Engine.Operation.Origin.PRIMARY,
+            System.nanoTime(),
+            IndexRequest.UNSET_AUTO_GENERATED_TIMESTAMP,
+            false,
+            firstResult.getSeqNo() + 100, // wrong seq no
+            firstResult.getTerm()
+        );
+        List<Engine.IndexResult> results = engine.indexBatch(List.of(conflictingOp));
+        assertThat(results, hasSize(1));
+        assertThat(results.get(0).getResultType(), equalTo(Engine.Result.Type.FAILURE));
+        assertThat(results.get(0).getFailure(), instanceOf(VersionConflictEngineException.class));
+    }
+
+    public void testIndexBatchMixedNewAndExisting() throws IOException {
+        // Pre-index doc "0"
+        engine.index(indexForDoc(createParsedDoc("0", null)));
+
+        // Batch: update "0" and create "1", "2"
+        List<Engine.Index> ops = List.of(
+            indexForDoc(createParsedDoc("0", null)),
+            indexForDoc(createParsedDoc("1", null)),
+            indexForDoc(createParsedDoc("2", null))
+        );
+        List<Engine.IndexResult> results = engine.indexBatch(ops);
+        assertThat(results, hasSize(3));
+        for (Engine.IndexResult result : results) {
+            assertThat(result.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+        }
+        engine.refresh("test");
+        try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
+            assertThat(searcher.getIndexReader().numDocs(), equalTo(3));
+        }
+    }
+
     private static void releaseCommitRef(Map<IndexCommit, Engine.IndexCommitRef> commits, long generation) {
         var releasable = commits.keySet().stream().filter(c -> c.getGeneration() == generation).findFirst();
         assertThat(releasable, isPresent());
