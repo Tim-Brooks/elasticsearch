@@ -1097,6 +1097,15 @@ public class InternalEngine extends Engine {
         return versionValue;
     }
 
+    private VersionValue[] resolveDocVersions(List<Index> operations, boolean loadSeqNo) throws IOException {
+        // TODO: optimize down into the Lucene level to resolve multiple versions at a time.
+        VersionValue[] results = new VersionValue[operations.size()];
+        for (int i = 0; i < operations.size(); i++) {
+            results[i] = resolveDocVersion(operations.get(i), loadSeqNo);
+        }
+        return results;
+    }
+
     private VersionValue getVersionFromMap(BytesRef id) {
         if (versionMap.isUnsafe()) {
             synchronized (versionMap) {
@@ -1329,6 +1338,277 @@ public class InternalEngine extends Engine {
         }
     }
 
+    @Override
+    public List<IndexResult> indexBatch(List<Index> operations) throws IOException {
+        try (var ignored = acquireEnsureOpenRef()) {
+            final int batchSize = operations.size();
+            final IndexResult[] allResults = new IndexResult[batchSize];
+
+            // Build initial remaining indices [0, 1, 2, ..., N-1]
+            int[] remaining = new int[batchSize];
+            for (int i = 0; i < batchSize; i++) {
+                remaining[i] = i;
+            }
+
+            while (remaining.length > 0) {
+                // Lock acquisition phase: block on first, tryAcquire the rest
+                final List<Releasable> locks = new java.util.ArrayList<>(remaining.length);
+                final int[] acquired;
+                final int[] deferred;
+                try {
+                    final java.util.List<Integer> acquiredList = new java.util.ArrayList<>(remaining.length);
+                    final java.util.List<Integer> deferredList = new java.util.ArrayList<>();
+
+                    // Blocking acquire for the first remaining operation
+                    locks.add(versionMap.acquireLock(operations.get(remaining[0]).uid()));
+                    acquiredList.add(remaining[0]);
+
+                    // Try-acquire for the rest
+                    for (int r = 1; r < remaining.length; r++) {
+                        int idx = remaining[r];
+                        Releasable lock = versionMap.tryAcquireLock(operations.get(idx).uid());
+                        if (lock != null) {
+                            locks.add(lock);
+                            acquiredList.add(idx);
+                        } else {
+                            deferredList.add(idx);
+                        }
+                    }
+
+                    acquired = acquiredList.stream().mapToInt(Integer::intValue).toArray();
+                    deferred = deferredList.stream().mapToInt(Integer::intValue).toArray();
+
+                    processSubBatch(operations, acquired, allResults);
+                } finally {
+                    for (Releasable lock : locks) {
+                        lock.close();
+                    }
+                }
+
+                remaining = deferred;
+            }
+
+            return java.util.Arrays.asList(allResults);
+        }
+    }
+
+    private void processSubBatch(List<Index> operations, int[] acquired, IndexResult[] allResults)
+        throws IOException {
+        final int subBatchSize = acquired.length;
+
+        final Index[] updatedOps = new Index[subBatchSize];
+        final IndexingStrategy[] plans = new IndexingStrategy[subBatchSize];
+        final List<LuceneDocument> appendDocs = new java.util.ArrayList<>();
+
+        // Phase A: Classify ops into append-only vs needs-version-check
+        int needsVersionCount = 0;
+        int[] needsVersionSlots = new int[subBatchSize]; // slot indices into this sub-batch
+        boolean[] isAppendOnly = new boolean[subBatchSize];
+        boolean anyNeedsSeqNoCheck = false;
+
+        for (int s = 0; s < subBatchSize; s++) {
+            int origIdx = acquired[s];
+            Index op = operations.get(origIdx);
+            updatedOps[s] = op;
+
+            if (op.origin() == Operation.Origin.PRIMARY) {
+                final boolean canOptimize = canOptimizeAddDocument(op);
+                if (canOptimize && mayHaveBeenIndexedBefore(op) == false) {
+                    isAppendOnly[s] = true;
+                } else {
+                    // Check for OCC not supported early
+                    if (sequenceNumbersAreDisabled()
+                        && op.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO
+                        && op.getIfPrimaryTerm() != SequenceNumbers.UNASSIGNED_PRIMARY_TERM) {
+                        plans[s] = IndexingStrategy.optimisticConcurrencyControlNotSupported(op.id(), shardId);
+                        continue;
+                    }
+                    needsVersionSlots[needsVersionCount++] = s;
+                    if (op.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
+                        anyNeedsSeqNoCheck = true;
+                    }
+                }
+            } else {
+                // Non-primary: use individual strategy
+                plans[s] = planIndexingAsNonPrimary(op);
+            }
+        }
+
+        // Phase A2: Build plans for append-only ops
+        int reservedDocs = 0;
+        for (int s = 0; s < subBatchSize; s++) {
+            if (isAppendOnly[s]) {
+                Index op = updatedOps[s];
+                final Exception reserveError = tryAcquireInFlightDocs(op, op.parsedDoc().docs().size());
+                if (reserveError != null) {
+                    plans[s] = IndexingStrategy.failAsTooManyDocs(reserveError, op.id());
+                } else {
+                    reservedDocs += op.parsedDoc().docs().size();
+                    plans[s] = IndexingStrategy.optimizedAppendOnly(1L, op.parsedDoc().docs().size());
+                }
+            }
+        }
+
+        try {
+            // Phase B: Batch resolveDocVersions for non-append primary ops
+            if (needsVersionCount > 0) {
+                versionMap.enforceSafeAccess();
+                List<Index> needsVersionOps = new java.util.ArrayList<>(needsVersionCount);
+                for (int i = 0; i < needsVersionCount; i++) {
+                    needsVersionOps.add(updatedOps[needsVersionSlots[i]]);
+                }
+                VersionValue[] resolved = resolveDocVersions(needsVersionOps, anyNeedsSeqNoCheck);
+
+                // Phase C: Build IndexingStrategy[] using resolved versions
+                for (int i = 0; i < needsVersionCount; i++) {
+                    int s = needsVersionSlots[i];
+                    if (plans[s] != null) {
+                        continue; // already set (e.g., OCC not supported)
+                    }
+                    Index op = updatedOps[s];
+                    boolean canOptimize = canOptimizeAddDocument(op);
+                    plans[s] = planIndexingAsPrimaryWithVersion(op, resolved[i], canOptimize);
+                    // Track reserved docs from version-checked ops that will be indexed
+                    if (plans[s].reservedDocs > 0) {
+                        reservedDocs += plans[s].reservedDocs;
+                    }
+                }
+            }
+
+            // Phase D: Generate seqNos and collect append docs
+            for (int s = 0; s < subBatchSize; s++) {
+                int origIdx = acquired[s];
+                Index op = updatedOps[s];
+                IndexingStrategy plan = plans[s];
+                lastWriteNanos = op.startTime();
+
+                if (plan.earlyResultOnPreFlightError.isPresent()) {
+                    allResults[origIdx] = plan.earlyResultOnPreFlightError.get();
+                    continue;
+                }
+
+                if (op.origin() == Operation.Origin.PRIMARY) {
+                    op = new Index(
+                        op.uid(),
+                        op.parsedDoc(),
+                        generateSeqNoForOperationOnPrimary(op),
+                        op.primaryTerm(),
+                        op.version(),
+                        op.versionType(),
+                        op.origin(),
+                        op.startTime(),
+                        op.getAutoGeneratedIdTimestamp(),
+                        op.isRetry(),
+                        op.getIfSeqNo(),
+                        op.getIfPrimaryTerm()
+                    );
+                    final boolean toAppend = plan.indexIntoLucene && plan.useLuceneUpdateDocument == false;
+                    if (toAppend == false) {
+                        advanceMaxSeqNoOfUpdatesOnPrimary(op.seqNo());
+                    }
+                } else {
+                    markSeqNoAsSeen(op.seqNo());
+                }
+
+                updatedOps[s] = op;
+
+                if (plan.indexIntoLucene && plan.useLuceneUpdateDocument == false) {
+                    // Update Lucene doc fields with the assigned seqNo/primaryTerm/version before indexing
+                    op.parsedDoc().updateSeqID(op.seqNo(), op.primaryTerm());
+                    op.parsedDoc().version().setLongValue(plan.versionForIndexing);
+                    appendDocs.addAll(op.parsedDoc().docs());
+                }
+            }
+
+            // Step 3: Batch Lucene add for append-only operations
+            if (appendDocs.isEmpty() == false) {
+                for (LuceneDocument document : appendDocs) {
+                    indexWriter.addDocument(document);
+                }
+                numDocAppends.inc(appendDocs.size());
+            }
+
+            // Step 4: Index non-append operations individually into Lucene
+            for (int s = 0; s < subBatchSize; s++) {
+                int origIdx = acquired[s];
+                if (allResults[origIdx] != null) continue; // early result already set
+                IndexingStrategy plan = plans[s];
+                Index op = updatedOps[s];
+
+                if (plan.indexIntoLucene && plan.useLuceneUpdateDocument) {
+                    allResults[origIdx] = indexIntoLucene(op, plan);
+                } else if (plan.indexIntoLucene) {
+                    allResults[origIdx] = new IndexResult(
+                        plan.versionForIndexing,
+                        op.primaryTerm(),
+                        op.seqNo(),
+                        plan.currentNotFoundOrDeleted,
+                        op.id()
+                    );
+                } else if (plan.addStaleOpToLucene) {
+                    allResults[origIdx] = indexIntoLucene(op, plan);
+                } else {
+                    allResults[origIdx] = new IndexResult(
+                        plan.versionForIndexing,
+                        op.primaryTerm(),
+                        op.seqNo(),
+                        plan.currentNotFoundOrDeleted,
+                        op.id()
+                    );
+                }
+            }
+
+            // Step 5: Write individual translog entries
+            for (int s = 0; s < subBatchSize; s++) {
+                int origIdx = acquired[s];
+                Index op = updatedOps[s];
+                IndexResult result = allResults[origIdx];
+                if (op.origin().isFromTranslog() == false) {
+                    final Translog.Location location;
+                    if (result.getResultType() == Result.Type.SUCCESS) {
+                        location = translog.add(new Translog.Index(op, result));
+                    } else if (result.getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
+                        final NoOp noOp = new NoOp(
+                            result.getSeqNo(),
+                            op.primaryTerm(),
+                            op.origin(),
+                            op.startTime(),
+                            result.getFailure().toString()
+                        );
+                        location = innerNoOp(noOp).getTranslogLocation();
+                    } else {
+                        location = null;
+                    }
+                    result.setTranslogLocation(location);
+                }
+            }
+
+            // Step 6: Update versionMap and checkpoint tracker
+            for (int s = 0; s < subBatchSize; s++) {
+                int origIdx = acquired[s];
+                IndexingStrategy plan = plans[s];
+                Index op = updatedOps[s];
+                IndexResult result = allResults[origIdx];
+
+                if (plan.indexIntoLucene && result.getResultType() == Result.Type.SUCCESS) {
+                    final Translog.Location translogLocation = trackTranslogLocation.get() ? result.getTranslogLocation() : null;
+                    versionMap.maybePutIndexUnderLock(
+                        op.uid(),
+                        new IndexVersionValue(translogLocation, plan.versionForIndexing, op.seqNo(), op.primaryTerm())
+                    );
+                }
+                localCheckpointTracker.markSeqNoAsProcessed(result.getSeqNo());
+                if (result.getTranslogLocation() == null) {
+                    localCheckpointTracker.markSeqNoAsPersisted(result.getSeqNo());
+                }
+                result.setTook(relativeTimeInNanosSupplier.getAsLong() - op.startTime());
+                result.freeze();
+            }
+        } finally {
+            releaseInFlightDocs(reservedDocs);
+        }
+    }
+
     protected final IndexingStrategy planIndexingAsNonPrimary(Index index) throws IOException {
         assert assertNonPrimaryOrigin(index);
         // needs to maintain the auto_id timestamp in case this replica becomes primary
@@ -1377,15 +1657,14 @@ public class InternalEngine extends Engine {
     private IndexingStrategy planIndexingAsPrimary(Index index) throws IOException {
         assert index.origin() == Operation.Origin.PRIMARY : "planing as primary but origin isn't. got " + index.origin();
         final int reservingDocs = index.parsedDoc().docs().size();
-        final IndexingStrategy plan;
         // resolve an external operation into an internal one which is safe to replay
         final boolean canOptimizeAddDocument = canOptimizeAddDocument(index);
         if (canOptimizeAddDocument && mayHaveBeenIndexedBefore(index) == false) {
             final Exception reserveError = tryAcquireInFlightDocs(index, reservingDocs);
             if (reserveError != null) {
-                plan = IndexingStrategy.failAsTooManyDocs(reserveError, index.id());
+                return IndexingStrategy.failAsTooManyDocs(reserveError, index.id());
             } else {
-                plan = IndexingStrategy.optimizedAppendOnly(1L, reservingDocs);
+                return IndexingStrategy.optimizedAppendOnly(1L, reservingDocs);
             }
         } else {
             if (sequenceNumbersAreDisabled()
@@ -1394,58 +1673,67 @@ public class InternalEngine extends Engine {
                 return IndexingStrategy.optimisticConcurrencyControlNotSupported(index.id(), shardId);
             }
             versionMap.enforceSafeAccess();
-            // resolves incoming version
             final VersionValue versionValue = resolveDocVersion(index, index.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO);
-            final long currentVersion;
-            final boolean currentNotFoundOrDeleted;
-            if (versionValue == null) {
-                currentVersion = Versions.NOT_FOUND;
-                currentNotFoundOrDeleted = true;
-            } else {
-                currentVersion = versionValue.version;
-                currentNotFoundOrDeleted = versionValue.isDelete();
-            }
-            if (index.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO && currentNotFoundOrDeleted) {
+            return planIndexingAsPrimaryWithVersion(index, versionValue, canOptimizeAddDocument);
+        }
+    }
+
+    /**
+     * Given a resolved version value (possibly null if doc not found), determine the indexing strategy
+     * for a primary index operation. Used by both the single-doc and batch paths.
+     */
+    private IndexingStrategy planIndexingAsPrimaryWithVersion(Index index, VersionValue versionValue, boolean canOptimizeAddDocument) {
+        final int reservingDocs = index.parsedDoc().docs().size();
+        final long currentVersion;
+        final boolean currentNotFoundOrDeleted;
+        if (versionValue == null) {
+            currentVersion = Versions.NOT_FOUND;
+            currentNotFoundOrDeleted = true;
+        } else {
+            currentVersion = versionValue.version;
+            currentNotFoundOrDeleted = versionValue.isDelete();
+        }
+        final IndexingStrategy plan;
+        if (index.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO && currentNotFoundOrDeleted) {
+            final VersionConflictEngineException e = new VersionConflictEngineException(
+                shardId,
+                index.id(),
+                index.getIfSeqNo(),
+                index.getIfPrimaryTerm(),
+                SequenceNumbers.UNASSIGNED_SEQ_NO,
+                SequenceNumbers.UNASSIGNED_PRIMARY_TERM
+            );
+            plan = IndexingStrategy.skipDueToVersionConflict(e, true, currentVersion, index.id());
+        } else if (index.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO
+            && (versionValue.seqNo != index.getIfSeqNo() || versionValue.term != index.getIfPrimaryTerm())) {
                 final VersionConflictEngineException e = new VersionConflictEngineException(
                     shardId,
                     index.id(),
                     index.getIfSeqNo(),
                     index.getIfPrimaryTerm(),
-                    SequenceNumbers.UNASSIGNED_SEQ_NO,
-                    SequenceNumbers.UNASSIGNED_PRIMARY_TERM
+                    versionValue.seqNo,
+                    versionValue.term
                 );
-                plan = IndexingStrategy.skipDueToVersionConflict(e, true, currentVersion, index.id());
-            } else if (index.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO
-                && (versionValue.seqNo != index.getIfSeqNo() || versionValue.term != index.getIfPrimaryTerm())) {
-                    final VersionConflictEngineException e = new VersionConflictEngineException(
-                        shardId,
-                        index.id(),
-                        index.getIfSeqNo(),
-                        index.getIfPrimaryTerm(),
-                        versionValue.seqNo,
-                        versionValue.term
-                    );
-                    plan = IndexingStrategy.skipDueToVersionConflict(e, currentNotFoundOrDeleted, currentVersion, index.id());
-                } else if (index.versionType().isVersionConflictForWrites(currentVersion, index.version(), currentNotFoundOrDeleted)) {
-                    final VersionConflictEngineException e = new VersionConflictEngineException(
-                        shardId,
-                        index.parsedDoc().documentDescription(),
-                        index.versionType().explainConflictForWrites(currentVersion, index.version(), true)
-                    );
-                    plan = IndexingStrategy.skipDueToVersionConflict(e, currentNotFoundOrDeleted, currentVersion, index.id());
+                plan = IndexingStrategy.skipDueToVersionConflict(e, currentNotFoundOrDeleted, currentVersion, index.id());
+            } else if (index.versionType().isVersionConflictForWrites(currentVersion, index.version(), currentNotFoundOrDeleted)) {
+                final VersionConflictEngineException e = new VersionConflictEngineException(
+                    shardId,
+                    index.parsedDoc().documentDescription(),
+                    index.versionType().explainConflictForWrites(currentVersion, index.version(), true)
+                );
+                plan = IndexingStrategy.skipDueToVersionConflict(e, currentNotFoundOrDeleted, currentVersion, index.id());
+            } else {
+                final Exception reserveError = tryAcquireInFlightDocs(index, reservingDocs);
+                if (reserveError != null) {
+                    plan = IndexingStrategy.failAsTooManyDocs(reserveError, index.id());
                 } else {
-                    final Exception reserveError = tryAcquireInFlightDocs(index, reservingDocs);
-                    if (reserveError != null) {
-                        plan = IndexingStrategy.failAsTooManyDocs(reserveError, index.id());
-                    } else {
-                        plan = IndexingStrategy.processNormally(
-                            currentNotFoundOrDeleted,
-                            canOptimizeAddDocument ? 1L : index.versionType().updateVersion(currentVersion, index.version()),
-                            reservingDocs
-                        );
-                    }
+                    plan = IndexingStrategy.processNormally(
+                        currentNotFoundOrDeleted,
+                        canOptimizeAddDocument ? 1L : index.versionType().updateVersion(currentVersion, index.version()),
+                        reservingDocs
+                    );
                 }
-        }
+            }
         return plan;
     }
 
