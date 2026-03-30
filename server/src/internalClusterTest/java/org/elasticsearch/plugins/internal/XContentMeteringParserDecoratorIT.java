@@ -104,16 +104,26 @@ public class XContentMeteringParserDecoratorIT extends ESIntegTestCase {
                 @Override
                 public IndexResult index(Index index) throws IOException {
                     IndexResult result = super.index(index);
+                    reportDocumentSize(index.parsedDoc());
+                    return result;
+                }
 
+                @Override
+                public java.util.List<IndexResult> indexBatch(java.util.List<Index> operations) throws IOException {
+                    java.util.List<IndexResult> results = super.indexBatch(operations);
+                    for (Index op : operations) {
+                        reportDocumentSize(op.parsedDoc());
+                    }
+                    return results;
+                }
+
+                private void reportDocumentSize(ParsedDocument parsedDocument) {
                     DocumentSizeReporter documentParsingReporter = documentParsingProvider.newDocumentSizeReporter(
                         shardId.getIndex(),
                         config().getMapperService(),
                         DocumentSizeAccumulator.EMPTY_INSTANCE
                     );
-                    ParsedDocument parsedDocument = index.parsedDoc();
                     documentParsingReporter.onIndexingCompleted(parsedDocument);
-
-                    return result;
                 }
             });
         }

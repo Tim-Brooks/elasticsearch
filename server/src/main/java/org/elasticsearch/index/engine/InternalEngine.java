@@ -1343,38 +1343,26 @@ public class InternalEngine extends Engine {
         try (var ignored = acquireEnsureOpenRef()) {
             final int batchSize = operations.size();
             final IndexResult[] allResults = new IndexResult[batchSize];
-
-            // Build initial remaining indices [0, 1, 2, ..., N-1]
-            int[] remaining = new int[batchSize];
-            int remainingCount = batchSize;
-            for (int i = 0; i < batchSize; i++) {
-                remaining[i] = i;
-            }
-
             int[] acquired = new int[batchSize];
-            int[] deferred = new int[batchSize];
 
-            while (remainingCount > 0) {
-                final boolean doThrottle = operations.get(remaining[0]).origin().isRecovery() == false;
-                // Lock acquisition phase: block on first, tryAcquire the rest
-                final List<Releasable> locks = new java.util.ArrayList<>(remainingCount);
+            int start = 0;
+            while (start < batchSize) {
+                final boolean doThrottle = operations.get(start).origin().isRecovery() == false;
+                final List<Releasable> locks = new java.util.ArrayList<>();
                 int acquiredCount = 0;
-                int deferredCount = 0;
                 try (Releasable indexThrottle = doThrottle ? throttle.acquireThrottle() : () -> {}) {
-                    // Blocking acquire for the first remaining operation
-                    locks.add(versionMap.acquireLock(operations.get(remaining[0]).uid()));
-                    acquired[acquiredCount++] = remaining[0];
+                    // Blocking acquire for the first operation
+                    locks.add(versionMap.acquireLock(operations.get(start).uid()));
+                    acquired[acquiredCount++] = start;
 
-                    // Try-acquire for the rest
-                    for (int r = 1; r < remainingCount; r++) {
-                        int idx = remaining[r];
-                        Releasable lock = versionMap.tryAcquireLock(operations.get(idx).uid());
-                        if (lock != null) {
-                            locks.add(lock);
-                            acquired[acquiredCount++] = idx;
-                        } else {
-                            deferred[deferredCount++] = idx;
+                    // Try-acquire subsequent operations in order; stop at the first failure
+                    for (int i = start + 1; i < batchSize; i++) {
+                        Releasable lock = versionMap.tryAcquireLock(operations.get(i).uid());
+                        if (lock == null) {
+                            break;
                         }
+                        locks.add(lock);
+                        acquired[acquiredCount++] = i;
                     }
 
                     processSubBatch(operations, acquired, acquiredCount, allResults);
@@ -1387,11 +1375,7 @@ public class InternalEngine extends Engine {
                     }
                 }
 
-                // Swap deferred into remaining for next iteration
-                int[] temp = remaining;
-                remaining = deferred;
-                deferred = temp;
-                remainingCount = deferredCount;
+                start += acquiredCount;
             }
 
             return Arrays.asList(allResults);
