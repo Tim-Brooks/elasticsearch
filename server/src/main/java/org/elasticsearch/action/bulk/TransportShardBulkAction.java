@@ -794,6 +794,11 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
 
         // Prepare all Engine.Index operations
         for (BulkItemRequest item : items) {
+            if (item.getPrimaryResponse() != null && item.getPrimaryResponse().isFailed() && item.getPrimaryResponse().getFailure()
+                .isAborted()) {
+                // Fall back to item-by-item path when some items are already aborted (e.g. by authorization)
+                return null;
+            }
             final IndexRequest indexRequest = (IndexRequest) item.request();
             final XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(
                 indexRequest
