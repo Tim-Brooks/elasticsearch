@@ -24,6 +24,7 @@ import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.replication.PostWriteRefresh;
+import org.elasticsearch.action.support.replication.ReplicationResponse;
 import org.elasticsearch.action.support.replication.TransportReplicationAction;
 import org.elasticsearch.action.support.replication.TransportWriteAction;
 import org.elasticsearch.action.update.UpdateHelper;
@@ -38,6 +39,7 @@ import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Nullable;
@@ -69,6 +71,8 @@ import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
@@ -84,6 +88,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     public static final ActionType<BulkShardResponse> TYPE = new ActionType<>(ACTION_NAME);
 
     private static final Logger logger = LogManager.getLogger(TransportShardBulkAction.class);
+
+    public static final FeatureFlag BATCH_INDEXING_FEATURE_FLAG = new FeatureFlag("batch_indexing");
 
     // Represents the maximum memory overhead factor for an operation when processed for indexing.
     // This accounts for potential increases in memory usage due to document expansion, including:
@@ -190,6 +196,23 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             ),
             outerListener
         );
+        if (canUseBatchIndexing(request)) {
+            try {
+                var batchResult = performBatchIndexOnPrimary(
+                    request,
+                    primary,
+                    postWriteRefresh,
+                    postWriteAction,
+                    documentParsingProvider
+                );
+                if (batchResult != null) {
+                    listener.onResponse(batchResult);
+                    return;
+                }
+            } catch (Exception e) {
+                // Fall back to item-by-item on any error
+            }
+        }
         ClusterStateObserver observer = new ClusterStateObserver(clusterService, request.timeout(), logger, threadPool.getThreadContext());
         performOnPrimary(request, primary, updateHelper, threadPool::absoluteTimeInMillis, (update, shardId, mappingListener) -> {
             assert update != null;
@@ -677,7 +700,17 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         );
         ActionListener.completeWith(listener, () -> {
             final long startBulkTime = System.nanoTime();
-            final Translog.Location location = performOnReplica(request, replica);
+            final Translog.Location location;
+            if (canUseBatchIndexing(request)) {
+                Translog.Location batchLocation = performBatchIndexOnReplica(request, replica);
+                if (batchLocation != null) {
+                    location = batchLocation;
+                } else {
+                    location = performOnReplica(request, replica);
+                }
+            } else {
+                location = performOnReplica(request, replica);
+            }
             replica.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBulkTime);
             return new WriteReplicaResult<>(request, location, null, replica, logger, postWriteAction);
         });
@@ -729,6 +762,209 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             }
             assert operationResult != null : "operation result must never be null when primary response has no failure";
             location = syncOperationResultOrThrow(operationResult, location);
+        }
+        return location;
+    }
+
+    /**
+     * Checks whether the batch indexing path can be used for this request.
+     * Returns true if the feature flag is enabled and all operations are index/create (no deletes, no updates).
+     */
+    static boolean canUseBatchIndexing(BulkShardRequest request) {
+        if (BATCH_INDEXING_FEATURE_FLAG.isEnabled() == false) {
+            return false;
+        }
+        for (BulkItemRequest item : request.items()) {
+            final DocWriteRequest.OpType opType = item.request().opType();
+            if (opType != DocWriteRequest.OpType.INDEX && opType != DocWriteRequest.OpType.CREATE) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Performs a batch index on the primary. Returns null if any operation requires a mapping update,
+     * meaning the caller should fall back to the item-by-item path.
+     */
+    static WritePrimaryResult<BulkShardRequest, BulkShardResponse> performBatchIndexOnPrimary(
+        BulkShardRequest request,
+        IndexShard primary,
+        @Nullable PostWriteRefresh postWriteRefresh,
+        @Nullable Consumer<Runnable> postWriteAction,
+        DocumentParsingProvider documentParsingProvider
+    ) throws IOException {
+        final BulkItemRequest[] items = request.items();
+        final List<Engine.Index> operations = new ArrayList<>(items.length);
+
+        // Prepare all Engine.Index operations
+        for (BulkItemRequest item : items) {
+            final IndexRequest indexRequest = (IndexRequest) item.request();
+            final XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(indexRequest);
+            final SourceToParse sourceToParse = new SourceToParse(
+                indexRequest.id(),
+                indexRequest.source(),
+                indexRequest.getContentType(),
+                indexRequest.routing(),
+                indexRequest.getDynamicTemplates(),
+                indexRequest.getDynamicTemplateParams(),
+                indexRequest.getIncludeSourceOnError(),
+                meteringParserDecorator,
+                indexRequest.tsid()
+            );
+            Engine.Index operation;
+            try {
+                operation = IndexShard.prepareIndex(
+                    primary.mapperService(),
+                    sourceToParse,
+                    SequenceNumbers.UNASSIGNED_SEQ_NO,
+                    primary.getOperationPrimaryTerm(),
+                    indexRequest.version(),
+                    indexRequest.versionType(),
+                    Engine.Operation.Origin.PRIMARY,
+                    indexRequest.getAutoGeneratedTimestamp(),
+                    indexRequest.isRetry(),
+                    indexRequest.ifSeqNo(),
+                    indexRequest.ifPrimaryTerm(),
+                    primary.getRelativeTimeInNanos()
+                );
+            } catch (Exception e) {
+                // Fall back to item-by-item path on parse failures
+                return null;
+            }
+            if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
+                // Fall back to item-by-item path when mapping updates are needed
+                return null;
+            }
+            operations.add(operation);
+        }
+
+        // Execute the batch
+        final List<Engine.IndexResult> results = primary.applyIndexOperationBatchOnPrimary(operations);
+
+        // Build responses
+        final BulkItemResponse[] responses = new BulkItemResponse[items.length];
+        Translog.Location locationToSync = null;
+        for (int i = 0; i < items.length; i++) {
+            final Engine.IndexResult result = results.get(i);
+            final BulkItemRequest item = items[i];
+            final IndexRequest indexRequest = (IndexRequest) item.request();
+            switch (result.getResultType()) {
+                case SUCCESS -> {
+                    final IndexResponse indexResponse = new IndexResponse(
+                        primary.shardId(),
+                        result.getId(),
+                        result.getSeqNo(),
+                        result.getTerm(),
+                        result.getVersion(),
+                        result.isCreated(),
+                        indexRequest.getExecutedPipelines()
+                    );
+                    indexResponse.setShardInfo(ReplicationResponse.ShardInfo.EMPTY);
+                    responses[i] = BulkItemResponse.success(item.id(), item.request().opType(), indexResponse);
+                    item.setPrimaryResponse(responses[i]);
+                    locationToSync = TransportWriteAction.locationToSync(locationToSync, result.getTranslogLocation());
+                }
+                case FAILURE -> {
+                    responses[i] = BulkItemResponse.failure(
+                        item.id(),
+                        item.request().opType(),
+                        new BulkItemResponse.Failure(
+                            request.index(),
+                            result.getId(),
+                            result.getFailure(),
+                            result.getSeqNo(),
+                            result.getTerm()
+                        )
+                    );
+                    item.setPrimaryResponse(responses[i]);
+                }
+                case MAPPING_UPDATE_REQUIRED -> throw new AssertionError("mapping update should not be required in batch path");
+            }
+        }
+
+        primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), 0L);
+        final BulkShardResponse bulkShardResponse = new BulkShardResponse(request.shardId(), responses);
+        return new WritePrimaryResult<>(request, bulkShardResponse, locationToSync, primary, logger, postWriteRefresh, postWriteAction);
+    }
+
+    /**
+     * Performs a batch index on a replica. Returns null if the caller should fall back to the item-by-item path.
+     */
+    static Translog.Location performBatchIndexOnReplica(BulkShardRequest request, IndexShard replica) throws Exception {
+        final BulkItemRequest[] items = request.items();
+        final List<Engine.Index> operations = new ArrayList<>(items.length);
+        final List<Integer> operationIndices = new ArrayList<>(items.length);
+
+        for (int i = 0; i < items.length; i++) {
+            final BulkItemRequest item = items[i];
+            final BulkItemResponse response = item.getPrimaryResponse();
+
+            if (response.isFailed()) {
+                // Can't batch when there are failed items that need noop marking
+                return null;
+            }
+            if (response.getResponse().getResult() == DocWriteResponse.Result.NOOP) {
+                continue; // skip noops
+            }
+            assert response.getResponse().getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO;
+
+            final IndexRequest indexRequest = (IndexRequest) item.request();
+            final DocWriteResponse primaryResponse = response.getResponse();
+            final SourceToParse sourceToParse = new SourceToParse(
+                indexRequest.id(),
+                indexRequest.source(),
+                indexRequest.getContentType(),
+                indexRequest.routing(),
+                Map.of(),
+                Map.of(),
+                true,
+                XContentMeteringParserDecorator.NOOP,
+                indexRequest.tsid()
+            );
+            Engine.Index operation;
+            try {
+                operation = IndexShard.prepareIndex(
+                    replica.mapperService(),
+                    sourceToParse,
+                    primaryResponse.getSeqNo(),
+                    primaryResponse.getPrimaryTerm(),
+                    primaryResponse.getVersion(),
+                    null,
+                    Engine.Operation.Origin.REPLICA,
+                    indexRequest.getAutoGeneratedTimestamp(),
+                    indexRequest.isRetry(),
+                    SequenceNumbers.UNASSIGNED_SEQ_NO,
+                    0,
+                    replica.getRelativeTimeInNanos()
+                );
+            } catch (Exception e) {
+                return null;
+            }
+            if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
+                // Mapping update needed on replica — fall back so RetryOnReplicaException can be thrown
+                return null;
+            }
+            operations.add(operation);
+            operationIndices.add(i);
+        }
+
+        if (operations.isEmpty()) {
+            return null;
+        }
+
+        final List<Engine.IndexResult> results = replica.applyIndexOperationBatchOnReplica(operations);
+
+        Translog.Location location = null;
+        for (int i = 0; i < results.size(); i++) {
+            final Engine.IndexResult result = results.get(i);
+            if (result.getResultType() == Engine.Result.Type.MAPPING_UPDATE_REQUIRED) {
+                throw new TransportReplicationAction.RetryOnReplicaException(
+                    replica.shardId(),
+                    "Mappings are not available on the replica yet, triggered update: " + result.getRequiredMappingUpdate()
+                );
+            }
+            location = syncOperationResultOrThrow(result, location);
         }
         return location;
     }
