@@ -24,7 +24,6 @@ import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.replication.PostWriteRefresh;
-import org.elasticsearch.action.support.replication.ReplicationResponse;
 import org.elasticsearch.action.support.replication.TransportReplicationAction;
 import org.elasticsearch.action.support.replication.TransportWriteAction;
 import org.elasticsearch.action.update.UpdateHelper;
@@ -39,8 +38,8 @@ import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
-import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Strings;
@@ -198,18 +197,13 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         );
         if (canUseBatchIndexing(request)) {
             try {
-                var batchResult = performBatchIndexOnPrimary(
-                    request,
-                    primary,
-                    postWriteRefresh,
-                    postWriteAction,
-                    documentParsingProvider
-                );
+                var batchResult = performBatchIndexOnPrimary(request, primary, postWriteRefresh, postWriteAction, documentParsingProvider);
                 if (batchResult != null) {
                     listener.onResponse(batchResult);
                     return;
                 }
             } catch (Exception e) {
+                logger.info(format("failed to perform batch indexing on primary [%s]", primary.shardId()), e);
                 // Fall back to item-by-item on any error
             }
         }
@@ -794,13 +788,16 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         @Nullable Consumer<Runnable> postWriteAction,
         DocumentParsingProvider documentParsingProvider
     ) throws IOException {
+        long startNanos = System.nanoTime();
         final BulkItemRequest[] items = request.items();
         final List<Engine.Index> operations = new ArrayList<>(items.length);
 
         // Prepare all Engine.Index operations
         for (BulkItemRequest item : items) {
             final IndexRequest indexRequest = (IndexRequest) item.request();
-            final XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(indexRequest);
+            final XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(
+                indexRequest
+            );
             final SourceToParse sourceToParse = new SourceToParse(
                 indexRequest.id(),
                 indexRequest.source(),
@@ -842,50 +839,25 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         // Execute the batch
         final List<Engine.IndexResult> results = primary.applyIndexOperationBatchOnPrimary(operations);
 
-        // Build responses
-        final BulkItemResponse[] responses = new BulkItemResponse[items.length];
-        Translog.Location locationToSync = null;
-        for (int i = 0; i < items.length; i++) {
-            final Engine.IndexResult result = results.get(i);
-            final BulkItemRequest item = items[i];
-            final IndexRequest indexRequest = (IndexRequest) item.request();
-            switch (result.getResultType()) {
-                case SUCCESS -> {
-                    final IndexResponse indexResponse = new IndexResponse(
-                        primary.shardId(),
-                        result.getId(),
-                        result.getSeqNo(),
-                        result.getTerm(),
-                        result.getVersion(),
-                        result.isCreated(),
-                        indexRequest.getExecutedPipelines()
-                    );
-                    indexResponse.setShardInfo(ReplicationResponse.ShardInfo.EMPTY);
-                    responses[i] = BulkItemResponse.success(item.id(), item.request().opType(), indexResponse);
-                    item.setPrimaryResponse(responses[i]);
-                    locationToSync = TransportWriteAction.locationToSync(locationToSync, result.getTranslogLocation());
-                }
-                case FAILURE -> {
-                    responses[i] = BulkItemResponse.failure(
-                        item.id(),
-                        item.request().opType(),
-                        new BulkItemResponse.Failure(
-                            request.index(),
-                            result.getId(),
-                            result.getFailure(),
-                            result.getSeqNo(),
-                            result.getTerm()
-                        )
-                    );
-                    item.setPrimaryResponse(responses[i]);
-                }
-                case MAPPING_UPDATE_REQUIRED -> throw new AssertionError("mapping update should not be required in batch path");
-            }
+        // Build responses using the shared execution context
+        final BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(request, primary);
+        for (Engine.IndexResult result : results) {
+            assert context.hasMoreOperationsToExecute();
+            context.setRequestToExecute(context.getCurrent());
+            context.markOperationAsExecuted(result);
+            context.markAsCompleted(context.getExecutionResult());
         }
 
-        primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), 0L);
-        final BulkShardResponse bulkShardResponse = new BulkShardResponse(request.shardId(), responses);
-        return new WritePrimaryResult<>(request, bulkShardResponse, locationToSync, primary, logger, postWriteRefresh, postWriteAction);
+        primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startNanos);
+        return new WritePrimaryResult<>(
+            request,
+            context.buildShardResponse(),
+            context.getLocationToSync(),
+            primary,
+            logger,
+            postWriteRefresh,
+            postWriteAction
+        );
     }
 
     /**

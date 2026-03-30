@@ -375,7 +375,6 @@ public class BatchBulkIT extends ESIntegTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "Source reconstruction from columnar batch not yet implemented")
     public void testRealtimeGetFromTranslog() throws IOException {
         String index = "test-batch-realtime-get";
         createBatchIndex(index, 1, 0);
@@ -571,7 +570,6 @@ public class BatchBulkIT extends ESIntegTestCase {
         return doc;
     }
 
-    @AwaitsFix(bugUrl = "Mapping sub array types does not work yet")
     @SuppressWarnings("unchecked")
     public void testDynamicMappingsWithArrayField() throws IOException {
         String index = "test-batch-dynamic-array";
