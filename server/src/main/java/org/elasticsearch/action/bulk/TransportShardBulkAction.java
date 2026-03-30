@@ -781,7 +781,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     }
 
     // Maximum number of operations to parse and index in a single pass to bound memory usage.
-    static final int BATCH_CHUNK_SIZE = 8192;
+    static final int BATCH_CHUNK_SIZE = 512;
 
     static WritePrimaryResult<BulkShardRequest, BulkShardResponse> performBatchIndexOnPrimary(
         BulkShardRequest request,
