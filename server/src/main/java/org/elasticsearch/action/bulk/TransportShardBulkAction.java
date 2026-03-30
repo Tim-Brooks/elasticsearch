@@ -12,6 +12,7 @@ package org.elasticsearch.action.bulk;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRunnable;
@@ -71,8 +72,10 @@ import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
@@ -794,8 +797,9 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
 
         // Prepare all Engine.Index operations
         for (BulkItemRequest item : items) {
-            if (item.getPrimaryResponse() != null && item.getPrimaryResponse().isFailed() && item.getPrimaryResponse().getFailure()
-                .isAborted()) {
+            if (item.getPrimaryResponse() != null
+                && item.getPrimaryResponse().isFailed()
+                && item.getPrimaryResponse().getFailure().isAborted()) {
                 // Fall back to item-by-item path when some items are already aborted (e.g. by authorization)
                 return null;
             }
@@ -828,7 +832,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                     indexRequest.isRetry(),
                     indexRequest.ifSeqNo(),
                     indexRequest.ifPrimaryTerm(),
-                    primary.getRelativeTimeInNanos()
+                    startNanos
                 );
             } catch (Exception e) {
                 // Fall back to item-by-item path on parse failures
@@ -839,6 +843,15 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 return null;
             }
             operations.add(operation);
+        }
+
+        // Fall back to item-by-item path when there are duplicate document IDs in the batch,
+        // as these require sequential version resolution to handle overwrites correctly.
+        Set<BytesRef> seenUids = new HashSet<>(operations.size());
+        for (Engine.Index operation : operations) {
+            if (seenUids.add(operation.uid()) == false) {
+                return null;
+            }
         }
 
         // Execute the batch
