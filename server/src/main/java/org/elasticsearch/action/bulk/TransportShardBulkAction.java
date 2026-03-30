@@ -39,8 +39,8 @@ import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
-import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Strings;
@@ -198,13 +198,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         );
         if (canUseBatchIndexing(request)) {
             try {
-                var batchResult = performBatchIndexOnPrimary(
-                    request,
-                    primary,
-                    postWriteRefresh,
-                    postWriteAction,
-                    documentParsingProvider
-                );
+                var batchResult = performBatchIndexOnPrimary(request, primary, postWriteRefresh, postWriteAction, documentParsingProvider);
                 if (batchResult != null) {
                     listener.onResponse(batchResult);
                     return;
@@ -800,7 +794,9 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         // Prepare all Engine.Index operations
         for (BulkItemRequest item : items) {
             final IndexRequest indexRequest = (IndexRequest) item.request();
-            final XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(indexRequest);
+            final XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(
+                indexRequest
+            );
             final SourceToParse sourceToParse = new SourceToParse(
                 indexRequest.id(),
                 indexRequest.source(),
