@@ -199,15 +199,16 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             outerListener
         );
         if (canUseBatchIndexing(request)) {
+            WritePrimaryResult<BulkShardRequest, BulkShardResponse> batchResult;
             try {
-                var batchResult = performBatchIndexOnPrimary(request, primary, postWriteRefresh, postWriteAction, documentParsingProvider);
-                if (batchResult != null) {
-                    listener.onResponse(batchResult);
-                    return;
-                }
-            } catch (Exception e) {
-                logger.info(format("failed to perform batch indexing on primary [%s]", primary.shardId()), e);
-                // Fall back to item-by-item on any error
+                batchResult = performBatchIndexOnPrimary(request, primary, postWriteRefresh, postWriteAction, documentParsingProvider);
+            } catch (IOException e) {
+                listener.onFailure(e);
+                return;
+            }
+            if (batchResult != null) {
+                listener.onResponse(batchResult);
+                return;
             }
         }
         ClusterStateObserver observer = new ClusterStateObserver(clusterService, request.timeout(), logger, threadPool.getThreadContext());
@@ -781,7 +782,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     }
 
     // Maximum number of operations to parse and index in a single pass to bound memory usage.
-    static final int BATCH_CHUNK_SIZE = 512;
+    static final int BATCH_CHUNK_SIZE = 32;
 
     static WritePrimaryResult<BulkShardRequest, BulkShardResponse> performBatchIndexOnPrimary(
         BulkShardRequest request,
