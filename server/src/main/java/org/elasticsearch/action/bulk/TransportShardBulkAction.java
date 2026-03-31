@@ -198,16 +198,28 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             ),
             outerListener
         );
+        BulkPrimaryExecutionContext batchContext = null;
+        long startBatchTime = System.nanoTime();
         if (canUseBatchIndexing(request)) {
-            WritePrimaryResult<BulkShardRequest, BulkShardResponse> batchResult;
             try {
-                batchResult = performBatchIndexOnPrimary(request, primary, postWriteRefresh, postWriteAction, documentParsingProvider);
+                batchContext = performBatchIndexOnPrimary(request, primary, documentParsingProvider);
             } catch (IOException e) {
                 listener.onFailure(e);
                 return;
             }
-            if (batchResult != null) {
-                listener.onResponse(batchResult);
+            if (batchContext.hasMoreOperationsToExecute() == false) {
+                primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBatchTime);
+                listener.onResponse(
+                    new WritePrimaryResult<>(
+                        request,
+                        batchContext.buildShardResponse(),
+                        batchContext.getLocationToSync(),
+                        primary,
+                        logger,
+                        postWriteRefresh,
+                        postWriteAction
+                    )
+                );
                 return;
             }
         }
@@ -235,7 +247,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             var index = primary.shardId().getIndex();
             var indexMetadata = clusterState.metadata().lookupProject(index).map(p -> p.index(index)).orElse(null);
             return indexMetadata == null || (indexMetadata.mapping() != null && indexMetadata.getMappingVersion() != initialMappingVersion);
-        }), listener, executor(primary), postWriteRefresh, postWriteAction, documentParsingProvider);
+        }), listener, executor(primary), postWriteRefresh, postWriteAction, documentParsingProvider, batchContext, startBatchTime);
     }
 
     @Override
@@ -296,11 +308,39 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         @Nullable Consumer<Runnable> postWriteAction,
         DocumentParsingProvider documentParsingProvider
     ) {
+        performOnPrimary(
+            request,
+            primary,
+            updateHelper,
+            nowInMillisSupplier,
+            mappingUpdater,
+            waitForMappingUpdate,
+            listener,
+            executor,
+            postWriteRefresh,
+            postWriteAction,
+            documentParsingProvider,
+            new BulkPrimaryExecutionContext(request, primary),
+            System.nanoTime()
+        );
+    }
+
+    private static void performOnPrimary(
+        BulkShardRequest request,
+        IndexShard primary,
+        UpdateHelper updateHelper,
+        LongSupplier nowInMillisSupplier,
+        MappingUpdatePerformer mappingUpdater,
+        ObjLongConsumer<ActionListener<Void>> waitForMappingUpdate,
+        ActionListener<PrimaryResult<BulkShardRequest, BulkShardResponse>> listener,
+        Executor executor,
+        @Nullable PostWriteRefresh postWriteRefresh,
+        @Nullable Consumer<Runnable> postWriteAction,
+        DocumentParsingProvider documentParsingProvider,
+        BulkPrimaryExecutionContext context,
+        long startBulkTime
+    ) {
         new ActionRunnable<>(listener) {
-
-            private final BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(request, primary);
-
-            final long startBulkTime = System.nanoTime();
 
             private final ActionListener<Void> onMappingUpdateDone = ActionListener.wrap(v -> executor.execute(this), this::onRejection);
 
@@ -784,28 +824,31 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     // Maximum number of operations to parse and index in a single pass to bound memory usage.
     static final int BATCH_CHUNK_SIZE = 32;
 
-    static WritePrimaryResult<BulkShardRequest, BulkShardResponse> performBatchIndexOnPrimary(
+    /**
+     * Attempts batch indexing on primary. Returns a fully-advanced context on success, or a partially-advanced
+     * context (positioned at the first unprocessed item) if bailing out. The caller must check
+     * {@link BulkPrimaryExecutionContext#hasMoreOperationsToExecute()} to determine whether the sequential
+     * fallback path is needed for the remaining items.
+     */
+    static BulkPrimaryExecutionContext performBatchIndexOnPrimary(
         BulkShardRequest request,
         IndexShard primary,
-        @Nullable PostWriteRefresh postWriteRefresh,
-        @Nullable Consumer<Runnable> postWriteAction,
         DocumentParsingProvider documentParsingProvider
     ) throws IOException {
-        long startNanos = System.nanoTime();
         final BulkItemRequest[] items = request.items();
+        final BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(request, primary);
 
         // Check for aborted items upfront
         for (BulkItemRequest item : items) {
             if (item.getPrimaryResponse() != null
                 && item.getPrimaryResponse().isFailed()
                 && item.getPrimaryResponse().getFailure().isAborted()) {
-                return null;
+                return context;
             }
         }
 
         // Process in chunks to bound memory: parse + index BATCH_CHUNK_SIZE docs at a time,
         // allowing previous chunks' parsed docs to be GC'd before parsing the next chunk.
-        final BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(request, primary);
         final Set<BytesRef> seenUids = new HashSet<>(Math.min(items.length, BATCH_CHUNK_SIZE));
 
         for (int chunkStart = 0; chunkStart < items.length; chunkStart += BATCH_CHUNK_SIZE) {
@@ -843,16 +886,16 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                         indexRequest.isRetry(),
                         indexRequest.ifSeqNo(),
                         indexRequest.ifPrimaryTerm(),
-                        startNanos
+                        primary.getRelativeTimeInNanos()
                     );
                 } catch (Exception e) {
-                    return null;
+                    return context;
                 }
                 if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
-                    return null;
+                    return context;
                 }
                 if (seenUids.add(operation.uid()) == false) {
-                    return null;
+                    return context;
                 }
                 operations.add(operation);
             }
@@ -867,16 +910,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             }
         }
 
-        primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startNanos);
-        return new WritePrimaryResult<>(
-            request,
-            context.buildShardResponse(),
-            context.getLocationToSync(),
-            primary,
-            logger,
-            postWriteRefresh,
-            postWriteAction
-        );
+        return context;
     }
 
     /**

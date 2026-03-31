@@ -1142,7 +1142,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     }
 
     private List<Engine.IndexResult> indexBatch(Engine engine, List<Engine.Index> operations) throws IOException {
-        List<Engine.Index> preIndexOps = new java.util.ArrayList<>(operations.size());
+        List<Engine.Index> preIndexOps = new ArrayList<>(operations.size());
         for (Engine.Index op : operations) {
             preIndexOps.add(indexingOperationListeners.preIndex(shardId, op));
         }
