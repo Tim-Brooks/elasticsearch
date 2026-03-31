@@ -198,11 +198,11 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             ),
             outerListener
         );
-        BulkPrimaryExecutionContext batchContext = null;
+        final BulkPrimaryExecutionContext batchContext = new BulkPrimaryExecutionContext(request, primary);
         long startBatchTime = System.nanoTime();
         if (canUseBatchIndexing(request)) {
             try {
-                batchContext = performBatchIndexOnPrimary(request, primary, documentParsingProvider);
+                performBatchIndexOnPrimary(request, primary, documentParsingProvider, batchContext);
             } catch (IOException e) {
                 listener.onFailure(e);
                 return;
@@ -830,20 +830,20 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
      * {@link BulkPrimaryExecutionContext#hasMoreOperationsToExecute()} to determine whether the sequential
      * fallback path is needed for the remaining items.
      */
-    static BulkPrimaryExecutionContext performBatchIndexOnPrimary(
+    static void performBatchIndexOnPrimary(
         BulkShardRequest request,
         IndexShard primary,
-        DocumentParsingProvider documentParsingProvider
+        DocumentParsingProvider documentParsingProvider,
+        final BulkPrimaryExecutionContext context
     ) throws IOException {
         final BulkItemRequest[] items = request.items();
-        final BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(request, primary);
 
         // Check for aborted items upfront
         for (BulkItemRequest item : items) {
             if (item.getPrimaryResponse() != null
                 && item.getPrimaryResponse().isFailed()
                 && item.getPrimaryResponse().getFailure().isAborted()) {
-                return context;
+                return;
             }
         }
 
@@ -889,13 +889,13 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                         primary.getRelativeTimeInNanos()
                     );
                 } catch (Exception e) {
-                    return context;
+                    return;
                 }
                 if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
-                    return context;
+                    return;
                 }
                 if (seenUids.add(operation.uid()) == false) {
-                    return context;
+                    return;
                 }
                 operations.add(operation);
             }
@@ -908,9 +908,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 context.markOperationAsExecuted(result);
                 context.markAsCompleted(context.getExecutionResult());
             }
+            seenUids.clear();
         }
-
-        return context;
     }
 
     /**
