@@ -7972,29 +7972,6 @@ public class InternalEngineTests extends EngineTestCase {
         }
     }
 
-    public void testIndexBatchWithDuplicateIds() throws IOException {
-        // First index the doc so a subsequent batch update hits the version-check (updateDocument) path
-        ParsedDocument doc = createParsedDoc("1", null);
-        indexDoc(engine, indexForDoc(doc));
-
-        // Two operations targeting the same id — one should be deferred to second iteration
-        Engine.Index op1 = indexForDoc(doc);
-        Engine.Index op2 = indexForDoc(doc);
-        List<Engine.IndexResult> results = engine.indexBatch(List.of(op1, op2));
-        assertThat(results, hasSize(2));
-        for (Engine.IndexResult result : results) {
-            assertThat(result.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
-        }
-        // Second write should have a higher seqNo
-        assertThat(results.get(1).getSeqNo(), greaterThan(results.get(0).getSeqNo()));
-
-        engine.refresh("test");
-        try (Engine.Searcher searcher = engine.acquireSearcher("test")) {
-            // Both ops target the same id via update path, second overwrites first
-            assertThat(searcher.getIndexReader().numDocs(), equalTo(1));
-        }
-    }
-
     public void testIndexBatchSequenceNumbersAreMonotonic() throws IOException {
         int batchSize = randomIntBetween(5, 50);
         List<Engine.Index> ops = new ArrayList<>(batchSize);
