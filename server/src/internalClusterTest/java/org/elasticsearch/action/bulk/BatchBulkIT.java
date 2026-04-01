@@ -35,7 +35,7 @@ import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertNoFa
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertResponse;
 import static org.hamcrest.Matchers.equalTo;
 
-@ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.TEST, numDataNodes = 2, numClientNodes = 1)
+@ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.SUITE, numDataNodes = 2, numClientNodes = 1)
 public class BatchBulkIT extends ESIntegTestCase {
 
     private void createBatchIndex(String index, int shards, int replicas) throws IOException {
@@ -61,15 +61,14 @@ public class BatchBulkIT extends ESIntegTestCase {
             // Wrap everything in _doc
             mapping.startObject("_doc");
             {
-                // 1. Move synthetic source configuration here (it's safer than the setting)
                 mapping.startObject("_source");
                 mapping.field("mode", "synthetic");
                 mapping.endObject();
 
-                // 2. Set Dynamic Mapping to Strict
+                // Set Dynamic Mapping to Strict
                 mapping.field("dynamic", "strict");
 
-                // 3. Define Properties
+                // Define Properties
                 mapping.startObject("properties");
                 {
                     mapping.startObject("name").field("type", "keyword").endObject();
@@ -402,16 +401,13 @@ public class BatchBulkIT extends ESIntegTestCase {
     @SuppressWarnings("unchecked")
     public void testDynamicMappingsViaBatchMode() throws IOException {
         String index = "test-batch-dynamic";
-        // Create index with dynamic:true (default), synthetic source, and column_batch_index enabled.
+        // Create index with dynamic:true (default)
         // Only map @timestamp — everything else needs dynamic mapping.
         XContentBuilder mapping = JsonXContent.contentBuilder();
         mapping.startObject();
         {
             mapping.startObject("_doc");
             {
-                mapping.startObject("_source");
-                mapping.field("mode", "synthetic");
-                mapping.endObject();
                 mapping.startObject("properties");
                 {
                     mapping.startObject("@timestamp").field("type", "date").endObject();
@@ -573,10 +569,8 @@ public class BatchBulkIT extends ESIntegTestCase {
     @SuppressWarnings("unchecked")
     public void testDynamicMappingsWithArrayField() throws IOException {
         String index = "test-batch-dynamic-array";
-        // Create index with dynamic:true, stored source, and column_batch_index enabled.
+        // Create index with dynamic:true
         // Only map @timestamp — array fields need dynamic mapping.
-        // Note: we use stored source (not synthetic) because synthetic source has limitations
-        // with dynamically mapped text/long arrays.
         XContentBuilder mapping = JsonXContent.contentBuilder();
         mapping.startObject();
         {
@@ -652,7 +646,6 @@ public class BatchBulkIT extends ESIntegTestCase {
         String index = "test-batch-dynamic-false";
 
         // Create index with dynamic=false so unmapped fields are ignored (not rejected, not dynamically mapped).
-        // The batch path should NOT fall back to serial for unmapped fields when dynamic=false.
         XContentBuilder mapping = JsonXContent.contentBuilder();
         mapping.startObject();
         {
@@ -729,7 +722,7 @@ public class BatchBulkIT extends ESIntegTestCase {
     public void testTimeSeriesIndexViaBatchMode() throws IOException {
         String index = "test-batch-tsdb";
 
-        // Create a time series index with batch mode enabled
+        // Create a time series index
         XContentBuilder mapping = JsonXContent.contentBuilder();
         mapping.startObject();
         {
@@ -830,7 +823,7 @@ public class BatchBulkIT extends ESIntegTestCase {
     public void testBatchModeWithIpArrayField() throws IOException {
         String index = "test-batch-ip-array";
 
-        // Create index with strict mapping, synthetic source, and an ip field
+        // Create index with strict mapping
         XContentBuilder mapping = JsonXContent.contentBuilder();
         mapping.startObject();
         {
@@ -1115,7 +1108,7 @@ public class BatchBulkIT extends ESIntegTestCase {
     }
 
     /**
-     * Reproduces the bug where different documents in a batch have different metric fields,
+     * Reproduces the scenario where different documents in a batch have different metric fields,
      * each with their own dynamic template assignments. The batch path was only reading
      * dynamic templates from the first IndexRequest, so fields that only appeared in later
      * documents would get default mappings (without time_series_metric) instead of the
@@ -1304,9 +1297,8 @@ public class BatchBulkIT extends ESIntegTestCase {
         String index = "test-batch-runtime";
 
         // Create index with dynamic=runtime so unmapped fields become runtime fields.
-        // The first bulk triggers dynamic mapping creation (serial path).
-        // The second bulk should use the batch path since runtime fields are already created
-        // and do NOT require a dynamic mapping update.
+        // The first bulk triggers dynamic mapping creation.
+        // The second bulk should NOT require a dynamic mapping update.
         XContentBuilder mapping = JsonXContent.contentBuilder();
         mapping.startObject();
         {

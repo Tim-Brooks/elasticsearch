@@ -1424,7 +1424,7 @@ public class InternalEngine extends Engine {
         final Index[] subBatchOps = new Index[subBatchSize];
         final IndexingStrategy[] plans = new IndexingStrategy[subBatchSize];
 
-        // Phase A: Plan each operation using the same logic as the sequential index() path.
+        // Indexing Plan
         int reservedDocs = 0;
         long maxStartNanos = lastWriteNanos;
         for (int i = 0; i < subBatchSize; i++) {
@@ -1441,7 +1441,7 @@ public class InternalEngine extends Engine {
         lastWriteNanos = maxStartNanos;
 
         try {
-            // Phase D: Generate seqNos and collect append docs
+            // Create Indexing Operation
             for (int i = 0; i < subBatchSize; i++) {
                 Index index = subBatchOps[i];
                 IndexingStrategy plan = plans[i];
@@ -1484,7 +1484,7 @@ public class InternalEngine extends Engine {
                 assert index.seqNo() >= 0 : "ops should have an assigned seq no.; origin: " + index.origin();
             }
 
-            // Step 3: Write to Lucene
+            // Lucene
             for (int i = 0; i < subBatchSize; i++) {
                 int originalIdx = subBatchIdx + i;
                 if (allResults[originalIdx] != null) {
@@ -1508,7 +1508,7 @@ public class InternalEngine extends Engine {
                 }
             }
 
-            // Step 5: Write individual translog entries
+            // Translog
             if (fromTranslog == false) {
                 for (int i = 0; i < subBatchSize; i++) {
                     Index index = subBatchOps[i];
@@ -1534,7 +1534,7 @@ public class InternalEngine extends Engine {
                 }
             }
 
-            // Step 6: Update versionMap and checkpoint tracker
+            // Update versionMap and checkpoint tracker
             for (int i = 0; i < subBatchSize; i++) {
                 IndexingStrategy plan = plans[i];
                 Index index = subBatchOps[i];
