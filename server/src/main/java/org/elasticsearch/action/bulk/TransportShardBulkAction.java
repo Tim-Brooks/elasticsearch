@@ -203,7 +203,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         if (canUseBatchIndexing(request)) {
             try {
                 performBatchIndexOnPrimary(request, primary, documentParsingProvider, batchContext);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 listener.onFailure(e);
                 return;
             }
@@ -840,9 +840,9 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
      * fallback path is needed for the remaining items.
      */
     static void performBatchIndexOnPrimary(
-        BulkShardRequest request,
-        IndexShard primary,
-        DocumentParsingProvider documentParsingProvider,
+        final BulkShardRequest request,
+        final IndexShard primary,
+        final DocumentParsingProvider documentParsingProvider,
         final BulkPrimaryExecutionContext context
     ) throws IOException {
         final BulkItemRequest[] items = request.items();
@@ -856,10 +856,11 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             }
         }
 
-        // Process in chunks to bound memory: parse + index BATCH_CHUNK_SIZE docs at a time,
-        // allowing previous chunks' parsed docs to be GC'd before parsing the next chunk.
+        // TODO: Required because VerionLock is re-entrant. We likely can switch that to be semaphore based and remove this protection
         final Set<BytesRef> seenUids = new HashSet<>(Math.min(items.length, BATCH_CHUNK_SIZE));
 
+        // Process in chunks to bound memory: parse + index BATCH_CHUNK_SIZE docs at a time,
+        // allowing previous chunks' parsed docs to be GC'd before parsing the next chunk.
         for (int chunkStart = 0; chunkStart < items.length; chunkStart += BATCH_CHUNK_SIZE) {
             final int chunkEnd = Math.min(chunkStart + BATCH_CHUNK_SIZE, items.length);
             final int chunkSize = chunkEnd - chunkStart;
@@ -928,6 +929,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
      */
     static ReplicaBatchResult performBatchIndexOnReplica(BulkShardRequest request, IndexShard replica) throws Exception {
         final BulkItemRequest[] items = request.items();
+        // TODO: Required because VerionLock is re-entrant. We likely can switch that to be semaphore based and remove this protection
         final Set<BytesRef> seenUids = new HashSet<>(Math.min(items.length, BATCH_CHUNK_SIZE));
         Translog.Location location = null;
         int processedItems = 0;

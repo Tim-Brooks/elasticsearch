@@ -1144,11 +1144,13 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     private List<Engine.IndexResult> indexBatch(Engine engine, List<Engine.Index> operations) throws IOException {
         List<Engine.Index> preIndexOps = new ArrayList<>(operations.size());
+        // TODO: Right now the only production users are stats. Should add batch listener.
         for (Engine.Index op : operations) {
             preIndexOps.add(indexingOperationListeners.preIndex(shardId, op));
         }
         try {
             List<Engine.IndexResult> results = engine.indexBatch(preIndexOps);
+            // TODO: Look at if these can be batch optimized
             for (int i = 0; i < results.size(); i++) {
                 indexingOperationListeners.postIndex(shardId, preIndexOps.get(i), results.get(i));
             }
