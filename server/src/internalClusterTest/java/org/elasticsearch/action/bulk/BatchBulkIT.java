@@ -38,6 +38,14 @@ import static org.hamcrest.Matchers.equalTo;
 @ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.SUITE, numDataNodes = 2, numClientNodes = 1)
 public class BatchBulkIT extends ESIntegTestCase {
 
+    @Override
+    protected Settings nodeSettings(int nodeOrdinal, Settings otherSettings) {
+        return Settings.builder()
+            .put(super.nodeSettings(nodeOrdinal, otherSettings))
+            .put(TransportShardBulkAction.BATCH_INDEXING.getKey(), true)
+            .build();
+    }
+
     private void createBatchIndex(String index, int shards, int replicas) throws IOException {
         XContentBuilder mapping = getMapping();
         assertAcked(

@@ -39,6 +39,7 @@ import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.common.xcontent.XContentHelper;
@@ -81,6 +82,7 @@ import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.function.ObjLongConsumer;
 
+import static org.elasticsearch.common.settings.Setting.boolSetting;
 import static org.elasticsearch.core.Strings.format;
 
 /** Performs shard-level bulk (index, delete or update) operations */
@@ -92,6 +94,13 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     private static final Logger logger = LogManager.getLogger(TransportShardBulkAction.class);
 
     public static final FeatureFlag BATCH_INDEXING_FEATURE_FLAG = new FeatureFlag("batch_indexing");
+    public static final Setting<Boolean> BATCH_INDEXING = boolSetting("indices.batch_indexing", false, value -> {
+        if (value && BATCH_INDEXING_FEATURE_FLAG.isEnabled() == false) {
+            throw new IllegalArgumentException(
+                "[indices.batch_indexing] can only be enabled when the batch_indexing feature flag is enabled"
+            );
+        }
+    }, Setting.Property.NodeScope);
 
     // Represents the maximum memory overhead factor for an operation when processed for indexing.
     // This accounts for potential increases in memory usage due to document expansion, including:
@@ -103,6 +112,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     private final UpdateHelper updateHelper;
     private final MappingUpdatedAction mappingUpdatedAction;
     private final Consumer<Runnable> postWriteAction;
+    private final boolean batchIndexingEnabled;
 
     private final DocumentParsingProvider documentParsingProvider;
 
@@ -143,6 +153,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         this.updateHelper = updateHelper;
         this.mappingUpdatedAction = mappingUpdatedAction;
         this.postWriteAction = WriteAckDelay.create(settings, threadPool);
+        this.batchIndexingEnabled = BATCH_INDEXING.get(settings);
         this.documentParsingProvider = documentParsingProvider;
     }
 
@@ -200,7 +211,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         );
         final BulkPrimaryExecutionContext batchContext = new BulkPrimaryExecutionContext(request, primary);
         long startBatchTime = System.nanoTime();
-        if (canUseBatchIndexing(request)) {
+        if (canUseBatchIndexing(request, batchIndexingEnabled)) {
             try {
                 performBatchIndexOnPrimary(request, primary, documentParsingProvider, batchContext);
             } catch (Exception e) {
@@ -739,7 +750,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         ActionListener.completeWith(listener, () -> {
             final long startBulkTime = System.nanoTime();
             final Translog.Location location;
-            if (canUseBatchIndexing(request)) {
+            if (canUseBatchIndexing(request, batchIndexingEnabled)) {
                 ReplicaBatchResult batchResult = performBatchIndexOnReplica(request, replica);
                 if (batchResult.processedItems() < request.items().length) {
                     location = performOnReplica(request, replica, batchResult.processedItems(), batchResult.location());
@@ -815,10 +826,10 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
 
     /**
      * Checks whether the batch indexing path can be used for this request.
-     * Returns true if the feature flag is enabled and all operations are index/create (no deletes, no updates).
+     * Returns true if batch indexing is enabled and all operations are index/create (no deletes, no updates).
      */
-    static boolean canUseBatchIndexing(BulkShardRequest request) {
-        if (BATCH_INDEXING_FEATURE_FLAG.isEnabled() == false) {
+    static boolean canUseBatchIndexing(BulkShardRequest request, boolean batchIndexingEnabled) {
+        if (batchIndexingEnabled == false) {
             return false;
         }
         for (BulkItemRequest item : request.items()) {
