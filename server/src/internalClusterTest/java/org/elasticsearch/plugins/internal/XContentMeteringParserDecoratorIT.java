@@ -38,7 +38,7 @@ import static org.hamcrest.Matchers.equalTo;
 @ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.TEST)
 public class XContentMeteringParserDecoratorIT extends ESIntegTestCase {
 
-    private static String TEST_INDEX_NAME = "test-index-name";
+    private static final String TEST_INDEX_NAME = "test-index-name";
 
     @Override
     protected boolean addMockInternalEngine() {
@@ -110,7 +110,7 @@ public class XContentMeteringParserDecoratorIT extends ESIntegTestCase {
 
                 @Override
                 public java.util.List<IndexResult> indexBatch(java.util.List<Index> operations) throws IOException {
-                    java.util.List<IndexResult> results = super.indexBatch(operations);
+                    List<IndexResult> results = super.indexBatch(operations);
                     for (Index op : operations) {
                         reportDocumentSize(op.parsedDoc());
                     }
