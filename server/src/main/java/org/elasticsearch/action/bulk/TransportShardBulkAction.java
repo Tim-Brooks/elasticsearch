@@ -12,7 +12,6 @@ package org.elasticsearch.action.bulk;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRunnable;
@@ -39,9 +38,7 @@ import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
-import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Strings;
@@ -72,17 +69,12 @@ import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.function.ObjLongConsumer;
 
-import static org.elasticsearch.common.settings.Setting.boolSetting;
 import static org.elasticsearch.core.Strings.format;
 
 /** Performs shard-level bulk (index, delete or update) operations */
@@ -92,15 +84,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     public static final ActionType<BulkShardResponse> TYPE = new ActionType<>(ACTION_NAME);
 
     private static final Logger logger = LogManager.getLogger(TransportShardBulkAction.class);
-
-    public static final FeatureFlag BATCH_INDEXING_FEATURE_FLAG = new FeatureFlag("batch_indexing");
-    public static final Setting<Boolean> BATCH_INDEXING = boolSetting("indices.batch_indexing", false, value -> {
-        if (value && BATCH_INDEXING_FEATURE_FLAG.isEnabled() == false) {
-            throw new IllegalArgumentException(
-                "[indices.batch_indexing] can only be enabled when the batch_indexing feature flag is enabled"
-            );
-        }
-    }, Setting.Property.NodeScope);
 
     // Represents the maximum memory overhead factor for an operation when processed for indexing.
     // This accounts for potential increases in memory usage due to document expansion, including:
@@ -153,7 +136,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         this.updateHelper = updateHelper;
         this.mappingUpdatedAction = mappingUpdatedAction;
         this.postWriteAction = WriteAckDelay.create(settings, threadPool);
-        this.batchIndexingEnabled = BATCH_INDEXING.get(settings);
+        this.batchIndexingEnabled = ShardBatchIndexer.BATCH_INDEXING.get(settings);
         this.documentParsingProvider = documentParsingProvider;
     }
 
@@ -209,32 +192,51 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             ),
             outerListener
         );
-        final BulkPrimaryExecutionContext batchContext = new BulkPrimaryExecutionContext(request, primary);
+        final BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(request, primary);
         long startBatchTime = System.nanoTime();
-        if (canUseBatchIndexing(request, batchIndexingEnabled)) {
-            try {
-                performBatchIndexOnPrimary(request, primary, documentParsingProvider, batchContext);
-            } catch (Exception e) {
-                listener.onFailure(e);
-                return;
-            }
-            if (batchContext.hasMoreOperationsToExecute() == false) {
-                primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBatchTime);
-                listener.onResponse(
-                    new WritePrimaryResult<>(
-                        request,
-                        batchContext.buildShardResponse(),
-                        batchContext.getLocationToSync(),
-                        primary,
-                        logger,
-                        postWriteRefresh,
-                        postWriteAction
-                    )
-                );
-                return;
-            }
+        if (ShardBatchIndexer.canUseBatchIndexing(request, batchIndexingEnabled)) {
+            ShardBatchIndexer.performBatchIndexOnPrimary(
+                request,
+                documentParsingProvider,
+                context,
+                listener.delegateFailure((delegate, ctx) -> {
+                    if (context.hasMoreOperationsToExecute() == false) {
+                        primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBatchTime);
+                        delegate.onResponse(
+                            new WritePrimaryResult<>(
+                                request,
+                                context.buildShardResponse(),
+                                context.getLocationToSync(),
+                                primary,
+                                logger,
+                                postWriteRefresh,
+                                postWriteAction
+                            )
+                        );
+                    } else {
+                        // Fall through to serial path for remaining items
+                        performSequentialOnPrimary(request, delegate, context, startBatchTime);
+                    }
+                })
+            );
+        } else {
+            performSequentialOnPrimary(request, listener, context, startBatchTime);
         }
-        ClusterStateObserver observer = new ClusterStateObserver(clusterService, request.timeout(), logger, threadPool.getThreadContext());
+    }
+
+    private void performSequentialOnPrimary(
+        final BulkShardRequest request,
+        final ActionListener<PrimaryResult<BulkShardRequest, BulkShardResponse>> listener,
+        final BulkPrimaryExecutionContext batchContext,
+        long startBatchTime
+    ) {
+        final IndexShard primary = batchContext.getPrimary();
+        final ClusterStateObserver observer = new ClusterStateObserver(
+            clusterService,
+            request.timeout(),
+            logger,
+            threadPool.getThreadContext()
+        );
         performOnPrimary(request, primary, updateHelper, threadPool::absoluteTimeInMillis, (update, shardId, mappingListener) -> {
             assert update != null;
             assert shardId != null;
@@ -750,8 +752,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         ActionListener.completeWith(listener, () -> {
             final long startBulkTime = System.nanoTime();
             final Translog.Location location;
-            if (canUseBatchIndexing(request, batchIndexingEnabled)) {
-                ReplicaBatchResult batchResult = performBatchIndexOnReplica(request, replica);
+            if (ShardBatchIndexer.canUseBatchIndexing(request, batchIndexingEnabled)) {
+                ShardBatchIndexer.ReplicaBatchResult batchResult = ShardBatchIndexer.performBatchIndexOnReplica(request, replica);
                 if (batchResult.processedItems() < request.items().length) {
                     location = performOnReplica(request, replica, batchResult.processedItems(), batchResult.location());
                 } else {
@@ -824,198 +826,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         return location;
     }
 
-    /**
-     * Checks whether the batch indexing path can be used for this request.
-     * Returns true if batch indexing is enabled and all operations are index/create (no deletes, no updates).
-     */
-    static boolean canUseBatchIndexing(BulkShardRequest request, boolean batchIndexingEnabled) {
-        if (batchIndexingEnabled == false) {
-            return false;
-        }
-        for (BulkItemRequest item : request.items()) {
-            final DocWriteRequest.OpType opType = item.request().opType();
-            if (opType != DocWriteRequest.OpType.INDEX && opType != DocWriteRequest.OpType.CREATE) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // Maximum number of operations to parse and index in a single pass to bound memory usage.
-    static final int BATCH_CHUNK_SIZE = 32;
-
-    /**
-     * Attempts batch indexing on primary. Returns a fully-advanced context on success, or a partially-advanced
-     * context (positioned at the first unprocessed item) if bailing out. The caller must check
-     * {@link BulkPrimaryExecutionContext#hasMoreOperationsToExecute()} to determine whether the sequential
-     * fallback path is needed for the remaining items.
-     */
-    static void performBatchIndexOnPrimary(
-        final BulkShardRequest request,
-        final IndexShard primary,
-        final DocumentParsingProvider documentParsingProvider,
-        final BulkPrimaryExecutionContext context
-    ) throws IOException {
-        final BulkItemRequest[] items = request.items();
-
-        // Check for aborted items upfront
-        for (BulkItemRequest item : items) {
-            if (item.getPrimaryResponse() != null
-                && item.getPrimaryResponse().isFailed()
-                && item.getPrimaryResponse().getFailure().isAborted()) {
-                return;
-            }
-        }
-
-        // TODO: Required because VerionLock is re-entrant. We likely can switch that to be semaphore based and remove this protection
-        final Set<BytesRef> seenUids = new HashSet<>(Math.min(items.length, BATCH_CHUNK_SIZE));
-
-        // Process in chunks to bound memory: parse + index BATCH_CHUNK_SIZE docs at a time,
-        // allowing previous chunks' parsed docs to be GC'd before parsing the next chunk.
-        for (int chunkStart = 0; chunkStart < items.length; chunkStart += BATCH_CHUNK_SIZE) {
-            final int chunkEnd = Math.min(chunkStart + BATCH_CHUNK_SIZE, items.length);
-            final int chunkSize = chunkEnd - chunkStart;
-            final List<Engine.Index> operations = new ArrayList<>(chunkSize);
-
-            for (int i = chunkStart; i < chunkEnd; i++) {
-                final IndexRequest indexRequest = (IndexRequest) items[i].request();
-                final XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(
-                    indexRequest
-                );
-                final SourceToParse sourceToParse = new SourceToParse(
-                    indexRequest.id(),
-                    indexRequest.source(),
-                    indexRequest.getContentType(),
-                    indexRequest.routing(),
-                    indexRequest.getDynamicTemplates(),
-                    indexRequest.getDynamicTemplateParams(),
-                    indexRequest.getIncludeSourceOnError(),
-                    meteringParserDecorator,
-                    indexRequest.tsid()
-                );
-                Engine.Index operation;
-                try {
-                    operation = IndexShard.prepareIndex(
-                        primary.mapperService(),
-                        sourceToParse,
-                        SequenceNumbers.UNASSIGNED_SEQ_NO,
-                        primary.getOperationPrimaryTerm(),
-                        indexRequest.version(),
-                        indexRequest.versionType(),
-                        Engine.Operation.Origin.PRIMARY,
-                        indexRequest.getAutoGeneratedTimestamp(),
-                        indexRequest.isRetry(),
-                        indexRequest.ifSeqNo(),
-                        indexRequest.ifPrimaryTerm(),
-                        primary.getRelativeTimeInNanos()
-                    );
-                } catch (Exception e) {
-                    return;
-                }
-                if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
-                    return;
-                }
-                if (seenUids.add(operation.uid()) == false) {
-                    return;
-                }
-                operations.add(operation);
-            }
-
-            final List<Engine.IndexResult> results = primary.applyIndexOperationBatchOnPrimary(operations);
-
-            for (Engine.IndexResult result : results) {
-                assert context.hasMoreOperationsToExecute();
-                context.setRequestToExecute(context.getCurrent());
-                context.markOperationAsExecuted(result);
-                context.markAsCompleted(context.getExecutionResult());
-            }
-            seenUids.clear();
-        }
-    }
-
-    /**
-     * Performs a batch index on a replica. Returns the number of items processed from the start of the request's
-     * items array. The caller should fall back to the item-by-item path for any remaining items.
-     * The returned location may be null if no operations produced a translog location.
-     */
-    static ReplicaBatchResult performBatchIndexOnReplica(BulkShardRequest request, IndexShard replica) throws Exception {
-        final BulkItemRequest[] items = request.items();
-        // TODO: Required because VerionLock is re-entrant. We likely can switch that to be semaphore based and remove this protection
-        final Set<BytesRef> seenUids = new HashSet<>(Math.min(items.length, BATCH_CHUNK_SIZE));
-        Translog.Location location = null;
-        int processedItems = 0;
-
-        for (int chunkStart = 0; chunkStart < items.length; chunkStart += BATCH_CHUNK_SIZE) {
-            final int chunkEnd = Math.min(chunkStart + BATCH_CHUNK_SIZE, items.length);
-            final List<Engine.Index> operations = new ArrayList<>(chunkEnd - chunkStart);
-
-            int i = chunkStart;
-            while (i < chunkEnd) {
-                final BulkItemRequest item = items[i];
-                final BulkItemResponse response = item.getPrimaryResponse();
-
-                if (response.isFailed()) {
-                    break;
-                }
-                if (response.getResponse().getResult() == DocWriteResponse.Result.NOOP) {
-                    i++;
-                    continue;
-                }
-                assert response.getResponse().getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO;
-
-                final IndexRequest indexRequest = (IndexRequest) item.request();
-                final DocWriteResponse primaryResponse = response.getResponse();
-                final SourceToParse sourceToParse = replicaSourceToParse(indexRequest);
-                Engine.Index operation;
-                try {
-                    operation = IndexShard.prepareIndex(
-                        replica.mapperService(),
-                        sourceToParse,
-                        primaryResponse.getSeqNo(),
-                        primaryResponse.getPrimaryTerm(),
-                        primaryResponse.getVersion(),
-                        null,
-                        Engine.Operation.Origin.REPLICA,
-                        indexRequest.getAutoGeneratedTimestamp(),
-                        indexRequest.isRetry(),
-                        SequenceNumbers.UNASSIGNED_SEQ_NO,
-                        0,
-                        replica.getRelativeTimeInNanos()
-                    );
-                } catch (Exception e) {
-                    break;
-                }
-                if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
-                    break;
-                }
-                if (seenUids.add(operation.uid()) == false) {
-                    break;
-                }
-                operations.add(operation);
-                i++;
-            }
-
-            if (operations.isEmpty() == false) {
-                final List<Engine.IndexResult> results = replica.applyIndexOperationBatchOnReplica(operations);
-                for (Engine.IndexResult result : results) {
-                    location = syncOperationResultOrThrow(result, location);
-                }
-            }
-
-            if (i < chunkEnd) {
-                processedItems = i;
-                break;
-            }
-
-            processedItems = chunkEnd;
-            seenUids.clear();
-        }
-
-        return new ReplicaBatchResult(processedItems, location);
-    }
-
-    record ReplicaBatchResult(int processedItems, @Nullable Translog.Location location) {}
-
     private static Engine.Result performOpOnReplica(
         DocWriteResponse primaryResponse,
         DocWriteRequest<?> docWriteRequest,
@@ -1066,7 +876,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         return result;
     }
 
-    private static SourceToParse replicaSourceToParse(IndexRequest indexRequest) {
+    static SourceToParse replicaSourceToParse(IndexRequest indexRequest) {
         return new SourceToParse(
             indexRequest.id(),
             indexRequest.source(),

@@ -42,7 +42,7 @@ public class BatchBulkIT extends ESIntegTestCase {
     protected Settings nodeSettings(int nodeOrdinal, Settings otherSettings) {
         return Settings.builder()
             .put(super.nodeSettings(nodeOrdinal, otherSettings))
-            .put(TransportShardBulkAction.BATCH_INDEXING.getKey(), true)
+            .put(ShardBatchIndexer.BATCH_INDEXING.getKey(), true)
             .build();
     }
 
