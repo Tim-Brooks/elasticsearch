@@ -15,7 +15,6 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 public class EirfRowBuilderTests extends ESTestCase {
@@ -129,19 +128,20 @@ public class EirfRowBuilderTests extends ESTestCase {
         }
     }
 
-    public void testXContentColumn() {
+    public void testKeyValueColumn() {
         try (EirfRowBuilder builder = new EirfRowBuilder()) {
-            byte[] jsonArray = "[1,2,3]".getBytes(StandardCharsets.UTF_8);
+            // KEY_VALUE with one entry: key="x", type=INT, value=42
+            byte[] kvBytes = new byte[] { 1, 'x', EirfType.INT, 0, 0, 0, 42 };
             builder.startDocument();
-            builder.setXContent("nums", new BytesArray(jsonArray));
+            builder.setKeyValue("data", kvBytes);
             builder.endDocument();
 
             EirfBatch batch = builder.build();
             EirfRowReader row0 = batch.getRowReader(0);
             byte type = row0.getTypeByte(0);
-            assertTrue(type == EirfType.SMALL_XCONTENT || type == EirfType.XCONTENT);
-            String json = new String(row0.getXContentValue(0), StandardCharsets.UTF_8);
-            assertEquals("[1,2,3]", json);
+            assertTrue(type == EirfType.SMALL_KEY_VALUE || type == EirfType.KEY_VALUE);
+            byte[] readBack = row0.getKeyValueBytes(0);
+            assertArrayEquals(kvBytes, readBack);
 
             batch.close();
         }

@@ -147,10 +147,10 @@ public class EirfRowBuilder implements Releasable {
         scratch.varData[colIdx] = new BytesArray(packed);
     }
 
-    public void setXContent(String path, BytesReference bytes) {
+    public void setKeyValue(String path, byte[] bytes) {
         int colIdx = resolveColumn(path);
-        scratch.typeBytes[colIdx] = EirfType.XCONTENT;
-        scratch.varData[colIdx] = bytes;
+        scratch.typeBytes[colIdx] = EirfType.KEY_VALUE;
+        scratch.varData[colIdx] = new BytesArray(bytes);
     }
 
     // ---- Index-based setters ----

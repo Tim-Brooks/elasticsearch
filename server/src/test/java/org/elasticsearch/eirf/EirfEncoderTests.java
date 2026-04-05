@@ -15,8 +15,8 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 
 public class EirfEncoderTests extends ESTestCase {
 
@@ -137,13 +137,13 @@ public class EirfEncoderTests extends ESTestCase {
 
         byte[] arrayData = row0.getArrayValue(0);
         EirfArray reader = new EirfArray(arrayData, true);
-        assertEquals(3, reader.count());
         assertTrue(reader.next());
         assertEquals("a", reader.stringValue());
         assertTrue(reader.next());
         assertEquals("b", reader.stringValue());
         assertTrue(reader.next());
         assertEquals("c", reader.stringValue());
+        assertFalse(reader.next());
 
         batch.close();
     }
@@ -159,7 +159,6 @@ public class EirfEncoderTests extends ESTestCase {
 
         byte[] arrayData = row0.getArrayValue(0);
         EirfArray reader = new EirfArray(arrayData, false);
-        assertEquals(3, reader.count());
 
         assertTrue(reader.next());
         assertEquals(EirfType.INT, reader.type());
@@ -171,13 +170,15 @@ public class EirfEncoderTests extends ESTestCase {
 
         assertTrue(reader.next());
         assertEquals(EirfType.TRUE, reader.type());
+        reader.advance();
+        assertFalse(reader.next());
 
         batch.close();
     }
 
-    public void testLargeArrayFallsBackToXContent() throws IOException {
+    public void testLargeArrayProducesUnionArray() throws IOException {
         StringBuilder json = new StringBuilder("{\"nums\":[");
-        for (int i = 0; i < EirfType.MAX_SMALL_ARRAY_SIZE + 1; i++) {
+        for (int i = 0; i < 100; i++) {
             if (i > 0) json.append(",");
             json.append(i);
         }
@@ -188,22 +189,63 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfRowReader row0 = batch.getRowReader(0);
         byte type = row0.getTypeByte(0);
-        assertTrue(type == EirfType.SMALL_XCONTENT || type == EirfType.XCONTENT);
+        // Large arrays (> buffer) produce UNION_ARRAY
+        assertTrue(type == EirfType.SMALL_UNION_ARRAY || type == EirfType.UNION_ARRAY);
 
-        String arrayJson = new String(row0.getXContentValue(0), StandardCharsets.UTF_8);
-        assertTrue(arrayJson.startsWith("["));
-        assertTrue(arrayJson.endsWith("]"));
+        byte[] arrayData = row0.getArrayValue(0);
+        EirfArray reader = new EirfArray(arrayData);
+        int count = 0;
+        while (reader.next()) {
+            assertEquals(EirfType.INT, reader.type());
+            assertEquals(count, reader.intValue());
+            count++;
+        }
+        assertEquals(100, count);
 
         batch.close();
     }
 
-    public void testArrayWithNestedObjectFallsBackToXContent() throws IOException {
+    public void testArrayWithNestedObjectProducesUnionArray() throws IOException {
         List<BytesReference> sources = List.of(new BytesArray("{\"items\":[{\"name\":\"a\"},{\"name\":\"b\"}]}"));
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
         byte type = batch.getRowReader(0).getTypeByte(0);
-        assertTrue(type == EirfType.SMALL_XCONTENT || type == EirfType.XCONTENT);
+        assertTrue(type == EirfType.SMALL_UNION_ARRAY || type == EirfType.UNION_ARRAY);
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testArrayWithNestedObjectRoundTrip() throws IOException {
+        List<BytesReference> sources = List.of(new BytesArray("{\"items\":[{\"name\":\"a\",\"val\":1},{\"name\":\"b\",\"val\":2}]}"));
+
+        EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
+
+        Map<String, Object> map = EirfRowToMap.toMap(batch.getRowReader(0), batch.schema());
+        List<Object> items = (List<Object>) map.get("items");
+        assertEquals(2, items.size());
+        Map<String, Object> item0 = (Map<String, Object>) items.get(0);
+        assertEquals("a", item0.get("name"));
+        assertEquals(1, item0.get("val"));
+        Map<String, Object> item1 = (Map<String, Object>) items.get(1);
+        assertEquals("b", item1.get("name"));
+        assertEquals(2, item1.get("val"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testNestedArrayInArray() throws IOException {
+        List<BytesReference> sources = List.of(new BytesArray("{\"matrix\":[[1,2],[3,4]]}"));
+
+        EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
+
+        Map<String, Object> map = EirfRowToMap.toMap(batch.getRowReader(0), batch.schema());
+        List<Object> matrix = (List<Object>) map.get("matrix");
+        assertEquals(2, matrix.size());
+        assertEquals(List.of(1, 2), matrix.get(0));
+        assertEquals(List.of(3, 4), matrix.get(1));
 
         batch.close();
     }
@@ -362,7 +404,6 @@ public class EirfEncoderTests extends ESTestCase {
 
         byte[] arrayData = row0.getArrayValue(0);
         EirfArray reader = new EirfArray(arrayData, true);
-        assertEquals(3, reader.count());
         assertTrue(reader.next());
         assertEquals(EirfType.INT, reader.type());
         assertEquals(1, reader.intValue());
@@ -370,6 +411,7 @@ public class EirfEncoderTests extends ESTestCase {
         assertEquals(2, reader.intValue());
         assertTrue(reader.next());
         assertEquals(3, reader.intValue());
+        assertFalse(reader.next());
 
         batch.close();
     }

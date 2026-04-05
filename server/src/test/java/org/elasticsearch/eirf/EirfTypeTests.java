@@ -26,7 +26,7 @@ public class EirfTypeTests extends ESTestCase {
         assertEquals(4, EirfType.fixedSize(EirfType.SMALL_BINARY));
         assertEquals(4, EirfType.fixedSize(EirfType.SMALL_UNION_ARRAY));
         assertEquals(4, EirfType.fixedSize(EirfType.SMALL_FIXED_ARRAY));
-        assertEquals(4, EirfType.fixedSize(EirfType.SMALL_XCONTENT));
+        assertEquals(4, EirfType.fixedSize(EirfType.SMALL_KEY_VALUE));
     }
 
     public void testFixedSizeEightByte() {
@@ -36,7 +36,7 @@ public class EirfTypeTests extends ESTestCase {
         assertEquals(8, EirfType.fixedSize(EirfType.BINARY));
         assertEquals(8, EirfType.fixedSize(EirfType.UNION_ARRAY));
         assertEquals(8, EirfType.fixedSize(EirfType.FIXED_ARRAY));
-        assertEquals(8, EirfType.fixedSize(EirfType.XCONTENT));
+        assertEquals(8, EirfType.fixedSize(EirfType.KEY_VALUE));
     }
 
     public void testIsSmallVariable() {
@@ -44,7 +44,7 @@ public class EirfTypeTests extends ESTestCase {
         assertTrue(EirfType.isSmallVariable(EirfType.SMALL_BINARY));
         assertTrue(EirfType.isSmallVariable(EirfType.SMALL_UNION_ARRAY));
         assertTrue(EirfType.isSmallVariable(EirfType.SMALL_FIXED_ARRAY));
-        assertTrue(EirfType.isSmallVariable(EirfType.SMALL_XCONTENT));
+        assertTrue(EirfType.isSmallVariable(EirfType.SMALL_KEY_VALUE));
         assertFalse(EirfType.isSmallVariable(EirfType.STRING));
         assertFalse(EirfType.isSmallVariable(EirfType.INT));
         assertFalse(EirfType.isSmallVariable(EirfType.NULL));
@@ -55,7 +55,7 @@ public class EirfTypeTests extends ESTestCase {
         assertTrue(EirfType.isLargeVariable(EirfType.BINARY));
         assertTrue(EirfType.isLargeVariable(EirfType.UNION_ARRAY));
         assertTrue(EirfType.isLargeVariable(EirfType.FIXED_ARRAY));
-        assertTrue(EirfType.isLargeVariable(EirfType.XCONTENT));
+        assertTrue(EirfType.isLargeVariable(EirfType.KEY_VALUE));
         assertFalse(EirfType.isLargeVariable(EirfType.SMALL_STRING));
         assertFalse(EirfType.isLargeVariable(EirfType.LONG));
     }
@@ -65,13 +65,13 @@ public class EirfTypeTests extends ESTestCase {
         assertEquals(EirfType.BINARY, EirfType.smallToLarge(EirfType.SMALL_BINARY));
         assertEquals(EirfType.UNION_ARRAY, EirfType.smallToLarge(EirfType.SMALL_UNION_ARRAY));
         assertEquals(EirfType.FIXED_ARRAY, EirfType.smallToLarge(EirfType.SMALL_FIXED_ARRAY));
-        assertEquals(EirfType.XCONTENT, EirfType.smallToLarge(EirfType.SMALL_XCONTENT));
+        assertEquals(EirfType.KEY_VALUE, EirfType.smallToLarge(EirfType.SMALL_KEY_VALUE));
 
         assertEquals(EirfType.SMALL_STRING, EirfType.largeToSmall(EirfType.STRING));
         assertEquals(EirfType.SMALL_BINARY, EirfType.largeToSmall(EirfType.BINARY));
         assertEquals(EirfType.SMALL_UNION_ARRAY, EirfType.largeToSmall(EirfType.UNION_ARRAY));
         assertEquals(EirfType.SMALL_FIXED_ARRAY, EirfType.largeToSmall(EirfType.FIXED_ARRAY));
-        assertEquals(EirfType.SMALL_XCONTENT, EirfType.largeToSmall(EirfType.XCONTENT));
+        assertEquals(EirfType.SMALL_KEY_VALUE, EirfType.largeToSmall(EirfType.KEY_VALUE));
     }
 
     public void testNameForAllTypes() {
@@ -86,7 +86,7 @@ public class EirfTypeTests extends ESTestCase {
         assertEquals("STRING", EirfType.name(EirfType.STRING));
         assertEquals("UNION_ARRAY", EirfType.name(EirfType.UNION_ARRAY));
         assertEquals("FIXED_ARRAY", EirfType.name(EirfType.FIXED_ARRAY));
-        assertEquals("XCONTENT", EirfType.name(EirfType.XCONTENT));
+        assertEquals("KEY_VALUE", EirfType.name(EirfType.KEY_VALUE));
     }
 
     public void testNameForUnknownType() {

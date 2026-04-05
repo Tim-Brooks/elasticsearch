@@ -106,7 +106,7 @@ public final class EirfRowReader {
         return result;
     }
 
-    public byte[] getXContentValue(int col) {
+    public byte[] getKeyValueBytes(int col) {
         return getBinaryValue(col);
     }
 

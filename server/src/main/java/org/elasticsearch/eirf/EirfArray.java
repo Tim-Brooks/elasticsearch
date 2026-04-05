@@ -16,23 +16,23 @@ import java.nio.charset.StandardCharsets;
 /**
  * A forward-only reader over a compact typed array in EIRF format.
  *
- * <p>Two formats:
+ * <p>Two formats (both byte-length-terminated, no element count):
  * <ul>
- *   <li><b>Union:</b> count(1) | per element: type(1) + data</li>
- *   <li><b>Fixed:</b> count(1) | element_type(1) | per element: data only</li>
+ *   <li><b>Union:</b> per element: type(1) + data</li>
+ *   <li><b>Fixed:</b> element_type(1) + per element: data only</li>
  * </ul>
  *
  * <p>Element data sizes: INT/FLOAT=4 bytes, LONG/DOUBLE=8 bytes,
- * STRING=4 bytes length + UTF-8 bytes, NULL/TRUE/FALSE=0 bytes.
+ * STRING=4 bytes length + UTF-8 bytes, NULL/TRUE/FALSE=0 bytes,
+ * KEY_VALUE/UNION_ARRAY/FIXED_ARRAY=4 bytes length + payload bytes.
  */
 public final class EirfArray {
 
     private final byte[] data;
-    private final int count;
+    private final int end; // exclusive end offset
     private final boolean fixed;
     private final byte fixedType; // only meaningful when fixed=true
 
-    private int idx = -1;
     private int pos;
     private byte elemType;
 
@@ -40,47 +40,40 @@ public final class EirfArray {
      * Creates an array reader.
      * @param data the packed array bytes
      * @param offset start offset in data
+     * @param length total byte length of the array payload
      * @param fixed true for FIXED_ARRAY format, false for UNION_ARRAY
      */
-    public EirfArray(byte[] data, int offset, boolean fixed) {
+    public EirfArray(byte[] data, int offset, int length, boolean fixed) {
         this.data = data;
+        this.end = offset + length;
         this.fixed = fixed;
-        this.count = data[offset] & 0xFF;
-        if (fixed && count > 0) {
-            this.fixedType = data[offset + 1];
-            this.pos = offset + 2;
+        if (fixed && length > 0) {
+            this.fixedType = data[offset];
+            this.pos = offset + 1; // past shared type byte
         } else if (fixed) {
             this.fixedType = EirfType.NULL;
-            this.pos = offset + 1; // no type byte when count=0
+            this.pos = offset;
         } else {
             this.fixedType = 0;
-            this.pos = offset + 1;
+            this.pos = offset;
         }
     }
 
-    /** Creates a union array reader at offset 0. */
+    /** Creates a union array reader over the full byte array. */
     public EirfArray(byte[] data) {
-        this(data, 0, false);
+        this(data, 0, data.length, false);
     }
 
-    /** Creates an array reader at offset 0. */
+    /** Creates an array reader over the full byte array. */
     public EirfArray(byte[] data, boolean fixed) {
-        this(data, 0, fixed);
-    }
-
-    public int count() {
-        return count;
+        this(data, 0, data.length, fixed);
     }
 
     /**
-     * Advances to the next element. Returns false when all elements have been visited.
+     * Advances to the next element. Returns false when all bytes have been consumed.
      */
     public boolean next() {
-        if (idx >= 0) {
-            pos += dataSize();
-        }
-        idx++;
-        if (idx >= count) {
+        if (pos >= end) {
             return false;
         }
         if (fixed) {
@@ -90,6 +83,15 @@ public final class EirfArray {
             pos++; // past type byte
         }
         return true;
+    }
+
+    /**
+     * Advances past the current element's data. Must be called after next() and before
+     * calling next() again, unless a value accessor (which implicitly sizes the element) is used.
+     * For compound types, this skips the entire nested structure.
+     */
+    public void advance() {
+        pos += currentDataSize();
     }
 
     public byte type() {
@@ -103,47 +105,66 @@ public final class EirfArray {
     public boolean booleanValue() {
         if (elemType == EirfType.TRUE) return true;
         if (elemType == EirfType.FALSE) return false;
-        throw new IllegalStateException("Element " + idx + " is not a boolean, type=" + EirfType.name(elemType));
+        throw new IllegalStateException("Element is not a boolean, type=" + EirfType.name(elemType));
     }
 
     public int intValue() {
-        return ByteUtils.readIntBE(data, pos);
+        int val = ByteUtils.readIntBE(data, pos);
+        pos += 4;
+        return val;
     }
 
     public float floatValue() {
-        return Float.intBitsToFloat(ByteUtils.readIntBE(data, pos));
+        float val = Float.intBitsToFloat(ByteUtils.readIntBE(data, pos));
+        pos += 4;
+        return val;
     }
 
     public long longValue() {
-        return ByteUtils.readLongBE(data, pos);
+        long val = ByteUtils.readLongBE(data, pos);
+        pos += 8;
+        return val;
     }
 
     public double doubleValue() {
-        return Double.longBitsToDouble(ByteUtils.readLongBE(data, pos));
+        double val = Double.longBitsToDouble(ByteUtils.readLongBE(data, pos));
+        pos += 8;
+        return val;
     }
 
     public String stringValue() {
         int len = ByteUtils.readIntBE(data, pos);
-        return new String(data, pos + 4, len, StandardCharsets.UTF_8);
+        String val = new String(data, pos + 4, len, StandardCharsets.UTF_8);
+        pos += 4 + len;
+        return val;
     }
 
-    public int stringOffset() {
+    /** Returns the offset of the compound element's payload (past the 4-byte length prefix). */
+    public int compoundOffset() {
         return pos + 4;
     }
 
-    public int stringLength() {
+    /** Returns the byte length of the compound element's payload. */
+    public int compoundLength() {
         return ByteUtils.readIntBE(data, pos);
     }
 
-    public byte[] stringBytes() {
+    /** Returns the backing byte array. */
+    public byte[] compoundBytes() {
         return data;
     }
 
-    private int dataSize() {
+    /** Skips past the current compound element (length-prefixed). */
+    public void skipCompound() {
+        int len = ByteUtils.readIntBE(data, pos);
+        pos += 4 + len;
+    }
+
+    private int currentDataSize() {
         return switch (elemType) {
             case EirfType.INT, EirfType.FLOAT -> 4;
             case EirfType.LONG, EirfType.DOUBLE -> 8;
-            case EirfType.STRING -> 4 + ByteUtils.readIntBE(data, pos);
+            case EirfType.STRING, EirfType.KEY_VALUE, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> 4 + ByteUtils.readIntBE(data, pos);
             default -> 0; // NULL, TRUE, FALSE
         };
     }

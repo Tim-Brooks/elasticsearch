@@ -15,27 +15,24 @@ import org.elasticsearch.xcontent.XContentString;
 public class EirfArrayTests extends ESTestCase {
 
     public void testEmptyUnionArray() {
-        byte[] packed = EirfEncoder.packUnionArray(new byte[0], new long[0], new XContentString.UTF8Bytes[0], 0);
+        byte[] packed = EirfEncoder.packUnionArray(new byte[0], new Object[0], 0);
         EirfArray reader = new EirfArray(packed, false);
-        assertEquals(0, reader.count());
         assertFalse(reader.next());
     }
 
     public void testEmptyFixedArray() {
-        // Fixed array with 0 elements: just count byte
-        byte[] packed = new byte[] { 0 };
+        // Fixed array with 0 elements: empty byte array
+        byte[] packed = new byte[0];
         EirfArray reader = new EirfArray(packed, true);
-        assertEquals(0, reader.count());
         assertFalse(reader.next());
     }
 
     public void testUnionArraySingleInt() {
         byte[] elemTypes = { EirfType.INT };
-        long[] elemFixed = { 42L };
-        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemFixed, new XContentString.UTF8Bytes[1], 1);
+        Object[] elemData = { 42L };
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemData, 1);
 
         EirfArray reader = new EirfArray(packed, false);
-        assertEquals(1, reader.count());
         assertTrue(reader.next());
         assertEquals(EirfType.INT, reader.type());
         assertEquals(42, reader.intValue());
@@ -43,10 +40,10 @@ public class EirfArrayTests extends ESTestCase {
     }
 
     public void testFixedArrayInts() {
-        byte[] packed = EirfEncoder.packFixedArray(EirfType.INT, new long[] { 1, 2, 3 }, null, 3);
+        Object[] elemData = { 1L, 2L, 3L };
+        byte[] packed = EirfEncoder.packFixedArray(EirfType.INT, elemData, 3);
 
         EirfArray reader = new EirfArray(packed, true);
-        assertEquals(3, reader.count());
         assertTrue(reader.next());
         assertEquals(EirfType.INT, reader.type());
         assertEquals(1, reader.intValue());
@@ -60,13 +57,10 @@ public class EirfArrayTests extends ESTestCase {
     public void testFixedArrayStrings() {
         byte[] utf8a = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] utf8b = "world".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        XContentString.UTF8Bytes[] strings = {
-            new XContentString.UTF8Bytes(utf8a, 0, utf8a.length),
-            new XContentString.UTF8Bytes(utf8b, 0, utf8b.length) };
-        byte[] packed = EirfEncoder.packFixedArray(EirfType.STRING, new long[2], strings, 2);
+        Object[] elemData = { new XContentString.UTF8Bytes(utf8a, 0, utf8a.length), new XContentString.UTF8Bytes(utf8b, 0, utf8b.length) };
+        byte[] packed = EirfEncoder.packFixedArray(EirfType.STRING, elemData, 2);
 
         EirfArray reader = new EirfArray(packed, true);
-        assertEquals(2, reader.count());
         assertTrue(reader.next());
         assertEquals("hello", reader.stringValue());
         assertTrue(reader.next());
@@ -75,17 +69,16 @@ public class EirfArrayTests extends ESTestCase {
     }
 
     public void testUnionArrayMixedTypes() {
-        byte[] elemTypes = { EirfType.INT, EirfType.STRING, EirfType.TRUE, EirfType.NULL, EirfType.FLOAT };
-        long[] elemFixed = new long[5];
-        elemFixed[0] = 42;
-        elemFixed[4] = Float.floatToRawIntBits(3.14f);
-        XContentString.UTF8Bytes[] strings = new XContentString.UTF8Bytes[5];
         byte[] utf8 = "world".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        strings[1] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
+        byte[] elemTypes = { EirfType.INT, EirfType.STRING, EirfType.TRUE, EirfType.NULL, EirfType.FLOAT };
+        Object[] elemData = new Object[5];
+        elemData[0] = 42L;
+        elemData[1] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
+        // TRUE and NULL have no data
+        elemData[4] = (long) Float.floatToRawIntBits(3.14f);
 
-        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemFixed, strings, 5);
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemData, 5);
         EirfArray reader = new EirfArray(packed, false);
-        assertEquals(5, reader.count());
 
         assertTrue(reader.next());
         assertEquals(EirfType.INT, reader.type());
@@ -98,10 +91,12 @@ public class EirfArrayTests extends ESTestCase {
         assertTrue(reader.next());
         assertEquals(EirfType.TRUE, reader.type());
         assertTrue(reader.booleanValue());
+        reader.advance();
 
         assertTrue(reader.next());
         assertEquals(EirfType.NULL, reader.type());
         assertTrue(reader.isNull());
+        reader.advance();
 
         assertTrue(reader.next());
         assertEquals(EirfType.FLOAT, reader.type());
@@ -112,33 +107,34 @@ public class EirfArrayTests extends ESTestCase {
 
     public void testBooleanValues() {
         byte[] elemTypes = { EirfType.TRUE, EirfType.FALSE };
-        byte[] packed = EirfEncoder.packUnionArray(elemTypes, new long[2], new XContentString.UTF8Bytes[2], 2);
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, new Object[2], 2);
 
         EirfArray reader = new EirfArray(packed, false);
         assertTrue(reader.next());
         assertTrue(reader.booleanValue());
+        reader.advance();
         assertTrue(reader.next());
         assertFalse(reader.booleanValue());
+        reader.advance();
         assertFalse(reader.next());
     }
 
     public void testWithOffset() {
         byte[] elemTypes = { EirfType.INT };
-        long[] elemFixed = { 99L };
-        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemFixed, new XContentString.UTF8Bytes[1], 1);
+        Object[] elemData = { 99L };
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemData, 1);
 
         byte[] withPrefix = new byte[5 + packed.length];
         System.arraycopy(packed, 0, withPrefix, 5, packed.length);
 
-        EirfArray reader = new EirfArray(withPrefix, 5, false);
-        assertEquals(1, reader.count());
+        EirfArray reader = new EirfArray(withPrefix, 5, packed.length, false);
         assertTrue(reader.next());
         assertEquals(99, reader.intValue());
     }
 
     public void testFixedArrayLongs() {
-        long[] values = { Long.MAX_VALUE, Long.MIN_VALUE };
-        byte[] packed = EirfEncoder.packFixedArray(EirfType.LONG, values, null, 2);
+        Object[] elemData = { Long.MAX_VALUE, Long.MIN_VALUE };
+        byte[] packed = EirfEncoder.packFixedArray(EirfType.LONG, elemData, 2);
 
         EirfArray reader = new EirfArray(packed, true);
         assertTrue(reader.next());
@@ -149,14 +145,38 @@ public class EirfArrayTests extends ESTestCase {
     }
 
     public void testFixedArrayDoubles() {
-        long[] values = { Double.doubleToRawLongBits(3.14), Double.doubleToRawLongBits(-2.718) };
-        byte[] packed = EirfEncoder.packFixedArray(EirfType.DOUBLE, values, null, 2);
+        Object[] elemData = { Double.doubleToRawLongBits(3.14), Double.doubleToRawLongBits(-2.718) };
+        byte[] packed = EirfEncoder.packFixedArray(EirfType.DOUBLE, elemData, 2);
 
         EirfArray reader = new EirfArray(packed, true);
         assertTrue(reader.next());
         assertEquals(3.14, reader.doubleValue(), 0.001);
         assertTrue(reader.next());
         assertEquals(-2.718, reader.doubleValue(), 0.001);
+        assertFalse(reader.next());
+    }
+
+    public void testUnionArrayWithCompoundKeyValue() {
+        // Create a KEY_VALUE element: key "a" -> INT 42
+        byte[] kvPayload = new byte[] {
+            1,
+            'a',           // key_length=1, key="a"
+            EirfType.INT,     // type
+            0,
+            0,
+            0,
+            42      // INT value (big-endian)
+        };
+
+        byte[] elemTypes = { EirfType.KEY_VALUE };
+        Object[] elemData = { kvPayload };
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemData, 1);
+
+        EirfArray reader = new EirfArray(packed, false);
+        assertTrue(reader.next());
+        assertEquals(EirfType.KEY_VALUE, reader.type());
+        assertEquals(kvPayload.length, reader.compoundLength());
+        reader.skipCompound();
         assertFalse(reader.next());
     }
 }

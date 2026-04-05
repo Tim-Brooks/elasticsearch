@@ -16,7 +16,7 @@ package org.elasticsearch.eirf;
  * <pre>
  * type &lt;= 0x02  →  0 bytes  (NULL, TRUE, FALSE)
  * type &lt;= 0x09  →  4 bytes  (INT, FLOAT, SMALL_*)
- * type &gt;= 0x0A  →  8 bytes  (LONG, DOUBLE, STRING, BINARY, *_ARRAY, XCONTENT)
+ * type &gt;= 0x0A  →  8 bytes  (LONG, DOUBLE, STRING, BINARY, *_ARRAY, KEY_VALUE)
  * </pre>
  */
 public final class EirfType {
@@ -33,7 +33,7 @@ public final class EirfType {
     public static final byte SMALL_BINARY = 0x06;
     public static final byte SMALL_UNION_ARRAY = 0x07;
     public static final byte SMALL_FIXED_ARRAY = 0x08;
-    public static final byte SMALL_XCONTENT = 0x09;
+    public static final byte SMALL_KEY_VALUE = 0x09;
 
     // 8-byte fixed types
     public static final byte LONG = 0x0A;
@@ -42,10 +42,7 @@ public final class EirfType {
     public static final byte BINARY = 0x0D;
     public static final byte UNION_ARRAY = 0x0E;
     public static final byte FIXED_ARRAY = 0x0F;
-    public static final byte XCONTENT = 0x10;
-
-    /** Maximum number of leaf elements in a compact typed array. */
-    public static final int MAX_SMALL_ARRAY_SIZE = 32;
+    public static final byte KEY_VALUE = 0x10;
 
     /** Threshold for using small variable-length variants (var section must be under this). */
     public static final int SMALL_VAR_THRESHOLD = 65536;
@@ -57,7 +54,7 @@ public final class EirfType {
      */
     public static int fixedSize(byte typeByte) {
         if (typeByte <= FALSE) return 0;
-        if (typeByte <= SMALL_XCONTENT) return 4;
+        if (typeByte <= SMALL_KEY_VALUE) return 4;
         return 8;
     }
 
@@ -65,14 +62,14 @@ public final class EirfType {
      * Returns true if this type has a variable-length payload (small variant, 4-byte fixed entry).
      */
     public static boolean isSmallVariable(byte typeByte) {
-        return typeByte >= SMALL_STRING && typeByte <= SMALL_XCONTENT;
+        return typeByte >= SMALL_STRING && typeByte <= SMALL_KEY_VALUE;
     }
 
     /**
      * Returns true if this type has a variable-length payload (large variant, 8-byte fixed entry).
      */
     public static boolean isLargeVariable(byte typeByte) {
-        return typeByte >= STRING && typeByte <= XCONTENT;
+        return typeByte >= STRING && typeByte <= KEY_VALUE;
     }
 
     /**
@@ -98,6 +95,32 @@ public final class EirfType {
         return (byte) (typeByte + 7);
     }
 
+    /**
+     * Returns the data size of this type in element position (inside arrays and KEY_VALUE values).
+     * Variable-length types (STRING, KEY_VALUE, arrays) use a 4-byte length prefix in element position.
+     * Returns -1 for variable-length types (caller must read the 4-byte length).
+     */
+    public static int elemDataSize(byte typeByte) {
+        return switch (typeByte) {
+            case NULL, TRUE, FALSE -> 0;
+            case INT, FLOAT -> 4;
+            case LONG, DOUBLE -> 8;
+            default -> -1; // STRING, KEY_VALUE, UNION_ARRAY, FIXED_ARRAY: length-prefixed
+        };
+    }
+
+    /**
+     * Returns true if this type is a compound type (KEY_VALUE or array).
+     */
+    public static boolean isCompound(byte typeByte) {
+        return typeByte == KEY_VALUE
+            || typeByte == UNION_ARRAY
+            || typeByte == FIXED_ARRAY
+            || typeByte == SMALL_KEY_VALUE
+            || typeByte == SMALL_UNION_ARRAY
+            || typeByte == SMALL_FIXED_ARRAY;
+    }
+
     public static String name(byte typeByte) {
         return switch (typeByte) {
             case NULL -> "NULL";
@@ -109,14 +132,14 @@ public final class EirfType {
             case SMALL_BINARY -> "SMALL_BINARY";
             case SMALL_UNION_ARRAY -> "SMALL_UNION_ARRAY";
             case SMALL_FIXED_ARRAY -> "SMALL_FIXED_ARRAY";
-            case SMALL_XCONTENT -> "SMALL_XCONTENT";
+            case SMALL_KEY_VALUE -> "SMALL_KEY_VALUE";
             case LONG -> "LONG";
             case DOUBLE -> "DOUBLE";
             case STRING -> "STRING";
             case BINARY -> "BINARY";
             case UNION_ARRAY -> "UNION_ARRAY";
             case FIXED_ARRAY -> "FIXED_ARRAY";
-            case XCONTENT -> "XCONTENT";
+            case KEY_VALUE -> "KEY_VALUE";
             default -> "UNKNOWN(0x" + Integer.toHexString(typeByte & 0xFF) + ")";
         };
     }

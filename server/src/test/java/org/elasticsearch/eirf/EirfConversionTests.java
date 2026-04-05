@@ -77,10 +77,7 @@ public class EirfConversionTests extends ESTestCase {
     }
 
     public void testRowToXContentWithArray() throws IOException {
-        EirfBatch batch = EirfEncoder.encode(
-            List.of(new BytesArray("{\"name\":\"alice\",\"tags\":[\"a\",\"b\"]}")),
-            XContentType.JSON
-        );
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"name\":\"alice\",\"tags\":[\"a\",\"b\"]}")), XContentType.JSON);
 
         XContentBuilder builder = XContentFactory.jsonBuilder();
         EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
@@ -111,10 +108,7 @@ public class EirfConversionTests extends ESTestCase {
     }
 
     public void testRowToXContentWithBooleans() throws IOException {
-        EirfBatch batch = EirfEncoder.encode(
-            List.of(new BytesArray("{\"active\":true,\"deleted\":false}")),
-            XContentType.JSON
-        );
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"active\":true,\"deleted\":false}")), XContentType.JSON);
 
         XContentBuilder builder = XContentFactory.jsonBuilder();
         EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
@@ -235,7 +229,8 @@ public class EirfConversionTests extends ESTestCase {
             EirfBatch batch = builder.build();
 
             byte type = batch.getRowReader(0).getTypeByte(0);
-            assertTrue(type == EirfType.SMALL_XCONTENT || type == EirfType.XCONTENT);
+            // Lists with uniform leaf types produce FIXED_ARRAY
+            assertTrue(type == EirfType.SMALL_FIXED_ARRAY || type == EirfType.FIXED_ARRAY);
 
             batch.close();
         }

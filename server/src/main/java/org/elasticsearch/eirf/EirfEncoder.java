@@ -18,7 +18,6 @@ import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.transport.BytesRefRecycler;
-import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.XContentString;
@@ -75,9 +74,7 @@ public class EirfEncoder implements Releasable {
         Arrays.fill(scratch.typeBytes, 0, columnCountBefore, (byte) 0);
         Arrays.fill(scratch.varData, 0, columnCountBefore, null);
 
-        try (
-            XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)
-        ) {
+        try (XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)) {
             parser.allowDuplicateKeys(true);
             parser.nextToken(); // START_OBJECT
             flattenObject(parser, 0, schema, scratch, xContentType);
@@ -220,25 +217,41 @@ public class EirfEncoder implements Releasable {
         }
     }
 
+    /** Maximum number of elements to buffer when detecting FIXED_ARRAY type. */
+    private static final int ARRAY_BUFFER_SIZE = 64;
+
     private static void encodeArray(XContentParser parser, XContentType xContentType, int colIdx, ScratchBuffers scratch)
         throws IOException {
-        int maxSmall = EirfType.MAX_SMALL_ARRAY_SIZE;
-        byte[] elemTypes = new byte[maxSmall];
-        long[] elemFixed = new long[maxSmall];
-        XContentString.UTF8Bytes[] elemStrings = new XContentString.UTF8Bytes[maxSmall];
+        byte[] elemTypes = new byte[ARRAY_BUFFER_SIZE];
+        Object[] elemData = new Object[ARRAY_BUFFER_SIZE];
         int count = 0;
-        boolean fallback = false;
+        boolean forceUnion = false;
 
         XContentParser.Token token;
         while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
-            if (count >= maxSmall || token == XContentParser.Token.START_OBJECT || token == XContentParser.Token.START_ARRAY) {
-                fallback = true;
-                break;
+            if (count >= elemTypes.length) {
+                int newCap = elemTypes.length * 2;
+                elemTypes = Arrays.copyOf(elemTypes, newCap);
+                elemData = Arrays.copyOf(elemData, newCap);
+            }
+            if (count >= ARRAY_BUFFER_SIZE) {
+                forceUnion = true; // exceeded buffer → union
             }
             switch (token) {
+                case START_OBJECT -> {
+                    elemTypes[count] = EirfType.KEY_VALUE;
+                    elemData[count] = serializeKeyValue(parser, xContentType);
+                    forceUnion = true;
+                }
+                case START_ARRAY -> {
+                    byte[] nestedPayload = serializeArrayPayload(parser, xContentType);
+                    elemTypes[count] = nestedPayload[0]; // first byte is the array type marker
+                    elemData[count] = Arrays.copyOfRange(nestedPayload, 1, nestedPayload.length);
+                    forceUnion = true;
+                }
                 case VALUE_STRING -> {
                     elemTypes[count] = EirfType.STRING;
-                    elemStrings[count] = parser.optimizedText().bytes();
+                    elemData[count] = parser.optimizedText().bytes();
                 }
                 case VALUE_NUMBER -> {
                     XContentParser.NumberType numType = parser.numberType();
@@ -247,10 +260,10 @@ public class EirfEncoder implements Releasable {
                             long val = parser.longValue();
                             if (val >= Integer.MIN_VALUE && val <= Integer.MAX_VALUE) {
                                 elemTypes[count] = EirfType.INT;
-                                elemFixed[count] = val;
+                                elemData[count] = val;
                             } else {
                                 elemTypes[count] = EirfType.LONG;
-                                elemFixed[count] = val;
+                                elemData[count] = val;
                             }
                         }
                         case FLOAT, DOUBLE -> {
@@ -258,15 +271,15 @@ public class EirfEncoder implements Releasable {
                             float fval = (float) val;
                             if ((double) fval == val) {
                                 elemTypes[count] = EirfType.FLOAT;
-                                elemFixed[count] = Float.floatToRawIntBits(fval);
+                                elemData[count] = (long) Float.floatToRawIntBits(fval);
                             } else {
                                 elemTypes[count] = EirfType.DOUBLE;
-                                elemFixed[count] = Double.doubleToRawLongBits(val);
+                                elemData[count] = Double.doubleToRawLongBits(val);
                             }
                         }
                         default -> {
                             elemTypes[count] = EirfType.STRING;
-                            elemStrings[count] = parser.optimizedText().bytes();
+                            elemData[count] = parser.optimizedText().bytes();
                         }
                     }
                 }
@@ -277,168 +290,355 @@ public class EirfEncoder implements Releasable {
             count++;
         }
 
-        if (fallback) {
-            BytesReference rawBytes = buildXContentFallback(parser, xContentType, elemTypes, elemFixed, elemStrings, count, token);
-            // Stored as large variant; writeRow remaps to small if var section fits
-            scratch.typeBytes[colIdx] = EirfType.XCONTENT;
-            scratch.varData[colIdx] = rawBytes;
-        } else {
-            // Check if all elements share the same type -> FIXED_ARRAY, otherwise UNION_ARRAY
-            boolean allSameType = count > 0;
-            byte sharedType = count > 0 ? elemTypes[0] : 0;
-            for (int i = 1; i < count && allSameType; i++) {
+        // Decide FIXED vs UNION: fixed only if all same leaf type and within buffer
+        boolean useFixed = false;
+        byte sharedType = 0;
+        if (forceUnion == false && count > 0) {
+            sharedType = elemTypes[0];
+            useFixed = true;
+            for (int i = 1; i < count; i++) {
                 if (elemTypes[i] != sharedType) {
-                    allSameType = false;
+                    useFixed = false;
+                    break;
                 }
             }
-
-            byte[] packed;
-            byte arrayType;
-            if (allSameType && count > 0) {
-                packed = packFixedArray(elemTypes[0], elemFixed, elemStrings, count);
-                arrayType = EirfType.FIXED_ARRAY;
-            } else {
-                packed = packUnionArray(elemTypes, elemFixed, elemStrings, count);
-                arrayType = EirfType.UNION_ARRAY;
-            }
-            scratch.typeBytes[colIdx] = arrayType;
-            scratch.varData[colIdx] = new BytesArray(packed);
         }
+
+        byte[] packed;
+        byte arrayType;
+        if (useFixed) {
+            packed = packFixedArray(sharedType, elemData, count);
+            arrayType = EirfType.FIXED_ARRAY;
+        } else {
+            packed = packUnionArray(elemTypes, elemData, count);
+            arrayType = EirfType.UNION_ARRAY;
+        }
+        scratch.typeBytes[colIdx] = arrayType;
+        scratch.varData[colIdx] = new BytesArray(packed);
     }
 
     /**
-     * Packs a union array: count(1) | per element: type(1) + data.
+     * Packs a union array: per element: type(1) + data. No count byte — byte length terminates.
      */
-    static byte[] packUnionArray(byte[] elemTypes, long[] elemFixed, XContentString.UTF8Bytes[] elemStrings, int count) {
-        int size = 1; // count byte
+    static byte[] packUnionArray(byte[] elemTypes, Object[] elemData, int count) {
+        int size = 0;
         for (int i = 0; i < count; i++) {
             size += 1; // type byte
-            size += elemDataSize(elemTypes[i], elemFixed[i], elemStrings != null ? elemStrings[i] : null);
+            size += elemDataSize(elemTypes[i], elemData[i]);
         }
 
         byte[] packed = new byte[size];
-        packed[0] = (byte) count;
-        int pos = 1;
+        int pos = 0;
         for (int i = 0; i < count; i++) {
             packed[pos++] = elemTypes[i];
-            pos = writeElemData(packed, pos, elemTypes[i], elemFixed[i], elemStrings != null ? elemStrings[i] : null);
+            pos = writeElemData(packed, pos, elemTypes[i], elemData[i]);
         }
         return packed;
     }
 
     /**
-     * Packs a fixed array: count(1) | element_type(1) | per element: data only.
+     * Packs a fixed array: element_type(1) + per element: data only. No count byte — byte length terminates.
      */
-    static byte[] packFixedArray(byte sharedType, long[] elemFixed, XContentString.UTF8Bytes[] elemStrings, int count) {
-        int size = 2; // count byte + shared type byte
+    static byte[] packFixedArray(byte sharedType, Object[] elemData, int count) {
+        int size = 1; // shared type byte
         for (int i = 0; i < count; i++) {
-            size += elemDataSize(sharedType, elemFixed[i], elemStrings != null ? elemStrings[i] : null);
+            size += elemDataSize(sharedType, elemData[i]);
         }
 
         byte[] packed = new byte[size];
-        packed[0] = (byte) count;
-        packed[1] = sharedType;
-        int pos = 2;
+        packed[0] = sharedType;
+        int pos = 1;
         for (int i = 0; i < count; i++) {
-            pos = writeElemData(packed, pos, sharedType, elemFixed[i], elemStrings != null ? elemStrings[i] : null);
+            pos = writeElemData(packed, pos, sharedType, elemData[i]);
         }
         return packed;
     }
 
-    private static int elemDataSize(byte type, long fixedVal, XContentString.UTF8Bytes str) {
+    private static int elemDataSize(byte type, Object data) {
         return switch (type) {
             case EirfType.INT, EirfType.FLOAT -> 4;
             case EirfType.LONG, EirfType.DOUBLE -> 8;
-            case EirfType.STRING -> 4 + (str != null ? str.length() : 0);
+            case EirfType.STRING -> {
+                XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) data;
+                yield 4 + (str != null ? str.length() : 0);
+            }
+            case EirfType.KEY_VALUE, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> {
+                byte[] bytes = (byte[]) data;
+                yield 4 + bytes.length; // 4-byte length prefix + payload
+            }
             default -> 0; // NULL, TRUE, FALSE
         };
     }
 
-    private static int writeElemData(byte[] packed, int pos, byte type, long fixedVal, XContentString.UTF8Bytes str) {
+    private static int writeElemData(byte[] packed, int pos, byte type, Object data) {
         switch (type) {
             case EirfType.INT, EirfType.FLOAT -> {
-                ByteUtils.writeIntBE((int) fixedVal, packed, pos);
+                ByteUtils.writeIntBE((int) (long) data, packed, pos);
                 pos += 4;
             }
             case EirfType.LONG, EirfType.DOUBLE -> {
-                ByteUtils.writeLongBE(fixedVal, packed, pos);
+                ByteUtils.writeLongBE((long) data, packed, pos);
                 pos += 8;
             }
             case EirfType.STRING -> {
+                XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) data;
                 int len = str.length();
                 ByteUtils.writeIntBE(len, packed, pos);
                 pos += 4;
                 System.arraycopy(str.bytes(), str.offset(), packed, pos, len);
                 pos += len;
             }
+            case EirfType.KEY_VALUE, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> {
+                byte[] bytes = (byte[]) data;
+                ByteUtils.writeIntBE(bytes.length, packed, pos);
+                pos += 4;
+                System.arraycopy(bytes, 0, packed, pos, bytes.length);
+                pos += bytes.length;
+            }
         }
         return pos;
     }
 
-    private static BytesReference buildXContentFallback(
-        XContentParser parser,
-        XContentType xContentType,
-        byte[] elemTypes,
-        long[] elemFixed,
-        XContentString.UTF8Bytes[] elemStrings,
-        int bufferedCount,
-        XContentParser.Token currentToken
-    ) throws IOException {
-        try (var builder = XContentFactory.contentBuilder(xContentType)) {
-            builder.startArray();
-            for (int i = 0; i < bufferedCount; i++) {
-                switch (elemTypes[i]) {
-                    case EirfType.STRING -> {
-                        XContentString.UTF8Bytes str = elemStrings[i];
-                        builder.utf8Value(str.bytes(), str.offset(), str.length());
-                    }
-                    case EirfType.INT -> builder.value((int) elemFixed[i]);
-                    case EirfType.LONG -> builder.value(elemFixed[i]);
-                    case EirfType.FLOAT -> builder.value(Float.intBitsToFloat((int) elemFixed[i]));
-                    case EirfType.DOUBLE -> builder.value(Double.longBitsToDouble(elemFixed[i]));
-                    case EirfType.TRUE -> builder.value(true);
-                    case EirfType.FALSE -> builder.value(false);
-                    case EirfType.NULL -> builder.nullValue();
-                }
+    /** Growable byte buffer for serialization. */
+    static final class GrowableBuffer {
+        byte[] buf;
+        int pos;
+
+        GrowableBuffer(int initialCapacity) {
+            this.buf = new byte[initialCapacity];
+            this.pos = 0;
+        }
+
+        void ensure(int needed) {
+            if (needed <= buf.length) return;
+            int newCap = buf.length;
+            while (newCap < needed) {
+                newCap <<= 1;
             }
-            if (currentToken != null && currentToken != XContentParser.Token.END_ARRAY) {
-                if (currentToken == XContentParser.Token.START_OBJECT || currentToken == XContentParser.Token.START_ARRAY) {
-                    builder.copyCurrentStructure(parser);
-                } else {
-                    writeLeafToken(builder, parser, currentToken);
-                }
-                while ((currentToken = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
-                    if (currentToken == XContentParser.Token.START_OBJECT || currentToken == XContentParser.Token.START_ARRAY) {
-                        builder.copyCurrentStructure(parser);
-                    } else {
-                        writeLeafToken(builder, parser, currentToken);
-                    }
-                }
-            }
-            builder.endArray();
-            return BytesReference.bytes(builder);
+            buf = Arrays.copyOf(buf, newCap);
+        }
+
+        byte[] toArray() {
+            return Arrays.copyOf(buf, pos);
         }
     }
 
-    private static void writeLeafToken(
-        org.elasticsearch.xcontent.XContentBuilder builder,
-        XContentParser parser,
-        XContentParser.Token token
-    ) throws IOException {
-        switch (token) {
-            case VALUE_STRING -> builder.value(parser.text());
-            case VALUE_NUMBER -> {
-                XContentParser.NumberType numType = parser.numberType();
-                switch (numType) {
-                    case INT -> builder.value(parser.intValue());
-                    case LONG -> builder.value(parser.longValue());
-                    case FLOAT -> builder.value(parser.floatValue());
-                    case DOUBLE -> builder.value(parser.doubleValue());
-                    default -> builder.value(parser.text());
+    /**
+     * Serializes an object from the parser into KEY_VALUE binary format.
+     * Parser must be positioned after START_OBJECT.
+     */
+    static byte[] serializeKeyValue(XContentParser parser, XContentType xContentType) throws IOException {
+        GrowableBuffer gb = new GrowableBuffer(64);
+
+        XContentParser.Token token;
+        while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
+            if (token != XContentParser.Token.FIELD_NAME) {
+                throw new IllegalStateException("Expected FIELD_NAME but got " + token);
+            }
+            byte[] keyBytes = parser.currentName().getBytes(StandardCharsets.UTF_8);
+            token = parser.nextToken(); // value token
+
+            gb.ensure(gb.pos + 1 + keyBytes.length + 1 + 12);
+
+            // key_length(1) + key_bytes
+            gb.buf[gb.pos++] = (byte) keyBytes.length;
+            System.arraycopy(keyBytes, 0, gb.buf, gb.pos, keyBytes.length);
+            gb.pos += keyBytes.length;
+
+            // type(1) + value_data
+            writeElementValue(gb, parser, token, xContentType);
+        }
+
+        return gb.toArray();
+    }
+
+    /**
+     * Serializes an array from the parser. Returns type_marker(1) + payload.
+     * The first byte indicates UNION_ARRAY or FIXED_ARRAY.
+     * Parser must be positioned after START_ARRAY.
+     */
+    private static byte[] serializeArrayPayload(XContentParser parser, XContentType xContentType) throws IOException {
+        byte[] elemTypes = new byte[ARRAY_BUFFER_SIZE];
+        Object[] elemData = new Object[ARRAY_BUFFER_SIZE];
+        int count = 0;
+        boolean forceUnion = false;
+
+        XContentParser.Token token;
+        while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
+            if (count >= elemTypes.length) {
+                int newCap = elemTypes.length * 2;
+                elemTypes = Arrays.copyOf(elemTypes, newCap);
+                elemData = Arrays.copyOf(elemData, newCap);
+            }
+            if (count >= ARRAY_BUFFER_SIZE) {
+                forceUnion = true;
+            }
+            switch (token) {
+                case START_OBJECT -> {
+                    elemTypes[count] = EirfType.KEY_VALUE;
+                    elemData[count] = serializeKeyValue(parser, xContentType);
+                    forceUnion = true;
+                }
+                case START_ARRAY -> {
+                    byte[] nested = serializeArrayPayload(parser, xContentType);
+                    elemTypes[count] = nested[0];
+                    elemData[count] = Arrays.copyOfRange(nested, 1, nested.length);
+                    forceUnion = true;
+                }
+                case VALUE_STRING -> {
+                    elemTypes[count] = EirfType.STRING;
+                    elemData[count] = parser.optimizedText().bytes();
+                }
+                case VALUE_NUMBER -> {
+                    XContentParser.NumberType numType = parser.numberType();
+                    switch (numType) {
+                        case INT, LONG -> {
+                            long val = parser.longValue();
+                            if (val >= Integer.MIN_VALUE && val <= Integer.MAX_VALUE) {
+                                elemTypes[count] = EirfType.INT;
+                                elemData[count] = val;
+                            } else {
+                                elemTypes[count] = EirfType.LONG;
+                                elemData[count] = val;
+                            }
+                        }
+                        case FLOAT, DOUBLE -> {
+                            double val = parser.doubleValue();
+                            float fval = (float) val;
+                            if ((double) fval == val) {
+                                elemTypes[count] = EirfType.FLOAT;
+                                elemData[count] = (long) Float.floatToRawIntBits(fval);
+                            } else {
+                                elemTypes[count] = EirfType.DOUBLE;
+                                elemData[count] = Double.doubleToRawLongBits(val);
+                            }
+                        }
+                        default -> {
+                            elemTypes[count] = EirfType.STRING;
+                            elemData[count] = parser.optimizedText().bytes();
+                        }
+                    }
+                }
+                case VALUE_BOOLEAN -> elemTypes[count] = parser.booleanValue() ? EirfType.TRUE : EirfType.FALSE;
+                case VALUE_NULL -> elemTypes[count] = EirfType.NULL;
+                default -> throw new IllegalStateException("Unexpected token in array: " + token);
+            }
+            count++;
+        }
+
+        boolean useFixed = false;
+        byte sharedType = 0;
+        if (forceUnion == false && count > 0) {
+            sharedType = elemTypes[0];
+            useFixed = true;
+            for (int i = 1; i < count; i++) {
+                if (elemTypes[i] != sharedType) {
+                    useFixed = false;
+                    break;
                 }
             }
-            case VALUE_BOOLEAN -> builder.value(parser.booleanValue());
-            case VALUE_NULL -> builder.nullValue();
+        }
+
+        byte[] packed;
+        byte arrayType;
+        if (useFixed) {
+            packed = packFixedArray(sharedType, elemData, count);
+            arrayType = EirfType.FIXED_ARRAY;
+        } else {
+            packed = packUnionArray(elemTypes, elemData, count);
+            arrayType = EirfType.UNION_ARRAY;
+        }
+
+        // Prepend the type marker byte
+        byte[] result = new byte[1 + packed.length];
+        result[0] = arrayType;
+        System.arraycopy(packed, 0, result, 1, packed.length);
+        return result;
+    }
+
+    /**
+     * Writes a single element value (type byte + data) into the growable buffer.
+     */
+    private static void writeElementValue(GrowableBuffer gb, XContentParser parser, XContentParser.Token token, XContentType xContentType)
+        throws IOException {
+        switch (token) {
+            case VALUE_STRING -> {
+                XContentString.UTF8Bytes str = parser.optimizedText().bytes();
+                gb.ensure(gb.pos + 1 + 4 + str.length());
+                gb.buf[gb.pos++] = EirfType.STRING;
+                ByteUtils.writeIntBE(str.length(), gb.buf, gb.pos);
+                gb.pos += 4;
+                System.arraycopy(str.bytes(), str.offset(), gb.buf, gb.pos, str.length());
+                gb.pos += str.length();
+            }
+            case VALUE_NUMBER -> {
+                XContentParser.NumberType numType = parser.numberType();
+                gb.ensure(gb.pos + 9); // worst case: type + long
+                switch (numType) {
+                    case INT, LONG -> {
+                        long val = parser.longValue();
+                        if (val >= Integer.MIN_VALUE && val <= Integer.MAX_VALUE) {
+                            gb.buf[gb.pos++] = EirfType.INT;
+                            ByteUtils.writeIntBE((int) val, gb.buf, gb.pos);
+                            gb.pos += 4;
+                        } else {
+                            gb.buf[gb.pos++] = EirfType.LONG;
+                            ByteUtils.writeLongBE(val, gb.buf, gb.pos);
+                            gb.pos += 8;
+                        }
+                    }
+                    case FLOAT, DOUBLE -> {
+                        double val = parser.doubleValue();
+                        float fval = (float) val;
+                        if ((double) fval == val) {
+                            gb.buf[gb.pos++] = EirfType.FLOAT;
+                            ByteUtils.writeIntBE(Float.floatToRawIntBits(fval), gb.buf, gb.pos);
+                            gb.pos += 4;
+                        } else {
+                            gb.buf[gb.pos++] = EirfType.DOUBLE;
+                            ByteUtils.writeLongBE(Double.doubleToRawLongBits(val), gb.buf, gb.pos);
+                            gb.pos += 8;
+                        }
+                    }
+                    default -> {
+                        XContentString.UTF8Bytes str = parser.optimizedText().bytes();
+                        gb.ensure(gb.pos + 1 + 4 + str.length());
+                        gb.buf[gb.pos++] = EirfType.STRING;
+                        ByteUtils.writeIntBE(str.length(), gb.buf, gb.pos);
+                        gb.pos += 4;
+                        System.arraycopy(str.bytes(), str.offset(), gb.buf, gb.pos, str.length());
+                        gb.pos += str.length();
+                    }
+                }
+            }
+            case VALUE_BOOLEAN -> {
+                gb.ensure(gb.pos + 1);
+                gb.buf[gb.pos++] = parser.booleanValue() ? EirfType.TRUE : EirfType.FALSE;
+            }
+            case VALUE_NULL -> {
+                gb.ensure(gb.pos + 1);
+                gb.buf[gb.pos++] = EirfType.NULL;
+            }
+            case START_OBJECT -> {
+                byte[] nested = serializeKeyValue(parser, xContentType);
+                gb.ensure(gb.pos + 1 + 4 + nested.length);
+                gb.buf[gb.pos++] = EirfType.KEY_VALUE;
+                ByteUtils.writeIntBE(nested.length, gb.buf, gb.pos);
+                gb.pos += 4;
+                System.arraycopy(nested, 0, gb.buf, gb.pos, nested.length);
+                gb.pos += nested.length;
+            }
+            case START_ARRAY -> {
+                byte[] nested = serializeArrayPayload(parser, xContentType);
+                byte nestedType = nested[0];
+                int payloadLen = nested.length - 1;
+                gb.ensure(gb.pos + 1 + 4 + payloadLen);
+                gb.buf[gb.pos++] = nestedType;
+                ByteUtils.writeIntBE(payloadLen, gb.buf, gb.pos);
+                gb.pos += 4;
+                System.arraycopy(nested, 1, gb.buf, gb.pos, payloadLen);
+                gb.pos += payloadLen;
+            }
             default -> throw new IllegalStateException("Unexpected token: " + token);
         }
     }
@@ -512,9 +712,9 @@ public class EirfEncoder implements Releasable {
     private static int getVarDataLength(byte typeByte, Object data) {
         if (typeByte == EirfType.STRING) {
             return ((XContentString.UTF8Bytes) data).length();
-        } else if (typeByte == EirfType.BINARY || typeByte == EirfType.XCONTENT) {
+        } else if (typeByte == EirfType.BINARY) {
             return ((BytesReference) data).length();
-        } else if (typeByte == EirfType.UNION_ARRAY || typeByte == EirfType.FIXED_ARRAY) {
+        } else if (typeByte == EirfType.UNION_ARRAY || typeByte == EirfType.FIXED_ARRAY || typeByte == EirfType.KEY_VALUE) {
             return ((BytesArray) data).length();
         }
         return 0;
@@ -524,10 +724,10 @@ public class EirfEncoder implements Releasable {
         if (typeByte == EirfType.STRING) {
             XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) data;
             output.writeBytes(str.bytes(), str.offset(), str.length());
-        } else if (typeByte == EirfType.BINARY || typeByte == EirfType.XCONTENT) {
+        } else if (typeByte == EirfType.BINARY) {
             BytesReference ref = (BytesReference) data;
             ref.writeTo(output);
-        } else if (typeByte == EirfType.UNION_ARRAY || typeByte == EirfType.FIXED_ARRAY) {
+        } else if (typeByte == EirfType.UNION_ARRAY || typeByte == EirfType.FIXED_ARRAY || typeByte == EirfType.KEY_VALUE) {
             BytesArray arr = (BytesArray) data;
             output.writeBytes(arr.array(), arr.arrayOffset(), arr.length());
         }

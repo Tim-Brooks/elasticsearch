@@ -9,12 +9,10 @@
 
 package org.elasticsearch.eirf;
 
-import org.elasticsearch.xcontent.XContentFactory;
-import org.elasticsearch.xcontent.XContentParser;
-import org.elasticsearch.xcontent.XContentParserConfiguration;
-import org.elasticsearch.xcontent.XContentType;
+import org.elasticsearch.common.util.ByteUtils;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -76,46 +74,129 @@ public final class EirfRowToMap {
             case EirfType.SMALL_STRING, EirfType.STRING -> row.getStringValue(leafIdx);
             case EirfType.TRUE -> Boolean.TRUE;
             case EirfType.FALSE -> Boolean.FALSE;
-            case EirfType.SMALL_UNION_ARRAY, EirfType.UNION_ARRAY -> readArray(row.getArrayValue(leafIdx), false);
-            case EirfType.SMALL_FIXED_ARRAY, EirfType.FIXED_ARRAY -> readArray(row.getArrayValue(leafIdx), true);
-            case EirfType.SMALL_XCONTENT, EirfType.XCONTENT -> readXContent(row.getXContentValue(leafIdx));
+            case EirfType.SMALL_UNION_ARRAY, EirfType.UNION_ARRAY -> {
+                byte[] arrayData = row.getArrayValue(leafIdx);
+                yield readArray(arrayData, 0, arrayData.length, false);
+            }
+            case EirfType.SMALL_FIXED_ARRAY, EirfType.FIXED_ARRAY -> {
+                byte[] arrayData = row.getArrayValue(leafIdx);
+                yield readArray(arrayData, 0, arrayData.length, true);
+            }
+            case EirfType.SMALL_KEY_VALUE, EirfType.KEY_VALUE -> {
+                byte[] kvData = row.getKeyValueBytes(leafIdx);
+                yield readKeyValue(kvData, 0, kvData.length);
+            }
             case EirfType.SMALL_BINARY, EirfType.BINARY -> row.getBinaryValue(leafIdx);
             default -> null;
         };
     }
 
-    private static List<Object> readArray(byte[] arrayData, boolean fixed) {
-        EirfArray reader = new EirfArray(arrayData, 0, fixed);
-        List<Object> list = new ArrayList<>(reader.count());
+    static List<Object> readArray(byte[] data, int offset, int length, boolean fixed) {
+        EirfArray reader = new EirfArray(data, offset, length, fixed);
+        List<Object> list = new ArrayList<>();
         while (reader.next()) {
-            switch (reader.type()) {
-                case EirfType.INT -> list.add(reader.intValue());
-                case EirfType.FLOAT -> list.add(reader.floatValue());
-                case EirfType.LONG -> list.add(reader.longValue());
-                case EirfType.DOUBLE -> list.add(reader.doubleValue());
-                case EirfType.STRING -> list.add(reader.stringValue());
-                case EirfType.TRUE -> list.add(Boolean.TRUE);
-                case EirfType.FALSE -> list.add(Boolean.FALSE);
-                case EirfType.NULL -> list.add(null);
-            }
+            list.add(readElementValue(reader));
         }
         return list;
     }
 
-    private static Object readXContent(byte[] rawBytes) throws IOException {
-        try (
-            XContentParser parser = XContentFactory.xContent(XContentType.JSON)
-                .createParser(XContentParserConfiguration.EMPTY, rawBytes)
-        ) {
-            // Could be an array or an object
-            XContentParser.Token token = parser.nextToken();
-            if (token == XContentParser.Token.START_ARRAY) {
-                return parser.list();
-            } else if (token == XContentParser.Token.START_OBJECT) {
-                return parser.map();
-            } else {
-                return parser.objectText();
+    private static Object readElementValue(EirfArray reader) {
+        return switch (reader.type()) {
+            case EirfType.INT -> reader.intValue();
+            case EirfType.FLOAT -> reader.floatValue();
+            case EirfType.LONG -> reader.longValue();
+            case EirfType.DOUBLE -> reader.doubleValue();
+            case EirfType.STRING -> reader.stringValue();
+            case EirfType.TRUE -> Boolean.TRUE;
+            case EirfType.FALSE -> Boolean.FALSE;
+            case EirfType.NULL -> {
+                yield null;
             }
+            case EirfType.KEY_VALUE -> {
+                int len = reader.compoundLength();
+                int off = reader.compoundOffset();
+                byte[] bytes = reader.compoundBytes();
+                reader.skipCompound();
+                yield readKeyValue(bytes, off, len);
+            }
+            case EirfType.UNION_ARRAY -> {
+                int len = reader.compoundLength();
+                int off = reader.compoundOffset();
+                byte[] bytes = reader.compoundBytes();
+                reader.skipCompound();
+                yield readArray(bytes, off, len, false);
+            }
+            case EirfType.FIXED_ARRAY -> {
+                int len = reader.compoundLength();
+                int off = reader.compoundOffset();
+                byte[] bytes = reader.compoundBytes();
+                reader.skipCompound();
+                yield readArray(bytes, off, len, true);
+            }
+            default -> null;
+        };
+    }
+
+    static Map<String, Object> readKeyValue(byte[] data, int offset, int length) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        int end = offset + length;
+        int pos = offset;
+        while (pos < end) {
+            int keyLen = data[pos] & 0xFF;
+            pos++;
+            String key = new String(data, pos, keyLen, StandardCharsets.UTF_8);
+            pos += keyLen;
+
+            byte type = data[pos];
+            pos++;
+
+            Object[] result = readInlineValue(data, pos, type);
+            map.put(key, result[0]);
+            pos = (int) result[1];
         }
+        return map;
+    }
+
+    /**
+     * Reads an inline value from the byte array at the given position.
+     * Returns [value, newPos] as an Object array.
+     */
+    private static Object[] readInlineValue(byte[] data, int pos, byte type) {
+        return switch (type) {
+            case EirfType.INT -> new Object[] { ByteUtils.readIntBE(data, pos), pos + 4 };
+            case EirfType.FLOAT -> new Object[] { Float.intBitsToFloat(ByteUtils.readIntBE(data, pos)), pos + 4 };
+            case EirfType.LONG -> new Object[] { readLongBE(data, pos), pos + 8 };
+            case EirfType.DOUBLE -> new Object[] { Double.longBitsToDouble(readLongBE(data, pos)), pos + 8 };
+            case EirfType.STRING -> {
+                int len = ByteUtils.readIntBE(data, pos);
+                pos += 4;
+                yield new Object[] { new String(data, pos, len, StandardCharsets.UTF_8), pos + len };
+            }
+            case EirfType.TRUE -> new Object[] { Boolean.TRUE, pos };
+            case EirfType.FALSE -> new Object[] { Boolean.FALSE, pos };
+            case EirfType.NULL -> new Object[] { null, pos };
+            case EirfType.KEY_VALUE -> {
+                int len = ByteUtils.readIntBE(data, pos);
+                pos += 4;
+                yield new Object[] { readKeyValue(data, pos, len), pos + len };
+            }
+            case EirfType.UNION_ARRAY -> {
+                int len = ByteUtils.readIntBE(data, pos);
+                pos += 4;
+                yield new Object[] { readArray(data, pos, len, false), pos + len };
+            }
+            case EirfType.FIXED_ARRAY -> {
+                int len = ByteUtils.readIntBE(data, pos);
+                pos += 4;
+                yield new Object[] { readArray(data, pos, len, true), pos + len };
+            }
+            default -> new Object[] { null, pos };
+        };
+    }
+
+    private static long readLongBE(byte[] data, int offset) {
+        long hi = ByteUtils.readIntBE(data, offset) & 0xFFFFFFFFL;
+        long lo = ByteUtils.readIntBE(data, offset + 4) & 0xFFFFFFFFL;
+        return (hi << 32) | lo;
     }
 }
