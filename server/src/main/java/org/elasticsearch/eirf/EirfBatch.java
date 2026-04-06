@@ -24,15 +24,15 @@ import java.util.List;
  * <p>Binary layout (32-byte header, all multi-byte integers little-endian):
  * <pre>
  * magic(4) version(i32) flags(i32) doc_count(i32) schema_offset(i32) doc_index_offset(i32) data_offset(i32) total_size(i32)
- * [Schema]    non_leaf_count(u16) + entries + leaf_count(u16) + entries
+ * [Schema] non_leaf_count(u16) + entries + leaf_count(u16) + entries
  * [Doc Index] entries[doc_count]: data_offset(i32) + data_length(i32)
- * [Row Data]  rows back-to-back
+ * [Row Data] rows
  * </pre>
  */
 public final class EirfBatch implements Releasable, Accountable {
 
-    /** Magic bytes: ASCII "eirf" (0x65 0x69 0x72 0x66). Read as 4 individual bytes, not an integer. */
-    public static final byte[] MAGIC = new byte[] { 'e', 'i', 'r', 'f' };
+    /** Magic as a little-endian int: bytes 'e','i','r','f' read as LE i32. */
+    public static final int MAGIC_LE = ('e' & 0xFF) | (('i' & 0xFF) << 8) | (('r' & 0xFF) << 16) | (('f' & 0xFF) << 24);
     public static final int VERSION = 1;
 
     private final BytesReference data;
@@ -42,21 +42,18 @@ public final class EirfBatch implements Releasable, Accountable {
     private final int docIndexOffset;
     private final int dataOffset;
 
-    public EirfBatch(BytesReference data) {
-        this(data, () -> {});
-    }
-
     public EirfBatch(BytesReference data, Releasable releasable) {
         this.data = data;
         this.releasable = releasable;
 
-        if (data.get(0) != 'e' || data.get(1) != 'i' || data.get(2) != 'r' || data.get(3) != 'f') {
+        int magic = data.getIntLE(0);
+        if (magic != MAGIC_LE) {
             throw new IllegalArgumentException(
                 "Invalid magic: expected 'eirf', got '"
-                    + (char) data.get(0)
-                    + (char) data.get(1)
-                    + (char) data.get(2)
-                    + (char) data.get(3)
+                    + (char) (magic & 0xFF)
+                    + (char) ((magic >> 8) & 0xFF)
+                    + (char) ((magic >> 16) & 0xFF)
+                    + (char) ((magic >> 24) & 0xFF)
                     + "'"
             );
         }

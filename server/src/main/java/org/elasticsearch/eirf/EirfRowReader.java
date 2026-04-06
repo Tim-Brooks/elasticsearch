@@ -105,16 +105,20 @@ public final class EirfRowReader {
     }
 
     public String getStringValue(int col) {
-        int[] varSlice = getVarSlice(col);
-        BytesRef bytesRef = rowData.slice(varSectionOffset + varSlice[0], varSlice[1]).toBytesRef();
+        long packed = readVarRef(col);
+        int varOffset = varRefOffset(packed);
+        int varLength = varRefLength(packed);
+        BytesRef bytesRef = rowData.slice(varSectionOffset + varOffset, varLength).toBytesRef();
         return new String(bytesRef.bytes, bytesRef.offset, bytesRef.length, StandardCharsets.UTF_8);
     }
 
     public byte[] getBinaryValue(int col) {
-        int[] varSlice = getVarSlice(col);
-        BytesRef bytesRef = rowData.slice(varSectionOffset + varSlice[0], varSlice[1]).toBytesRef();
-        byte[] result = new byte[varSlice[1]];
-        System.arraycopy(bytesRef.bytes, bytesRef.offset, result, 0, varSlice[1]);
+        long packed = readVarRef(col);
+        int varOffset = varRefOffset(packed);
+        int varLength = varRefLength(packed);
+        BytesRef bytesRef = rowData.slice(varSectionOffset + varOffset, varLength).toBytesRef();
+        byte[] result = new byte[varLength];
+        System.arraycopy(bytesRef.bytes, bytesRef.offset, result, 0, varLength);
         return result;
     }
 
@@ -128,20 +132,28 @@ public final class EirfRowReader {
 
     /**
      * Reads the var offset and length from the fixed section for the given column.
-     * Handles both small (u16|u16 LE) and large (i32|i32 LE) variants.
-     * Returns [varOffset, varLength].
+     * Small row: reads one LE int containing two packed u16 (offset in low 16, length in high 16).
+     * Large row: reads one LE long containing two packed i32 (offset in low 32, length in high 32).
+     * Returns a packed long: offset in lower 32 bits, length in upper 32 bits.
      */
-    private int[] getVarSlice(int col) {
+    private long readVarRef(int col) {
         int offset = computeFixedOffset(col);
         if (smallRow) {
-            int varOffset = EirfBatch.readU16LE(rowData, offset);
-            int varLength = EirfBatch.readU16LE(rowData, offset + 2);
-            return new int[] { varOffset, varLength };
+            // Two u16 LE = one i32 LE: low 16 bits = var offset, high 16 bits = var length
+            int packed = rowData.getIntLE(offset);
+            return (long) (packed & 0xFFFF) | ((long) (packed >>> 16) << 32);
         } else {
-            int varOffset = rowData.getIntLE(offset);
-            int varLength = rowData.getIntLE(offset + 4);
-            return new int[] { varOffset, varLength };
+            // Two i32 LE = one i64 LE: low 32 bits = var offset, high 32 bits = var length
+            return rowData.getLongLE(offset);
         }
+    }
+
+    private static int varRefOffset(long packed) {
+        return (int) packed;
+    }
+
+    private static int varRefLength(long packed) {
+        return (int) (packed >>> 32);
     }
 
     private int computeFixedOffset(int col) {

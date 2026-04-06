@@ -27,7 +27,6 @@ public final class EirfMapToRow {
      * Writes a map as a single document to the given builder.
      * Calls startDocument/endDocument on the builder.
      */
-    @SuppressWarnings("unchecked")
     public static void writeToBuilder(Map<String, Object> doc, EirfRowBuilder builder) throws IOException {
         builder.startDocument();
         writeMap(doc, "", builder);
@@ -40,33 +39,31 @@ public final class EirfMapToRow {
             String path = prefix.isEmpty() ? entry.getKey() : prefix + "." + entry.getKey();
             Object value = entry.getValue();
 
-            if (value instanceof Map<?, ?> nested) {
-                writeMap((Map<String, Object>) nested, path, builder);
-            } else if (value instanceof String s) {
-                builder.setString(path, s);
-            } else if (value instanceof Long l) {
-                if (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) {
-                    builder.setInt(path, l.intValue());
-                } else {
-                    builder.setLong(path, l);
+            switch (value) {
+                case Map<?, ?> nested -> writeMap((Map<String, Object>) nested, path, builder);
+                case String s -> builder.setString(path, s);
+                case Long l -> {
+                    if (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) {
+                        builder.setInt(path, l.intValue());
+                    } else {
+                        builder.setLong(path, l);
+                    }
                 }
-            } else if (value instanceof Integer i) {
-                builder.setInt(path, i);
-            } else if (value instanceof Double d) {
-                float f = d.floatValue();
-                if ((double) f == d) {
-                    builder.setFloat(path, f);
-                } else {
-                    builder.setDouble(path, d);
+                case Integer i -> builder.setInt(path, i);
+                case Double d -> {
+                    float f = d.floatValue();
+                    if ((double) f == d) {
+                        builder.setFloat(path, f);
+                    } else {
+                        builder.setDouble(path, d);
+                    }
                 }
-            } else if (value instanceof Float f) {
-                builder.setFloat(path, f);
-            } else if (value instanceof Boolean b) {
-                builder.setBoolean(path, b);
-            } else if (value instanceof List<?> list) {
-                writeList(path, list, builder);
-            } else if (value == null) {
-                builder.setNull(path);
+                case Float f -> builder.setFloat(path, f);
+                case Boolean b -> builder.setBoolean(path, b);
+                case List<?> list -> writeList(path, list, builder);
+                case null -> builder.setNull(path);
+                default -> {
+                }
             }
         }
     }
@@ -167,7 +164,7 @@ public final class EirfMapToRow {
                 byte[] nestedPayload = serializeList(nested);
                 elemTypes[i] = nestedPayload[0];
                 elemData[i] = new byte[nestedPayload.length - 1];
-                System.arraycopy(nestedPayload, 1, (byte[]) elemData[i], 0, nestedPayload.length - 1);
+                System.arraycopy(nestedPayload, 1, elemData[i], 0, nestedPayload.length - 1);
                 hasCompound = true;
             } else if (item instanceof String s) {
                 elemTypes[i] = EirfType.STRING;
@@ -235,7 +232,6 @@ public final class EirfMapToRow {
     /**
      * Serializes a Map to KEY_VALUE payload bytes (entries only, no outer length prefix).
      */
-    @SuppressWarnings("unchecked")
     static byte[] serializeMap(Map<String, Object> map) {
         EirfEncoder.GrowableBuffer gb = new EirfEncoder.GrowableBuffer(64);
 
@@ -260,73 +256,85 @@ public final class EirfMapToRow {
 
     @SuppressWarnings("unchecked")
     private static void writeMapValue(EirfEncoder.GrowableBuffer gb, Object value) {
-        if (value instanceof String s) {
-            byte[] utf8 = s.getBytes(StandardCharsets.UTF_8);
-            gb.ensure(gb.pos + 1 + 4 + utf8.length);
-            gb.buf[gb.pos++] = EirfType.STRING;
-            ByteUtils.writeIntLE(utf8.length, gb.buf, gb.pos);
-            gb.pos += 4;
-            System.arraycopy(utf8, 0, gb.buf, gb.pos, utf8.length);
-            gb.pos += utf8.length;
-        } else if (value instanceof Long l) {
-            if (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) {
+        switch (value) {
+            case String s -> {
+                byte[] utf8 = s.getBytes(StandardCharsets.UTF_8);
+                gb.ensure(gb.pos + 1 + 4 + utf8.length);
+                gb.buf[gb.pos++] = EirfType.STRING;
+                ByteUtils.writeIntLE(utf8.length, gb.buf, gb.pos);
+                gb.pos += 4;
+                System.arraycopy(utf8, 0, gb.buf, gb.pos, utf8.length);
+                gb.pos += utf8.length;
+            }
+            case Long l -> {
+                if (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) {
+                    gb.ensure(gb.pos + 5);
+                    gb.buf[gb.pos++] = EirfType.INT;
+                    ByteUtils.writeIntLE(l.intValue(), gb.buf, gb.pos);
+                    gb.pos += 4;
+                } else {
+                    gb.ensure(gb.pos + 9);
+                    gb.buf[gb.pos++] = EirfType.LONG;
+                    ByteUtils.writeLongLE(l, gb.buf, gb.pos);
+                    gb.pos += 8;
+                }
+            }
+            case Integer i -> {
                 gb.ensure(gb.pos + 5);
                 gb.buf[gb.pos++] = EirfType.INT;
-                ByteUtils.writeIntLE(l.intValue(), gb.buf, gb.pos);
+                ByteUtils.writeIntLE(i, gb.buf, gb.pos);
                 gb.pos += 4;
-            } else {
-                gb.ensure(gb.pos + 9);
-                gb.buf[gb.pos++] = EirfType.LONG;
-                ByteUtils.writeLongLE(l, gb.buf, gb.pos);
-                gb.pos += 8;
             }
-        } else if (value instanceof Integer i) {
-            gb.ensure(gb.pos + 5);
-            gb.buf[gb.pos++] = EirfType.INT;
-            ByteUtils.writeIntLE(i, gb.buf, gb.pos);
-            gb.pos += 4;
-        } else if (value instanceof Double d) {
-            float f = d.floatValue();
-            if ((double) f == d) {
+            case Double d -> {
+                float f = d.floatValue();
+                if ((double) f == d) {
+                    gb.ensure(gb.pos + 5);
+                    gb.buf[gb.pos++] = EirfType.FLOAT;
+                    ByteUtils.writeIntLE(Float.floatToRawIntBits(f), gb.buf, gb.pos);
+                    gb.pos += 4;
+                } else {
+                    gb.ensure(gb.pos + 9);
+                    gb.buf[gb.pos++] = EirfType.DOUBLE;
+                    ByteUtils.writeLongLE(Double.doubleToRawLongBits(d), gb.buf, gb.pos);
+                    gb.pos += 8;
+                }
+            }
+            case Float f -> {
                 gb.ensure(gb.pos + 5);
                 gb.buf[gb.pos++] = EirfType.FLOAT;
                 ByteUtils.writeIntLE(Float.floatToRawIntBits(f), gb.buf, gb.pos);
                 gb.pos += 4;
-            } else {
-                gb.ensure(gb.pos + 9);
-                gb.buf[gb.pos++] = EirfType.DOUBLE;
-                ByteUtils.writeLongLE(Double.doubleToRawLongBits(d), gb.buf, gb.pos);
-                gb.pos += 8;
             }
-        } else if (value instanceof Float f) {
-            gb.ensure(gb.pos + 5);
-            gb.buf[gb.pos++] = EirfType.FLOAT;
-            ByteUtils.writeIntLE(Float.floatToRawIntBits(f), gb.buf, gb.pos);
-            gb.pos += 4;
-        } else if (value instanceof Boolean b) {
-            gb.ensure(gb.pos + 1);
-            gb.buf[gb.pos++] = b ? EirfType.TRUE : EirfType.FALSE;
-        } else if (value instanceof Map<?, ?> nested) {
-            byte[] kvBytes = serializeMap((Map<String, Object>) nested);
-            gb.ensure(gb.pos + 1 + 4 + kvBytes.length);
-            gb.buf[gb.pos++] = EirfType.KEY_VALUE;
-            ByteUtils.writeIntLE(kvBytes.length, gb.buf, gb.pos);
-            gb.pos += 4;
-            System.arraycopy(kvBytes, 0, gb.buf, gb.pos, kvBytes.length);
-            gb.pos += kvBytes.length;
-        } else if (value instanceof List<?> list) {
-            byte[] arrayPayload = serializeList(list);
-            byte arrayType = arrayPayload[0];
-            int payloadLen = arrayPayload.length - 1;
-            gb.ensure(gb.pos + 1 + 4 + payloadLen);
-            gb.buf[gb.pos++] = arrayType;
-            ByteUtils.writeIntLE(payloadLen, gb.buf, gb.pos);
-            gb.pos += 4;
-            System.arraycopy(arrayPayload, 1, gb.buf, gb.pos, payloadLen);
-            gb.pos += payloadLen;
-        } else if (value == null) {
-            gb.ensure(gb.pos + 1);
-            gb.buf[gb.pos++] = EirfType.NULL;
+            case Boolean b -> {
+                gb.ensure(gb.pos + 1);
+                gb.buf[gb.pos++] = b ? EirfType.TRUE : EirfType.FALSE;
+            }
+            case Map<?, ?> nested -> {
+                byte[] kvBytes = serializeMap((Map<String, Object>) nested);
+                gb.ensure(gb.pos + 1 + 4 + kvBytes.length);
+                gb.buf[gb.pos++] = EirfType.KEY_VALUE;
+                ByteUtils.writeIntLE(kvBytes.length, gb.buf, gb.pos);
+                gb.pos += 4;
+                System.arraycopy(kvBytes, 0, gb.buf, gb.pos, kvBytes.length);
+                gb.pos += kvBytes.length;
+            }
+            case List<?> list -> {
+                byte[] arrayPayload = serializeList(list);
+                byte arrayType = arrayPayload[0];
+                int payloadLen = arrayPayload.length - 1;
+                gb.ensure(gb.pos + 1 + 4 + payloadLen);
+                gb.buf[gb.pos++] = arrayType;
+                ByteUtils.writeIntLE(payloadLen, gb.buf, gb.pos);
+                gb.pos += 4;
+                System.arraycopy(arrayPayload, 1, gb.buf, gb.pos, payloadLen);
+                gb.pos += payloadLen;
+            }
+            case null -> {
+                gb.ensure(gb.pos + 1);
+                gb.buf[gb.pos++] = EirfType.NULL;
+            }
+            default -> {
+            }
         }
     }
 }

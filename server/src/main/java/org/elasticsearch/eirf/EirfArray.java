@@ -161,11 +161,7 @@ public final class EirfArray {
     }
 
     private int currentDataSize() {
-        return switch (elemType) {
-            case EirfType.INT, EirfType.FLOAT -> 4;
-            case EirfType.LONG, EirfType.DOUBLE -> 8;
-            case EirfType.STRING, EirfType.KEY_VALUE, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> 4 + ByteUtils.readIntLE(data, pos);
-            default -> 0; // NULL, TRUE, FALSE
-        };
+        int size = EirfType.elemDataSize(elemType);
+        return size == -1 ? 4 + ByteUtils.readIntLE(data, pos) : size;
     }
 }

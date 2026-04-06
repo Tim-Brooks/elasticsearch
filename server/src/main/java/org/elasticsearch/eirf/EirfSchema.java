@@ -34,92 +34,52 @@ public final class EirfSchema {
 
     private static final int INITIAL_CAPACITY = 8;
 
-    // Non-leaf fields (objects)
-    private final List<String> nonLeafNames;
-    private int[] nonLeafParents;
-    private final Map<String, Integer> nonLeafLookup; // "parentIdx/name" -> index
-
-    // Leaf fields (columns)
-    private final List<String> leafNames;
-    private int[] leafParents;
-    private final Map<String, Integer> leafLookup; // "parentIdx/name" -> index
+    private final FieldLevel nonLeaves;
+    private final FieldLevel leaves;
 
     /**
      * Creates a new schema with root automatically added as non-leaf index 0.
      */
     public EirfSchema() {
-        this.nonLeafNames = new ArrayList<>();
-        this.nonLeafParents = new int[INITIAL_CAPACITY];
-        this.nonLeafLookup = new HashMap<>();
-
-        this.leafNames = new ArrayList<>();
-        this.leafParents = new int[INITIAL_CAPACITY];
-        this.leafLookup = new HashMap<>();
+        this.nonLeaves = new FieldLevel(INITIAL_CAPACITY);
+        this.leaves = new FieldLevel(INITIAL_CAPACITY);
 
         // Add root at index 0, self-referential parent
-        nonLeafNames.add("");
-        nonLeafParents[0] = 0;
-        nonLeafLookup.put("0/", 0);
+        nonLeaves.append("", 0);
     }
 
     /**
      * Constructor for reading: builds from pre-parsed non-leaf and leaf arrays.
      */
     EirfSchema(List<String> nonLeafNames, int[] nonLeafParents, List<String> leafNames, int[] leafParents) {
-        this.nonLeafNames = new ArrayList<>(nonLeafNames);
-        this.nonLeafParents = Arrays.copyOf(nonLeafParents, nonLeafNames.size());
-        this.nonLeafLookup = new HashMap<>(nonLeafNames.size());
-        for (int i = 0; i < nonLeafNames.size(); i++) {
-            nonLeafLookup.put(nonLeafParents[i] + "/" + nonLeafNames.get(i), i);
-        }
-
-        this.leafNames = new ArrayList<>(leafNames);
-        this.leafParents = Arrays.copyOf(leafParents, leafNames.size());
-        this.leafLookup = new HashMap<>(leafNames.size());
-        for (int i = 0; i < leafNames.size(); i++) {
-            leafLookup.put(leafParents[i] + "/" + leafNames.get(i), i);
-        }
+        this.nonLeaves = new FieldLevel(nonLeafNames, nonLeafParents);
+        this.leaves = new FieldLevel(leafNames, leafParents);
     }
 
-    // ---- Non-leaf operations ----
-
     public int nonLeafCount() {
-        return nonLeafNames.size();
+        return nonLeaves.count();
     }
 
     public String getNonLeafName(int idx) {
-        return nonLeafNames.get(idx);
+        return nonLeaves.getName(idx);
     }
 
     public int getNonLeafParent(int idx) {
-        return nonLeafParents[idx];
+        return nonLeaves.getParent(idx);
     }
 
     /**
      * Finds a non-leaf field by name and parent index. Returns -1 if not found.
      */
     public int findNonLeaf(String name, int parentIdx) {
-        Integer idx = nonLeafLookup.get(parentIdx + "/" + name);
-        return idx != null ? idx : -1;
+        return nonLeaves.find(name, parentIdx);
     }
 
     /**
      * Appends a non-leaf field if not already present. Idempotent.
      */
     public int appendNonLeaf(String name, int parentIdx) {
-        String key = parentIdx + "/" + name;
-        Integer existing = nonLeafLookup.get(key);
-        if (existing != null) {
-            return existing;
-        }
-        int index = nonLeafNames.size();
-        nonLeafNames.add(name);
-        if (index >= nonLeafParents.length) {
-            nonLeafParents = Arrays.copyOf(nonLeafParents, nonLeafParents.length << 1);
-        }
-        nonLeafParents[index] = parentIdx;
-        nonLeafLookup.put(key, index);
-        return index;
+        return nonLeaves.append(name, parentIdx);
     }
 
     // ---- Leaf operations ----
@@ -128,45 +88,30 @@ public final class EirfSchema {
      * Returns the number of leaf fields (columns).
      */
     public int leafCount() {
-        return leafNames.size();
+        return leaves.count();
     }
 
     public String getLeafName(int idx) {
-        return leafNames.get(idx);
+        return leaves.getName(idx);
     }
 
     public int getLeafParent(int idx) {
-        return leafParents[idx];
+        return leaves.getParent(idx);
     }
 
     /**
      * Finds a leaf field by name and parent non-leaf index. Returns -1 if not found.
      */
     public int findLeaf(String name, int parentIdx) {
-        Integer idx = leafLookup.get(parentIdx + "/" + name);
-        return idx != null ? idx : -1;
+        return leaves.find(name, parentIdx);
     }
 
     /**
      * Appends a leaf field if not already present. Idempotent.
      */
     public int appendLeaf(String name, int parentIdx) {
-        String key = parentIdx + "/" + name;
-        Integer existing = leafLookup.get(key);
-        if (existing != null) {
-            return existing;
-        }
-        int index = leafNames.size();
-        leafNames.add(name);
-        if (index >= leafParents.length) {
-            leafParents = Arrays.copyOf(leafParents, leafParents.length << 1);
-        }
-        leafParents[index] = parentIdx;
-        leafLookup.put(key, index);
-        return index;
+        return leaves.append(name, parentIdx);
     }
-
-    // ---- Path reconstruction ----
 
     /**
      * Reconstructs the full dot-separated path for a leaf field by walking parent pointers.
@@ -174,15 +119,13 @@ public final class EirfSchema {
      * For a leaf "status" directly under root, returns "status".
      */
     public String getFullPath(int leafIdx) {
-        String leafName = leafNames.get(leafIdx);
-        int parentIdx = leafParents[leafIdx];
+        String leafName = leaves.getName(leafIdx);
+        int parentIdx = leaves.getParent(leafIdx);
 
         if (parentIdx == 0) {
-            // Direct child of root
             return leafName;
         }
 
-        // Walk up the non-leaf chain collecting names
         StringBuilder sb = new StringBuilder();
         buildNonLeafPath(sb, parentIdx);
         sb.append('.').append(leafName);
@@ -191,14 +134,14 @@ public final class EirfSchema {
 
     private void buildNonLeafPath(StringBuilder sb, int nonLeafIdx) {
         if (nonLeafIdx == 0) {
-            return; // root, nothing to append
+            return;
         }
-        int parent = nonLeafParents[nonLeafIdx];
+        int parent = nonLeaves.getParent(nonLeafIdx);
         buildNonLeafPath(sb, parent);
-        if (sb.length() > 0) {
+        if (sb.isEmpty() == false) {
             sb.append('.');
         }
-        sb.append(nonLeafNames.get(nonLeafIdx));
+        sb.append(nonLeaves.getName(nonLeafIdx));
     }
 
     /**
@@ -209,19 +152,75 @@ public final class EirfSchema {
         if (nonLeafIdx == 0) {
             return new int[0];
         }
-        // Count depth
         int depth = 0;
         int idx = nonLeafIdx;
         while (idx != 0) {
             depth++;
-            idx = nonLeafParents[idx];
+            idx = nonLeaves.getParent(idx);
         }
         int[] chain = new int[depth];
         idx = nonLeafIdx;
         for (int i = depth - 1; i >= 0; i--) {
             chain[i] = idx;
-            idx = nonLeafParents[idx];
+            idx = nonLeaves.getParent(idx);
         }
         return chain;
+    }
+
+    /**
+     * Holds a parallel name list, parent array, and lookup map for one level of schema fields.
+     */
+    private static final class FieldLevel {
+        private final List<String> names;
+        private int[] parents;
+        private final Map<String, Integer> lookup;
+
+        FieldLevel(int initialCapacity) {
+            this.names = new ArrayList<>();
+            this.parents = new int[initialCapacity];
+            this.lookup = new HashMap<>();
+        }
+
+        FieldLevel(List<String> names, int[] parents) {
+            this.names = new ArrayList<>(names);
+            this.parents = Arrays.copyOf(parents, names.size());
+            this.lookup = new HashMap<>(names.size());
+            for (int i = 0; i < names.size(); i++) {
+                lookup.put(parents[i] + "/" + names.get(i), i);
+            }
+        }
+
+        int count() {
+            return names.size();
+        }
+
+        String getName(int idx) {
+            return names.get(idx);
+        }
+
+        int getParent(int idx) {
+            return parents[idx];
+        }
+
+        int find(String name, int parentIdx) {
+            Integer idx = lookup.get(parentIdx + "/" + name);
+            return idx != null ? idx : -1;
+        }
+
+        int append(String name, int parentIdx) {
+            String key = parentIdx + "/" + name;
+            Integer existing = lookup.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            int index = names.size();
+            names.add(name);
+            if (index >= parents.length) {
+                parents = Arrays.copyOf(parents, parents.length << 1);
+            }
+            parents[index] = parentIdx;
+            lookup.put(key, index);
+            return index;
+        }
     }
 }

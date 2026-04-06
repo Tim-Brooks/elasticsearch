@@ -780,10 +780,7 @@ public class EirfEncoder implements Releasable {
         int totalSize = headerTotal + rowDataSize;
 
         // Header fields (i32 LE)
-        header[0] = 'e';
-        header[1] = 'i';
-        header[2] = 'r';
-        header[3] = 'f';
+        ByteUtils.writeIntLE(EirfBatch.MAGIC_LE, header, 0);
         ByteUtils.writeIntLE(EirfBatch.VERSION, header, 4);
         ByteUtils.writeIntLE(0, header, 8); // flags
         ByteUtils.writeIntLE(docCount, header, 12);

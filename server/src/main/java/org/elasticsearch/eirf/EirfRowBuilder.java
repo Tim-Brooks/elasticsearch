@@ -87,8 +87,6 @@ public class EirfRowBuilder implements Releasable {
         docCount++;
     }
 
-    // ---- Name-based setters ----
-
     public void setString(String path, String value) {
         int colIdx = resolveColumn(path);
         setStringAt(colIdx, value);
@@ -153,9 +151,6 @@ public class EirfRowBuilder implements Releasable {
         scratch.varData[colIdx] = new BytesArray(bytes);
     }
 
-    // ---- Index-based setters ----
-
-    // Large-variant codes stored in scratch; writeRow remaps to small if var section fits
     public void setStringAt(int colIdx, String value) {
         byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
         scratch.typeBytes[colIdx] = EirfType.STRING;
