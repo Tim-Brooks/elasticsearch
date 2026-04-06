@@ -22,14 +22,14 @@ import java.nio.charset.StandardCharsets;
  *   <li><b>Fixed:</b> element_type(1) + per element: data only</li>
  * </ul>
  *
- * <p>Element data sizes: INT/FLOAT=4 bytes, LONG/DOUBLE=8 bytes,
- * STRING=4 bytes length + UTF-8 bytes, NULL/TRUE/FALSE=0 bytes,
- * KEY_VALUE/UNION_ARRAY/FIXED_ARRAY=4 bytes length + payload bytes.
+ * <p>Element data sizes: INT/FLOAT=4 bytes LE, LONG/DOUBLE=8 bytes LE,
+ * STRING=i32 length LE + UTF-8 bytes, NULL/TRUE/FALSE=0 bytes,
+ * KEY_VALUE/UNION_ARRAY/FIXED_ARRAY=i32 length LE + payload bytes.
  */
 public final class EirfArray {
 
     private final byte[] data;
-    private final int end; // exclusive end offset
+    private final int endOffset;
     private final boolean fixed;
     private final byte fixedType; // only meaningful when fixed=true
 
@@ -45,7 +45,7 @@ public final class EirfArray {
      */
     public EirfArray(byte[] data, int offset, int length, boolean fixed) {
         this.data = data;
-        this.end = offset + length;
+        this.endOffset = offset + length;
         this.fixed = fixed;
         if (fixed && length > 0) {
             this.fixedType = data[offset];
@@ -73,7 +73,7 @@ public final class EirfArray {
      * Advances to the next element. Returns false when all bytes have been consumed.
      */
     public boolean next() {
-        if (pos >= end) {
+        if (pos >= endOffset) {
             return false;
         }
         if (fixed) {
@@ -109,44 +109,44 @@ public final class EirfArray {
     }
 
     public int intValue() {
-        int val = ByteUtils.readIntBE(data, pos);
+        int val = ByteUtils.readIntLE(data, pos);
         pos += 4;
         return val;
     }
 
     public float floatValue() {
-        float val = Float.intBitsToFloat(ByteUtils.readIntBE(data, pos));
+        float val = Float.intBitsToFloat(ByteUtils.readIntLE(data, pos));
         pos += 4;
         return val;
     }
 
     public long longValue() {
-        long val = ByteUtils.readLongBE(data, pos);
+        long val = ByteUtils.readLongLE(data, pos);
         pos += 8;
         return val;
     }
 
     public double doubleValue() {
-        double val = Double.longBitsToDouble(ByteUtils.readLongBE(data, pos));
+        double val = Double.longBitsToDouble(ByteUtils.readLongLE(data, pos));
         pos += 8;
         return val;
     }
 
     public String stringValue() {
-        int len = ByteUtils.readIntBE(data, pos);
+        int len = ByteUtils.readIntLE(data, pos);
         String val = new String(data, pos + 4, len, StandardCharsets.UTF_8);
         pos += 4 + len;
         return val;
     }
 
-    /** Returns the offset of the compound element's payload (past the 4-byte length prefix). */
+    /** Returns the offset of the compound element's payload (past the i32 length prefix). */
     public int compoundOffset() {
         return pos + 4;
     }
 
     /** Returns the byte length of the compound element's payload. */
     public int compoundLength() {
-        return ByteUtils.readIntBE(data, pos);
+        return ByteUtils.readIntLE(data, pos);
     }
 
     /** Returns the backing byte array. */
@@ -156,7 +156,7 @@ public final class EirfArray {
 
     /** Skips past the current compound element (length-prefixed). */
     public void skipCompound() {
-        int len = ByteUtils.readIntBE(data, pos);
+        int len = ByteUtils.readIntLE(data, pos);
         pos += 4 + len;
     }
 
@@ -164,7 +164,7 @@ public final class EirfArray {
         return switch (elemType) {
             case EirfType.INT, EirfType.FLOAT -> 4;
             case EirfType.LONG, EirfType.DOUBLE -> 8;
-            case EirfType.STRING, EirfType.KEY_VALUE, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> 4 + ByteUtils.readIntBE(data, pos);
+            case EirfType.STRING, EirfType.KEY_VALUE, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> 4 + ByteUtils.readIntLE(data, pos);
             default -> 0; // NULL, TRUE, FALSE
         };
     }

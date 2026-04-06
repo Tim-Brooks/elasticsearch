@@ -243,10 +243,11 @@ public final class EirfMapToRow {
             byte[] keyBytes = entry.getKey().getBytes(StandardCharsets.UTF_8);
             Object value = entry.getValue();
 
-            gb.ensure(gb.pos + 1 + keyBytes.length + 1 + 12);
+            gb.ensure(gb.pos + 4 + keyBytes.length + 1 + 12);
 
-            // key_length(1) + key_bytes
-            gb.buf[gb.pos++] = (byte) keyBytes.length;
+            // key_length(i32 LE) + key_bytes
+            ByteUtils.writeIntLE(keyBytes.length, gb.buf, gb.pos);
+            gb.pos += 4;
             System.arraycopy(keyBytes, 0, gb.buf, gb.pos, keyBytes.length);
             gb.pos += keyBytes.length;
 
@@ -263,7 +264,7 @@ public final class EirfMapToRow {
             byte[] utf8 = s.getBytes(StandardCharsets.UTF_8);
             gb.ensure(gb.pos + 1 + 4 + utf8.length);
             gb.buf[gb.pos++] = EirfType.STRING;
-            ByteUtils.writeIntBE(utf8.length, gb.buf, gb.pos);
+            ByteUtils.writeIntLE(utf8.length, gb.buf, gb.pos);
             gb.pos += 4;
             System.arraycopy(utf8, 0, gb.buf, gb.pos, utf8.length);
             gb.pos += utf8.length;
@@ -271,36 +272,36 @@ public final class EirfMapToRow {
             if (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) {
                 gb.ensure(gb.pos + 5);
                 gb.buf[gb.pos++] = EirfType.INT;
-                ByteUtils.writeIntBE(l.intValue(), gb.buf, gb.pos);
+                ByteUtils.writeIntLE(l.intValue(), gb.buf, gb.pos);
                 gb.pos += 4;
             } else {
                 gb.ensure(gb.pos + 9);
                 gb.buf[gb.pos++] = EirfType.LONG;
-                ByteUtils.writeLongBE(l, gb.buf, gb.pos);
+                ByteUtils.writeLongLE(l, gb.buf, gb.pos);
                 gb.pos += 8;
             }
         } else if (value instanceof Integer i) {
             gb.ensure(gb.pos + 5);
             gb.buf[gb.pos++] = EirfType.INT;
-            ByteUtils.writeIntBE(i, gb.buf, gb.pos);
+            ByteUtils.writeIntLE(i, gb.buf, gb.pos);
             gb.pos += 4;
         } else if (value instanceof Double d) {
             float f = d.floatValue();
             if ((double) f == d) {
                 gb.ensure(gb.pos + 5);
                 gb.buf[gb.pos++] = EirfType.FLOAT;
-                ByteUtils.writeIntBE(Float.floatToRawIntBits(f), gb.buf, gb.pos);
+                ByteUtils.writeIntLE(Float.floatToRawIntBits(f), gb.buf, gb.pos);
                 gb.pos += 4;
             } else {
                 gb.ensure(gb.pos + 9);
                 gb.buf[gb.pos++] = EirfType.DOUBLE;
-                ByteUtils.writeLongBE(Double.doubleToRawLongBits(d), gb.buf, gb.pos);
+                ByteUtils.writeLongLE(Double.doubleToRawLongBits(d), gb.buf, gb.pos);
                 gb.pos += 8;
             }
         } else if (value instanceof Float f) {
             gb.ensure(gb.pos + 5);
             gb.buf[gb.pos++] = EirfType.FLOAT;
-            ByteUtils.writeIntBE(Float.floatToRawIntBits(f), gb.buf, gb.pos);
+            ByteUtils.writeIntLE(Float.floatToRawIntBits(f), gb.buf, gb.pos);
             gb.pos += 4;
         } else if (value instanceof Boolean b) {
             gb.ensure(gb.pos + 1);
@@ -309,7 +310,7 @@ public final class EirfMapToRow {
             byte[] kvBytes = serializeMap((Map<String, Object>) nested);
             gb.ensure(gb.pos + 1 + 4 + kvBytes.length);
             gb.buf[gb.pos++] = EirfType.KEY_VALUE;
-            ByteUtils.writeIntBE(kvBytes.length, gb.buf, gb.pos);
+            ByteUtils.writeIntLE(kvBytes.length, gb.buf, gb.pos);
             gb.pos += 4;
             System.arraycopy(kvBytes, 0, gb.buf, gb.pos, kvBytes.length);
             gb.pos += kvBytes.length;
@@ -319,7 +320,7 @@ public final class EirfMapToRow {
             int payloadLen = arrayPayload.length - 1;
             gb.ensure(gb.pos + 1 + 4 + payloadLen);
             gb.buf[gb.pos++] = arrayType;
-            ByteUtils.writeIntBE(payloadLen, gb.buf, gb.pos);
+            ByteUtils.writeIntLE(payloadLen, gb.buf, gb.pos);
             gb.pos += 4;
             System.arraycopy(arrayPayload, 1, gb.buf, gb.pos, payloadLen);
             gb.pos += payloadLen;

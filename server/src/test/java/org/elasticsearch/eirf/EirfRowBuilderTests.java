@@ -130,16 +130,26 @@ public class EirfRowBuilderTests extends ESTestCase {
 
     public void testKeyValueColumn() {
         try (EirfRowBuilder builder = new EirfRowBuilder()) {
-            // KEY_VALUE with one entry: key="x", type=INT, value=42
-            byte[] kvBytes = new byte[] { 1, 'x', EirfType.INT, 0, 0, 0, 42 };
+            // KEY_VALUE with one entry: key_length(i32 LE)=1, key="x", type=INT, value=42 (LE)
+            byte[] kvBytes = new byte[] {
+                1,
+                0,
+                0,
+                0,  // key_length = 1 (i32 LE)
+                'x',         // key bytes
+                EirfType.INT,
+                42,
+                0,
+                0,
+                0  // INT value = 42 (LE)
+            };
             builder.startDocument();
             builder.setKeyValue("data", kvBytes);
             builder.endDocument();
 
             EirfBatch batch = builder.build();
             EirfRowReader row0 = batch.getRowReader(0);
-            byte type = row0.getTypeByte(0);
-            assertTrue(type == EirfType.SMALL_KEY_VALUE || type == EirfType.KEY_VALUE);
+            assertEquals(EirfType.KEY_VALUE, row0.getTypeByte(0));
             byte[] readBack = row0.getKeyValueBytes(0);
             assertArrayEquals(kvBytes, readBack);
 

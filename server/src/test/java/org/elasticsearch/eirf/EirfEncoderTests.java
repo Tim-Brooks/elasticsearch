@@ -80,14 +80,15 @@ public class EirfEncoderTests extends ESTestCase {
         batch.close();
     }
 
-    public void testSmallVariantsUsedForSmallDocuments() throws IOException {
+    public void testSmallRowForSmallDocuments() throws IOException {
         List<BytesReference> sources = List.of(new BytesArray("{\"name\":\"alice\"}"));
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
         EirfRowReader row0 = batch.getRowReader(0);
-        // Should use SMALL_STRING since var section is tiny
-        assertEquals(EirfType.SMALL_STRING, row0.getTypeByte(0));
+        // Should use small row since var section is tiny
+        assertTrue(row0.isSmallRow());
+        assertEquals(EirfType.STRING, row0.getTypeByte(0));
         assertEquals("alice", row0.getStringValue(0));
 
         batch.close();
@@ -132,8 +133,8 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfRowReader row0 = batch.getRowReader(0);
         byte type = row0.getTypeByte(0);
-        // Should be a fixed array (small variant) since all strings
-        assertTrue(type == EirfType.SMALL_FIXED_ARRAY || type == EirfType.FIXED_ARRAY);
+        // Should be FIXED_ARRAY since all strings
+        assertEquals(EirfType.FIXED_ARRAY, type);
 
         byte[] arrayData = row0.getArrayValue(0);
         EirfArray reader = new EirfArray(arrayData, true);
@@ -154,8 +155,7 @@ public class EirfEncoderTests extends ESTestCase {
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
         EirfRowReader row0 = batch.getRowReader(0);
-        byte type = row0.getTypeByte(0);
-        assertTrue(type == EirfType.SMALL_UNION_ARRAY || type == EirfType.UNION_ARRAY);
+        assertEquals(EirfType.UNION_ARRAY, row0.getTypeByte(0));
 
         byte[] arrayData = row0.getArrayValue(0);
         EirfArray reader = new EirfArray(arrayData, false);
@@ -178,7 +178,7 @@ public class EirfEncoderTests extends ESTestCase {
 
     public void testLargeArrayProducesUnionArray() throws IOException {
         StringBuilder json = new StringBuilder("{\"nums\":[");
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < 200; i++) {
             if (i > 0) json.append(",");
             json.append(i);
         }
@@ -189,8 +189,8 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfRowReader row0 = batch.getRowReader(0);
         byte type = row0.getTypeByte(0);
-        // Large arrays (> buffer) produce UNION_ARRAY
-        assertTrue(type == EirfType.SMALL_UNION_ARRAY || type == EirfType.UNION_ARRAY);
+        // Large arrays (> 128 buffer) produce UNION_ARRAY
+        assertEquals(EirfType.UNION_ARRAY, type);
 
         byte[] arrayData = row0.getArrayValue(0);
         EirfArray reader = new EirfArray(arrayData);
@@ -200,7 +200,7 @@ public class EirfEncoderTests extends ESTestCase {
             assertEquals(count, reader.intValue());
             count++;
         }
-        assertEquals(100, count);
+        assertEquals(200, count);
 
         batch.close();
     }
@@ -210,8 +210,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        byte type = batch.getRowReader(0).getTypeByte(0);
-        assertTrue(type == EirfType.SMALL_UNION_ARRAY || type == EirfType.UNION_ARRAY);
+        assertEquals(EirfType.UNION_ARRAY, batch.getRowReader(0).getTypeByte(0));
 
         batch.close();
     }
@@ -256,9 +255,9 @@ public class EirfEncoderTests extends ESTestCase {
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
         EirfRowReader row0 = batch.getRowReader(0);
-        // Empty array: union array with 0 elements (all same type vacuously fails since count=0)
+        // Empty array: union array with 0 elements
         byte type = row0.getTypeByte(0);
-        assertTrue(EirfType.isSmallVariable(type) || EirfType.isLargeVariable(type));
+        assertTrue(EirfType.isVariable(type));
 
         batch.close();
     }
@@ -343,8 +342,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         assertEquals(EirfType.INT, batch.getRowReader(0).getTypeByte(0));
         assertEquals(42, batch.getRowReader(0).getIntValue(0));
-        byte type1 = batch.getRowReader(1).getTypeByte(0);
-        assertTrue(type1 == EirfType.SMALL_STRING || type1 == EirfType.STRING);
+        assertEquals(EirfType.STRING, batch.getRowReader(1).getTypeByte(0));
         assertEquals("hello", batch.getRowReader(1).getStringValue(0));
 
         batch.close();
@@ -399,8 +397,7 @@ public class EirfEncoderTests extends ESTestCase {
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
         EirfRowReader row0 = batch.getRowReader(0);
-        byte type = row0.getTypeByte(0);
-        assertTrue(type == EirfType.SMALL_FIXED_ARRAY || type == EirfType.FIXED_ARRAY);
+        assertEquals(EirfType.FIXED_ARRAY, row0.getTypeByte(0));
 
         byte[] arrayData = row0.getArrayValue(0);
         EirfArray reader = new EirfArray(arrayData, true);

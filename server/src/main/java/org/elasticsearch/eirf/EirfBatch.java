@@ -21,17 +21,18 @@ import java.util.List;
 /**
  * Immutable reader for an EIRF (Elastic Internal Row Format) batch.
  *
- * <p>Binary layout (32-byte header):
+ * <p>Binary layout (32-byte header, all multi-byte integers little-endian):
  * <pre>
- * magic(4) version(4) flags(4) doc_count(4) schema_offset(4) doc_index_offset(4) data_offset(4) total_size(4)
- * [Schema]    non_leaf_count(4) + entries + leaf_count(4) + entries
- * [Doc Index] entries[doc_count]: data_offset(4) + data_length(4)
+ * magic(4) version(i32) flags(i32) doc_count(i32) schema_offset(i32) doc_index_offset(i32) data_offset(i32) total_size(i32)
+ * [Schema]    non_leaf_count(u16) + entries + leaf_count(u16) + entries
+ * [Doc Index] entries[doc_count]: data_offset(i32) + data_length(i32)
  * [Row Data]  rows back-to-back
  * </pre>
  */
 public final class EirfBatch implements Releasable, Accountable {
 
-    public static final int MAGIC = 0x65697266; // "eirf"
+    /** Magic bytes: ASCII "eirf" (0x65 0x69 0x72 0x66). Read as 4 individual bytes, not an integer. */
+    public static final byte[] MAGIC = new byte[] { 'e', 'i', 'r', 'f' };
     public static final int VERSION = 1;
 
     private final BytesReference data;
@@ -49,34 +50,38 @@ public final class EirfBatch implements Releasable, Accountable {
         this.data = data;
         this.releasable = releasable;
 
-        int magic = data.getInt(0);
-        if (magic != MAGIC) {
+        if (data.get(0) != 'e' || data.get(1) != 'i' || data.get(2) != 'r' || data.get(3) != 'f') {
             throw new IllegalArgumentException(
-                "Invalid magic: 0x" + Integer.toHexString(magic) + ", expected 0x" + Integer.toHexString(MAGIC)
+                "Invalid magic: expected 'eirf', got '"
+                    + (char) data.get(0)
+                    + (char) data.get(1)
+                    + (char) data.get(2)
+                    + (char) data.get(3)
+                    + "'"
             );
         }
-        int version = data.getInt(4);
+        int version = data.getIntLE(4);
         if (version != VERSION) {
             throw new IllegalArgumentException("Unsupported version: " + version);
         }
-        this.docCount = data.getInt(12);
-        int schemaOffset = data.getInt(16);
-        this.docIndexOffset = data.getInt(20);
-        this.dataOffset = data.getInt(24);
+        this.docCount = data.getIntLE(12);
+        int schemaOffset = data.getIntLE(16);
+        this.docIndexOffset = data.getIntLE(20);
+        this.dataOffset = data.getIntLE(24);
 
         this.schema = parseSchema(data, schemaOffset);
     }
 
     private static EirfSchema parseSchema(BytesReference data, int offset) {
-        // Non-leaf fields (all u16)
-        int nonLeafCount = readU16(data, offset);
+        // Non-leaf fields (all u16 LE)
+        int nonLeafCount = readU16LE(data, offset);
         offset += 2;
         List<String> nonLeafNames = new ArrayList<>(nonLeafCount);
         int[] nonLeafParents = new int[nonLeafCount];
         for (int i = 0; i < nonLeafCount; i++) {
-            nonLeafParents[i] = readU16(data, offset);
+            nonLeafParents[i] = readU16LE(data, offset);
             offset += 2;
-            int nameLen = readU16(data, offset);
+            int nameLen = readU16LE(data, offset);
             offset += 2;
             if (nameLen > 0) {
                 BytesRef bytesRef = data.slice(offset, nameLen).toBytesRef();
@@ -87,15 +92,15 @@ public final class EirfBatch implements Releasable, Accountable {
             offset += nameLen;
         }
 
-        // Leaf fields (all u16)
-        int leafCount = readU16(data, offset);
+        // Leaf fields (all u16 LE)
+        int leafCount = readU16LE(data, offset);
         offset += 2;
         List<String> leafNames = new ArrayList<>(leafCount);
         int[] leafParents = new int[leafCount];
         for (int i = 0; i < leafCount; i++) {
-            leafParents[i] = readU16(data, offset);
+            leafParents[i] = readU16LE(data, offset);
             offset += 2;
-            int nameLen = readU16(data, offset);
+            int nameLen = readU16LE(data, offset);
             offset += 2;
             BytesRef bytesRef = data.slice(offset, nameLen).toBytesRef();
             leafNames.add(new String(bytesRef.bytes, bytesRef.offset, bytesRef.length, StandardCharsets.UTF_8));
@@ -105,8 +110,8 @@ public final class EirfBatch implements Releasable, Accountable {
         return new EirfSchema(nonLeafNames, nonLeafParents, leafNames, leafParents);
     }
 
-    static int readU16(BytesReference data, int offset) {
-        return ((data.get(offset) & 0xFF) << 8) | (data.get(offset + 1) & 0xFF);
+    static int readU16LE(BytesReference data, int offset) {
+        return (data.get(offset) & 0xFF) | ((data.get(offset + 1) & 0xFF) << 8);
     }
 
     public int docCount() {
@@ -126,8 +131,8 @@ public final class EirfBatch implements Releasable, Accountable {
             throw new IndexOutOfBoundsException("docIndex " + docIndex + " out of range [0, " + docCount + ")");
         }
         int entryOffset = docIndexOffset + docIndex * 8;
-        int rowDataOffset = data.getInt(entryOffset);
-        int rowDataLength = data.getInt(entryOffset + 4);
+        int rowDataOffset = data.getIntLE(entryOffset);
+        int rowDataLength = data.getIntLE(entryOffset + 4);
         return new EirfRowReader(data.slice(dataOffset + rowDataOffset, rowDataLength), schema);
     }
 

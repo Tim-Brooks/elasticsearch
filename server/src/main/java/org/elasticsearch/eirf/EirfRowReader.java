@@ -19,34 +19,47 @@ import java.nio.charset.StandardCharsets;
  *
  * <p>Row layout:
  * <pre>
- * column_count(u16) | type_bytes[column_count] | fixed_section | var_section
+ * row_flags(u8) | column_count(u16) | var_offset(u16 or i32) | type_bytes[column_count] | fixed_section | var_section
  * </pre>
  */
 public final class EirfRowReader {
 
-    static final int TYPE_BYTES_OFFSET = 2; // u16 column_count
-
     private final EirfSchema schema;
     private final BytesReference rowData;
+    private final boolean smallRow;
     private final int rowColumnCount;
+    private final int typeBytesOffset;
     private final int fixedSectionOffset;
     private final int varSectionOffset;
 
     public EirfRowReader(BytesReference rowData, EirfSchema schema) {
         this.rowData = rowData;
         this.schema = schema;
-        this.rowColumnCount = EirfBatch.readU16(rowData, 0);
-        this.fixedSectionOffset = TYPE_BYTES_OFFSET + rowColumnCount;
 
-        int fixedTotal = 0;
-        for (int col = 0; col < rowColumnCount; col++) {
-            fixedTotal += EirfType.fixedSize(rowData.get(TYPE_BYTES_OFFSET + col));
+        // Parse row_flags (u8 at offset 0)
+        byte rowFlags = rowData.get(0);
+        this.smallRow = (rowFlags & 0x01) != 0;
+
+        // Parse column_count (u16 LE at offset 1)
+        this.rowColumnCount = EirfBatch.readU16LE(rowData, 1);
+
+        // Parse var_offset (u16 LE or i32 LE at offset 3)
+        if (smallRow) {
+            this.varSectionOffset = EirfBatch.readU16LE(rowData, 3);
+            this.typeBytesOffset = 5; // 1 + 2 + 2
+        } else {
+            this.varSectionOffset = rowData.getIntLE(3);
+            this.typeBytesOffset = 7; // 1 + 2 + 4
         }
-        this.varSectionOffset = fixedSectionOffset + fixedTotal;
+        this.fixedSectionOffset = typeBytesOffset + rowColumnCount;
     }
 
     public int columnCount() {
         return rowColumnCount;
+    }
+
+    public boolean isSmallRow() {
+        return smallRow;
     }
 
     public EirfSchema schema() {
@@ -57,7 +70,7 @@ public final class EirfRowReader {
         if (col >= rowColumnCount) {
             return EirfType.NULL;
         }
-        return rowData.get(TYPE_BYTES_OFFSET + col);
+        return rowData.get(typeBytesOffset + col);
     }
 
     public boolean isNull(int col) {
@@ -73,23 +86,22 @@ public final class EirfRowReader {
 
     public int getIntValue(int col) {
         int offset = computeFixedOffset(col);
-        return readIntBE(offset);
+        return rowData.getIntLE(offset);
     }
 
     public float getFloatValue(int col) {
         int offset = computeFixedOffset(col);
-        return Float.intBitsToFloat(readIntBE(offset));
+        return Float.intBitsToFloat(rowData.getIntLE(offset));
     }
 
     public long getLongValue(int col) {
         int offset = computeFixedOffset(col);
-        return readLongBE(offset);
+        return rowData.getLongLE(offset);
     }
 
     public double getDoubleValue(int col) {
         int offset = computeFixedOffset(col);
-        long bits = readLongBE(offset);
-        return Double.longBitsToDouble(bits);
+        return Double.longBitsToDouble(rowData.getLongLE(offset));
     }
 
     public String getStringValue(int col) {
@@ -116,19 +128,18 @@ public final class EirfRowReader {
 
     /**
      * Reads the var offset and length from the fixed section for the given column.
-     * Handles both small (u16|u16) and large (u32|u32) variants.
+     * Handles both small (u16|u16 LE) and large (i32|i32 LE) variants.
      * Returns [varOffset, varLength].
      */
     private int[] getVarSlice(int col) {
         int offset = computeFixedOffset(col);
-        byte type = getTypeByte(col);
-        if (EirfType.isSmallVariable(type)) {
-            int varOffset = EirfBatch.readU16(rowData, offset);
-            int varLength = EirfBatch.readU16(rowData, offset + 2);
+        if (smallRow) {
+            int varOffset = EirfBatch.readU16LE(rowData, offset);
+            int varLength = EirfBatch.readU16LE(rowData, offset + 2);
             return new int[] { varOffset, varLength };
         } else {
-            int varOffset = rowData.getInt(offset);
-            int varLength = rowData.getInt(offset + 4);
+            int varOffset = rowData.getIntLE(offset);
+            int varLength = rowData.getIntLE(offset + 4);
             return new int[] { varOffset, varLength };
         }
     }
@@ -136,19 +147,8 @@ public final class EirfRowReader {
     private int computeFixedOffset(int col) {
         int offset = fixedSectionOffset;
         for (int i = 0; i < col; i++) {
-            offset += EirfType.fixedSize(rowData.get(TYPE_BYTES_OFFSET + i));
+            offset += EirfType.fixedSize(rowData.get(typeBytesOffset + i), smallRow);
         }
         return offset;
-    }
-
-    // TODO: Add to BytesReference
-    private long readLongBE(int offset) {
-        long hi = rowData.getInt(offset) & 0xFFFFFFFFL;
-        long lo = rowData.getInt(offset + 4) & 0xFFFFFFFFL;
-        return (hi << 32) | lo;
-    }
-
-    private int readIntBE(int offset) {
-        return rowData.getInt(offset);
     }
 }

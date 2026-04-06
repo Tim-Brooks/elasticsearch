@@ -58,9 +58,13 @@ public class EirfEncoder implements Releasable {
     private int docCount;
 
     public EirfEncoder() {
+        this(new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE));
+    }
+
+    public EirfEncoder(final RecyclerBytesStreamOutput rowOutput) {
         this.schema = new EirfSchema();
         this.scratch = new ScratchBuffers(INITIAL_CAPACITY);
-        this.rowOutput = new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE);
+        this.rowOutput = rowOutput;
         this.rowOffsets = new int[INITIAL_CAPACITY];
         this.rowLengths = new int[INITIAL_CAPACITY];
         this.docCount = 0;
@@ -75,6 +79,7 @@ public class EirfEncoder implements Releasable {
         Arrays.fill(scratch.varData, 0, columnCountBefore, null);
 
         try (XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)) {
+            // The schema will prevent duplicate columns. No need to double with JSON's internal duplicate prevention.
             parser.allowDuplicateKeys(true);
             parser.nextToken(); // START_OBJECT
             flattenObject(parser, 0, schema, scratch, xContentType);
@@ -113,8 +118,6 @@ public class EirfEncoder implements Releasable {
         rowOutput.close();
     }
 
-    // ---- Convenience static methods ----
-
     public static EirfBatch encode(List<BytesReference> sources, XContentType xContentType) throws IOException {
         try (EirfEncoder encoder = new EirfEncoder()) {
             for (BytesReference source : sources) {
@@ -123,8 +126,6 @@ public class EirfEncoder implements Releasable {
             return encoder.build();
         }
     }
-
-    // ---- Internal: shared with EirfRowBuilder ----
 
     static final class ScratchBuffers {
         byte[] typeBytes;
@@ -176,7 +177,6 @@ public class EirfEncoder implements Releasable {
             switch (token) {
                 case START_ARRAY -> encodeArray(parser, xContentType, colIdx, scratch);
                 case VALUE_STRING -> {
-                    // Stored as large-variant type in scratch; writeRow decides small vs large
                     scratch.typeBytes[colIdx] = EirfType.STRING;
                     scratch.varData[colIdx] = parser.optimizedText().bytes();
                 }
@@ -218,7 +218,7 @@ public class EirfEncoder implements Releasable {
     }
 
     /** Maximum number of elements to buffer when detecting FIXED_ARRAY type. */
-    private static final int ARRAY_BUFFER_SIZE = 64;
+    private static final int ARRAY_BUFFER_SIZE = 128;
 
     private static void encodeArray(XContentParser parser, XContentType xContentType, int colIdx, ScratchBuffers scratch)
         throws IOException {
@@ -373,24 +373,24 @@ public class EirfEncoder implements Releasable {
     private static int writeElemData(byte[] packed, int pos, byte type, Object data) {
         switch (type) {
             case EirfType.INT, EirfType.FLOAT -> {
-                ByteUtils.writeIntBE((int) (long) data, packed, pos);
+                ByteUtils.writeIntLE((int) (long) data, packed, pos);
                 pos += 4;
             }
             case EirfType.LONG, EirfType.DOUBLE -> {
-                ByteUtils.writeLongBE((long) data, packed, pos);
+                ByteUtils.writeLongLE((long) data, packed, pos);
                 pos += 8;
             }
             case EirfType.STRING -> {
                 XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) data;
                 int len = str.length();
-                ByteUtils.writeIntBE(len, packed, pos);
+                ByteUtils.writeIntLE(len, packed, pos);
                 pos += 4;
                 System.arraycopy(str.bytes(), str.offset(), packed, pos, len);
                 pos += len;
             }
             case EirfType.KEY_VALUE, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> {
                 byte[] bytes = (byte[]) data;
-                ByteUtils.writeIntBE(bytes.length, packed, pos);
+                ByteUtils.writeIntLE(bytes.length, packed, pos);
                 pos += 4;
                 System.arraycopy(bytes, 0, packed, pos, bytes.length);
                 pos += bytes.length;
@@ -438,10 +438,11 @@ public class EirfEncoder implements Releasable {
             byte[] keyBytes = parser.currentName().getBytes(StandardCharsets.UTF_8);
             token = parser.nextToken(); // value token
 
-            gb.ensure(gb.pos + 1 + keyBytes.length + 1 + 12);
+            gb.ensure(gb.pos + 4 + keyBytes.length + 1 + 12);
 
-            // key_length(1) + key_bytes
-            gb.buf[gb.pos++] = (byte) keyBytes.length;
+            // key_length(i32) + key_bytes
+            ByteUtils.writeIntLE(keyBytes.length, gb.buf, gb.pos);
+            gb.pos += 4;
             System.arraycopy(keyBytes, 0, gb.buf, gb.pos, keyBytes.length);
             gb.pos += keyBytes.length;
 
@@ -566,7 +567,7 @@ public class EirfEncoder implements Releasable {
                 XContentString.UTF8Bytes str = parser.optimizedText().bytes();
                 gb.ensure(gb.pos + 1 + 4 + str.length());
                 gb.buf[gb.pos++] = EirfType.STRING;
-                ByteUtils.writeIntBE(str.length(), gb.buf, gb.pos);
+                ByteUtils.writeIntLE(str.length(), gb.buf, gb.pos);
                 gb.pos += 4;
                 System.arraycopy(str.bytes(), str.offset(), gb.buf, gb.pos, str.length());
                 gb.pos += str.length();
@@ -579,11 +580,11 @@ public class EirfEncoder implements Releasable {
                         long val = parser.longValue();
                         if (val >= Integer.MIN_VALUE && val <= Integer.MAX_VALUE) {
                             gb.buf[gb.pos++] = EirfType.INT;
-                            ByteUtils.writeIntBE((int) val, gb.buf, gb.pos);
+                            ByteUtils.writeIntLE((int) val, gb.buf, gb.pos);
                             gb.pos += 4;
                         } else {
                             gb.buf[gb.pos++] = EirfType.LONG;
-                            ByteUtils.writeLongBE(val, gb.buf, gb.pos);
+                            ByteUtils.writeLongLE(val, gb.buf, gb.pos);
                             gb.pos += 8;
                         }
                     }
@@ -592,11 +593,11 @@ public class EirfEncoder implements Releasable {
                         float fval = (float) val;
                         if ((double) fval == val) {
                             gb.buf[gb.pos++] = EirfType.FLOAT;
-                            ByteUtils.writeIntBE(Float.floatToRawIntBits(fval), gb.buf, gb.pos);
+                            ByteUtils.writeIntLE(Float.floatToRawIntBits(fval), gb.buf, gb.pos);
                             gb.pos += 4;
                         } else {
                             gb.buf[gb.pos++] = EirfType.DOUBLE;
-                            ByteUtils.writeLongBE(Double.doubleToRawLongBits(val), gb.buf, gb.pos);
+                            ByteUtils.writeLongLE(Double.doubleToRawLongBits(val), gb.buf, gb.pos);
                             gb.pos += 8;
                         }
                     }
@@ -604,7 +605,7 @@ public class EirfEncoder implements Releasable {
                         XContentString.UTF8Bytes str = parser.optimizedText().bytes();
                         gb.ensure(gb.pos + 1 + 4 + str.length());
                         gb.buf[gb.pos++] = EirfType.STRING;
-                        ByteUtils.writeIntBE(str.length(), gb.buf, gb.pos);
+                        ByteUtils.writeIntLE(str.length(), gb.buf, gb.pos);
                         gb.pos += 4;
                         System.arraycopy(str.bytes(), str.offset(), gb.buf, gb.pos, str.length());
                         gb.pos += str.length();
@@ -623,7 +624,7 @@ public class EirfEncoder implements Releasable {
                 byte[] nested = serializeKeyValue(parser, xContentType);
                 gb.ensure(gb.pos + 1 + 4 + nested.length);
                 gb.buf[gb.pos++] = EirfType.KEY_VALUE;
-                ByteUtils.writeIntBE(nested.length, gb.buf, gb.pos);
+                ByteUtils.writeIntLE(nested.length, gb.buf, gb.pos);
                 gb.pos += 4;
                 System.arraycopy(nested, 0, gb.buf, gb.pos, nested.length);
                 gb.pos += nested.length;
@@ -634,7 +635,7 @@ public class EirfEncoder implements Releasable {
                 int payloadLen = nested.length - 1;
                 gb.ensure(gb.pos + 1 + 4 + payloadLen);
                 gb.buf[gb.pos++] = nestedType;
-                ByteUtils.writeIntBE(payloadLen, gb.buf, gb.pos);
+                ByteUtils.writeIntLE(payloadLen, gb.buf, gb.pos);
                 gb.pos += 4;
                 System.arraycopy(nested, 1, gb.buf, gb.pos, payloadLen);
                 gb.pos += payloadLen;
@@ -644,8 +645,9 @@ public class EirfEncoder implements Releasable {
     }
 
     /**
-     * Writes a row to output. Scratch type bytes use large-variant codes for variable types.
-     * This method decides small vs large based on total var section size.
+     * Writes a row to output.
+     *
+     * <p>Row layout: row_flags(u8) | column_count(u16) | var_offset(u16 or i32) | type_bytes | fixed_section | var_section
      */
     static void writeRow(RecyclerBytesStreamOutput output, int columnCount, ScratchBuffers scratch) throws IOException {
         byte[] typeBytes = scratch.typeBytes;
@@ -656,54 +658,70 @@ public class EirfEncoder implements Releasable {
         int totalVarSize = 0;
         for (int col = 0; col < columnCount; col++) {
             byte typeByte = typeBytes[col];
-            if (EirfType.isLargeVariable(typeByte)) {
+            if (EirfType.isVariable(typeByte)) {
                 totalVarSize += getVarDataLength(typeByte, varData[col]);
             }
         }
-        boolean useSmall = totalVarSize < EirfType.SMALL_VAR_THRESHOLD;
+        boolean smallRow = totalVarSize <= EirfType.SMALL_ROW_MAX_VAR_SIZE;
 
-        // Write column_count as u16
-        output.writeShort((short) columnCount);
-
-        // Write type bytes, remapping large variable types to small if needed
+        // Compute fixed section size to determine var_offset
+        int fixedSectionSize = 0;
         for (int col = 0; col < columnCount; col++) {
-            byte typeByte = typeBytes[col];
-            if (useSmall && EirfType.isLargeVariable(typeByte)) {
-                output.writeByte(EirfType.largeToSmall(typeByte));
-            } else {
-                output.writeByte(typeByte);
-            }
+            fixedSectionSize += EirfType.fixedSize(typeBytes[col], smallRow);
+        }
+
+        // row_flags(1) + column_count(2) + var_offset(2 or 4) + type_bytes(columnCount) + fixed_section
+        int varOffsetFieldSize = smallRow ? 2 : 4;
+        int varOffset = 1 + 2 + varOffsetFieldSize + columnCount + fixedSectionSize;
+
+        // Write row_flags (u8): bit 0 = small_row
+        output.writeByte(smallRow ? (byte) 0x01 : (byte) 0x00);
+
+        // Write column_count as u16 LE
+        writeShortLE(output, columnCount);
+
+        // Write var_offset
+        if (smallRow) {
+            writeShortLE(output, varOffset);
+        } else {
+            output.writeIntLE(varOffset);
+        }
+
+        // Write type bytes (unchanged — type codes are the same regardless of row size)
+        for (int col = 0; col < columnCount; col++) {
+            output.writeByte(typeBytes[col]);
         }
 
         // Write fixed section
-        int varOffset = 0;
+        int varDataOffset = 0;
         for (int col = 0; col < columnCount; col++) {
             byte typeByte = typeBytes[col];
-            int fs = EirfType.fixedSize(typeByte);
+            int fs = EirfType.fixedSize(typeByte, smallRow);
             if (fs == 0) continue;
 
             if (typeByte == EirfType.INT || typeByte == EirfType.FLOAT) {
                 output.writeBytes(fixedData, col * 8, 4);
             } else if (typeByte == EirfType.LONG || typeByte == EirfType.DOUBLE) {
                 output.writeBytes(fixedData, col * 8, 8);
-            } else if (EirfType.isLargeVariable(typeByte)) {
+            } else if (EirfType.isVariable(typeByte)) {
                 int len = getVarDataLength(typeByte, varData[col]);
-                if (useSmall) {
-                    // 4-byte entry: u16 offset | u16 length
-                    output.writeShort((short) varOffset);
-                    output.writeShort((short) len);
+                if (smallRow) {
+                    // 4-byte entry: u16 offset | u16 length (both LE)
+                    writeShortLE(output, varDataOffset);
+                    writeShortLE(output, len);
                 } else {
-                    // 8-byte entry: u32 offset | u32 length
-                    output.writeLong(((long) varOffset << 32) | (len & 0xFFFFFFFFL));
+                    // 8-byte entry: i32 offset | i32 length (both LE)
+                    output.writeIntLE(varDataOffset);
+                    output.writeIntLE(len);
                 }
-                varOffset += len;
+                varDataOffset += len;
             }
         }
 
         // Write var section
         for (int col = 0; col < columnCount; col++) {
             byte typeByte = typeBytes[col];
-            if (EirfType.isLargeVariable(typeByte)) {
+            if (EirfType.isVariable(typeByte)) {
                 writeVarData(output, typeByte, varData[col]);
             }
         }
@@ -761,60 +779,68 @@ public class EirfEncoder implements Releasable {
         int dataOffset = headerTotal;
         int totalSize = headerTotal + rowDataSize;
 
-        // Header fields (still u32)
-        ByteUtils.writeIntBE(EirfBatch.MAGIC, header, 0);
-        ByteUtils.writeIntBE(EirfBatch.VERSION, header, 4);
-        ByteUtils.writeIntBE(0, header, 8); // flags
-        ByteUtils.writeIntBE(docCount, header, 12);
-        ByteUtils.writeIntBE(schemaOffset, header, 16);
-        ByteUtils.writeIntBE(docIndexOffset, header, 20);
-        ByteUtils.writeIntBE(dataOffset, header, 24);
-        ByteUtils.writeIntBE(totalSize, header, 28);
+        // Header fields (i32 LE)
+        header[0] = 'e';
+        header[1] = 'i';
+        header[2] = 'r';
+        header[3] = 'f';
+        ByteUtils.writeIntLE(EirfBatch.VERSION, header, 4);
+        ByteUtils.writeIntLE(0, header, 8); // flags
+        ByteUtils.writeIntLE(docCount, header, 12);
+        ByteUtils.writeIntLE(schemaOffset, header, 16);
+        ByteUtils.writeIntLE(docIndexOffset, header, 20);
+        ByteUtils.writeIntLE(dataOffset, header, 24);
+        ByteUtils.writeIntLE(totalSize, header, 28);
 
-        // Schema section: non-leaf fields (u16)
+        // Schema section: non-leaf fields (u16 LE)
         int pos = schemaOffset;
-        writeShortBE(header, pos, nonLeafCount);
+        writeShortLE(header, pos, nonLeafCount);
         pos += 2;
         for (int i = 0; i < nonLeafCount; i++) {
-            writeShortBE(header, pos, schema.getNonLeafParent(i));
+            writeShortLE(header, pos, schema.getNonLeafParent(i));
             pos += 2;
-            writeShortBE(header, pos, nonLeafNameBytes[i].length);
+            writeShortLE(header, pos, nonLeafNameBytes[i].length);
             pos += 2;
             System.arraycopy(nonLeafNameBytes[i], 0, header, pos, nonLeafNameBytes[i].length);
             pos += nonLeafNameBytes[i].length;
         }
 
-        // Schema section: leaf fields (u16)
-        writeShortBE(header, pos, leafCount);
+        // Schema section: leaf fields (u16 LE)
+        writeShortLE(header, pos, leafCount);
         pos += 2;
         for (int i = 0; i < leafCount; i++) {
-            writeShortBE(header, pos, schema.getLeafParent(i));
+            writeShortLE(header, pos, schema.getLeafParent(i));
             pos += 2;
-            writeShortBE(header, pos, leafNameBytes[i].length);
+            writeShortLE(header, pos, leafNameBytes[i].length);
             pos += 2;
             System.arraycopy(leafNameBytes[i], 0, header, pos, leafNameBytes[i].length);
             pos += leafNameBytes[i].length;
         }
 
-        // Doc index section (still u32)
+        // Doc index section (i32 LE)
         for (int i = 0; i < docCount; i++) {
-            ByteUtils.writeIntBE(rowOffsets[i], header, docIndexOffset + i * 8);
-            ByteUtils.writeIntBE(rowLengths[i], header, docIndexOffset + i * 8 + 4);
+            ByteUtils.writeIntLE(rowOffsets[i], header, docIndexOffset + i * 8);
+            ByteUtils.writeIntLE(rowLengths[i], header, docIndexOffset + i * 8 + 4);
         }
 
         return new BytesArray(header);
     }
 
     static void writeLongToFixed(byte[] fixedData, int colIdx, long value) {
-        ByteUtils.writeLongBE(value, fixedData, colIdx * 8);
+        ByteUtils.writeLongLE(value, fixedData, colIdx * 8);
     }
 
     static void writeIntToFixed(byte[] fixedData, int colIdx, int value) {
-        ByteUtils.writeIntBE(value, fixedData, colIdx * 8);
+        ByteUtils.writeIntLE(value, fixedData, colIdx * 8);
     }
 
-    private static void writeShortBE(byte[] buf, int offset, int value) {
-        buf[offset] = (byte) (value >>> 8);
-        buf[offset + 1] = (byte) value;
+    private static void writeShortLE(byte[] buf, int offset, int value) {
+        buf[offset] = (byte) value;
+        buf[offset + 1] = (byte) (value >>> 8);
+    }
+
+    private static void writeShortLE(RecyclerBytesStreamOutput output, int value) throws IOException {
+        output.writeByte((byte) value);
+        output.writeByte((byte) (value >>> 8));
     }
 }

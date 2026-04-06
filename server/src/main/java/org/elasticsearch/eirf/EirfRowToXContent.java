@@ -83,25 +83,25 @@ public final class EirfRowToXContent {
             case EirfType.FLOAT -> builder.field(leafName, row.getFloatValue(leafIdx));
             case EirfType.LONG -> builder.field(leafName, row.getLongValue(leafIdx));
             case EirfType.DOUBLE -> builder.field(leafName, row.getDoubleValue(leafIdx));
-            case EirfType.SMALL_STRING, EirfType.STRING -> builder.field(leafName, row.getStringValue(leafIdx));
+            case EirfType.STRING -> builder.field(leafName, row.getStringValue(leafIdx));
             case EirfType.TRUE -> builder.field(leafName, true);
             case EirfType.FALSE -> builder.field(leafName, false);
-            case EirfType.SMALL_UNION_ARRAY, EirfType.UNION_ARRAY -> {
+            case EirfType.UNION_ARRAY -> {
                 builder.field(leafName);
                 byte[] arrayData = row.getArrayValue(leafIdx);
                 writeArray(arrayData, 0, arrayData.length, false, builder);
             }
-            case EirfType.SMALL_FIXED_ARRAY, EirfType.FIXED_ARRAY -> {
+            case EirfType.FIXED_ARRAY -> {
                 builder.field(leafName);
                 byte[] arrayData = row.getArrayValue(leafIdx);
                 writeArray(arrayData, 0, arrayData.length, true, builder);
             }
-            case EirfType.SMALL_KEY_VALUE, EirfType.KEY_VALUE -> {
+            case EirfType.KEY_VALUE -> {
                 builder.field(leafName);
                 byte[] kvData = row.getKeyValueBytes(leafIdx);
                 writeKeyValue(kvData, 0, kvData.length, builder);
             }
-            case EirfType.SMALL_BINARY, EirfType.BINARY -> builder.field(leafName).value(row.getBinaryValue(leafIdx));
+            case EirfType.BINARY -> builder.field(leafName).value(row.getBinaryValue(leafIdx));
         }
     }
 
@@ -153,8 +153,8 @@ public final class EirfRowToXContent {
         int end = offset + length;
         int pos = offset;
         while (pos < end) {
-            int keyLen = data[pos] & 0xFF;
-            pos++;
+            int keyLen = ByteUtils.readIntLE(data, pos);
+            pos += 4;
             String key = new String(data, pos, keyLen, StandardCharsets.UTF_8);
             pos += keyLen;
 
@@ -170,23 +170,23 @@ public final class EirfRowToXContent {
     private static int writeInlineValue(byte[] data, int pos, byte type, XContentBuilder builder) throws IOException {
         switch (type) {
             case EirfType.INT -> {
-                builder.value(ByteUtils.readIntBE(data, pos));
+                builder.value(ByteUtils.readIntLE(data, pos));
                 pos += 4;
             }
             case EirfType.FLOAT -> {
-                builder.value(Float.intBitsToFloat(ByteUtils.readIntBE(data, pos)));
+                builder.value(Float.intBitsToFloat(ByteUtils.readIntLE(data, pos)));
                 pos += 4;
             }
             case EirfType.LONG -> {
-                builder.value(readLongBE(data, pos));
+                builder.value(ByteUtils.readLongLE(data, pos));
                 pos += 8;
             }
             case EirfType.DOUBLE -> {
-                builder.value(Double.longBitsToDouble(readLongBE(data, pos)));
+                builder.value(Double.longBitsToDouble(ByteUtils.readLongLE(data, pos)));
                 pos += 8;
             }
             case EirfType.STRING -> {
-                int len = ByteUtils.readIntBE(data, pos);
+                int len = ByteUtils.readIntLE(data, pos);
                 pos += 4;
                 builder.value(new String(data, pos, len, StandardCharsets.UTF_8));
                 pos += len;
@@ -195,30 +195,24 @@ public final class EirfRowToXContent {
             case EirfType.FALSE -> builder.value(false);
             case EirfType.NULL -> builder.nullValue();
             case EirfType.KEY_VALUE -> {
-                int len = ByteUtils.readIntBE(data, pos);
+                int len = ByteUtils.readIntLE(data, pos);
                 pos += 4;
                 writeKeyValue(data, pos, len, builder);
                 pos += len;
             }
             case EirfType.UNION_ARRAY -> {
-                int len = ByteUtils.readIntBE(data, pos);
+                int len = ByteUtils.readIntLE(data, pos);
                 pos += 4;
                 writeArray(data, pos, len, false, builder);
                 pos += len;
             }
             case EirfType.FIXED_ARRAY -> {
-                int len = ByteUtils.readIntBE(data, pos);
+                int len = ByteUtils.readIntLE(data, pos);
                 pos += 4;
                 writeArray(data, pos, len, true, builder);
                 pos += len;
             }
         }
         return pos;
-    }
-
-    private static long readLongBE(byte[] data, int offset) {
-        long hi = ByteUtils.readIntBE(data, offset) & 0xFFFFFFFFL;
-        long lo = ByteUtils.readIntBE(data, offset + 4) & 0xFFFFFFFFL;
-        return (hi << 32) | lo;
     }
 }

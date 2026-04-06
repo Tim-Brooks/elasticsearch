@@ -230,7 +230,7 @@ public class EirfConversionTests extends ESTestCase {
 
             byte type = batch.getRowReader(0).getTypeByte(0);
             // Lists with uniform leaf types produce FIXED_ARRAY
-            assertTrue(type == EirfType.SMALL_FIXED_ARRAY || type == EirfType.FIXED_ARRAY);
+            assertEquals(EirfType.FIXED_ARRAY, type);
 
             batch.close();
         }

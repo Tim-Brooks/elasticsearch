@@ -157,15 +157,18 @@ public class EirfArrayTests extends ESTestCase {
     }
 
     public void testUnionArrayWithCompoundKeyValue() {
-        // Create a KEY_VALUE element: key "a" -> INT 42
+        // Create a KEY_VALUE element: key_length(i32 LE)=1, key="a", type=INT, value=42 (LE)
         byte[] kvPayload = new byte[] {
             1,
-            'a',           // key_length=1, key="a"
+            0,
+            0,
+            0,      // key_length = 1 (i32 LE)
+            'a',              // key bytes
             EirfType.INT,     // type
+            42,
             0,
             0,
-            0,
-            42      // INT value (big-endian)
+            0       // INT value = 42 (LE)
         };
 
         byte[] elemTypes = { EirfType.KEY_VALUE };
