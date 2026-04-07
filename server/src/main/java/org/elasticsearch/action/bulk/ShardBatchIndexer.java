@@ -15,27 +15,40 @@ import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.DocWriteResponse;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.support.replication.TransportWriteAction;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.eirf.EirfBatch;
+import org.elasticsearch.eirf.EirfRowReader;
+import org.elasticsearch.eirf.EirfRowToXContent;
+import org.elasticsearch.eirf.EirfRowXContentParser;
+import org.elasticsearch.eirf.EirfSchema;
+import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.engine.Engine;
+import org.elasticsearch.index.mapper.SourceFieldMapper;
 import org.elasticsearch.index.mapper.SourceToParse;
 import org.elasticsearch.index.seqno.SequenceNumbers;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.translog.Translog;
-import org.elasticsearch.plugins.internal.DocumentParsingProvider;
 import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentType;
+import org.elasticsearch.xcontent.json.JsonXContent;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.elasticsearch.common.settings.Setting.boolSetting;
 
 /**
- * Handles the batch indexing code path for primary and replica shards.
+ * Handles the EIRF batch indexing code path for primary and replica shards.
+ * Documents are read directly from an {@link EirfBatch} using {@link EirfRowXContentParser}
+ * to feed the document parsing pipeline without intermediate JSON serialization.
  */
 public final class ShardBatchIndexer {
 
@@ -55,10 +68,17 @@ public final class ShardBatchIndexer {
 
     /**
      * Checks whether the batch indexing path can be used for this request.
-     * Returns true if batch indexing is enabled and all operations are index/create (no deletes, no updates).
+     * Returns true if batch indexing is enabled, an EIRF batch is present, synthetic source is active,
+     * and all operations are index/create (no deletes, no updates).
      */
-    public static boolean canUseBatchIndexing(BulkShardRequest request, boolean batchIndexingEnabled) {
+    public static boolean canUseBatchIndexing(BulkShardRequest request, boolean batchIndexingEnabled, IndexSettings indexSettings) {
         if (batchIndexingEnabled == false) {
+            return false;
+        }
+        if (request.getEirfBatch() == null) {
+            return false;
+        }
+        if (SourceFieldMapper.isSynthetic(indexSettings) == false) {
             return false;
         }
         for (BulkItemRequest item : request.items()) {
@@ -71,29 +91,27 @@ public final class ShardBatchIndexer {
     }
 
     /**
-     * Attempts batch indexing on primary. The IndexShard is obtained from {@code context.getPrimary()}.
-     * On success, the caller checks {@link BulkPrimaryExecutionContext#hasMoreOperationsToExecute()} to
-     * determine whether the sequential fallback path is needed for the remaining items.
+     * Attempts batch indexing on primary using EIRF data. Each document is parsed from the
+     * corresponding row in the batch using an {@link EirfRowXContentParser}.
      */
     static void performBatchIndexOnPrimary(
-        final BulkShardRequest request,
-        final DocumentParsingProvider documentParsingProvider,
+        final BulkItemRequest[] items,
+        final EirfBatch batch,
         final BulkPrimaryExecutionContext context,
         final ActionListener<Void> listener
     ) {
         ActionListener.run(listener, l -> {
-            doBatchIndexOnPrimary(request, context.getPrimary(), documentParsingProvider, context);
+            doBatchIndexOnPrimary(items, batch, context.getPrimary(), context);
             l.onResponse(null);
         });
     }
 
     private static void doBatchIndexOnPrimary(
-        final BulkShardRequest request,
+        final BulkItemRequest[] items,
+        final EirfBatch batch,
         final IndexShard primary,
-        final DocumentParsingProvider documentParsingProvider,
         final BulkPrimaryExecutionContext context
     ) throws IOException {
-        final BulkItemRequest[] items = request.items();
 
         // Check for aborted items upfront
         for (BulkItemRequest item : items) {
@@ -104,31 +122,31 @@ public final class ShardBatchIndexer {
             }
         }
 
-        // TODO: Required because VerionLock is re-entrant. We likely can switch that to be semaphore based and remove this protection
+        // TODO: Required because VersionLock is re-entrant. We likely can switch that to be semaphore based and remove this protection
         final Set<BytesRef> seenUids = new HashSet<>(Math.min(items.length, BATCH_CHUNK_SIZE));
+        final EirfRowXContentParser.SchemaNode schemaTree = EirfRowXContentParser.buildSchemaTree(batch.schema());
 
-        // Process in chunks to bound memory: parse + index BATCH_CHUNK_SIZE docs at a time,
-        // allowing previous chunks' parsed docs to be GC'd before parsing the next chunk.
         for (int chunkStart = 0; chunkStart < items.length; chunkStart += BATCH_CHUNK_SIZE) {
             final int chunkEnd = Math.min(chunkStart + BATCH_CHUNK_SIZE, items.length);
-            final int chunkSize = chunkEnd - chunkStart;
-            final List<Engine.Index> operations = new ArrayList<>(chunkSize);
+            final List<Engine.Index> operations = new ArrayList<>(chunkEnd - chunkStart);
 
             for (int i = chunkStart; i < chunkEnd; i++) {
                 final IndexRequest indexRequest = (IndexRequest) items[i].request();
-                final XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(
-                    indexRequest
-                );
+                final EirfRowReader row = batch.getRowReader(i);
+                final EirfRowXContentParser parser = new EirfRowXContentParser(schemaTree, row);
+
+                final BytesReference jsonSource = rowToJsonSource(row, batch.schema());
                 final SourceToParse sourceToParse = new SourceToParse(
                     indexRequest.id(),
-                    indexRequest.source(),
-                    indexRequest.getContentType(),
+                    jsonSource,
+                    XContentType.JSON,
                     indexRequest.routing(),
-                    indexRequest.getDynamicTemplates(),
-                    indexRequest.getDynamicTemplateParams(),
-                    indexRequest.getIncludeSourceOnError(),
-                    meteringParserDecorator,
-                    indexRequest.tsid()
+                    Map.of(),
+                    Map.of(),
+                    false,
+                    XContentMeteringParserDecorator.NOOP,
+                    indexRequest.tsid(),
+                    parser
                 );
                 Engine.Index operation;
                 try {
@@ -171,14 +189,11 @@ public final class ShardBatchIndexer {
     }
 
     /**
-     * Performs a batch index on a replica. Returns the number of items processed from the start of the request's
-     * items array. The caller should fall back to the item-by-item path for any remaining items.
-     * The returned location may be null if no operations produced a translog location.
+     * Performs a batch index on a replica using EIRF data.
      */
-    static ReplicaBatchResult performBatchIndexOnReplica(BulkShardRequest request, IndexShard replica) throws Exception {
-        final BulkItemRequest[] items = request.items();
-        // TODO: Required because VerionLock is re-entrant. We likely can switch that to be semaphore based and remove this protection
+    static ReplicaBatchResult performBatchIndexOnReplica(BulkItemRequest[] items, EirfBatch batch, IndexShard replica) throws Exception {
         final Set<BytesRef> seenUids = new HashSet<>(Math.min(items.length, BATCH_CHUNK_SIZE));
+        final EirfRowXContentParser.SchemaNode schemaTree = EirfRowXContentParser.buildSchemaTree(batch.schema());
         Translog.Location location = null;
         int processedItems = 0;
 
@@ -202,7 +217,22 @@ public final class ShardBatchIndexer {
 
                 final IndexRequest indexRequest = (IndexRequest) item.request();
                 final DocWriteResponse primaryResponse = response.getResponse();
-                final SourceToParse sourceToParse = TransportShardBulkAction.replicaSourceToParse(indexRequest);
+                final EirfRowReader row = batch.getRowReader(i);
+                final EirfRowXContentParser parser = new EirfRowXContentParser(schemaTree, row);
+
+                final BytesReference jsonSource = rowToJsonSource(row, batch.schema());
+                final SourceToParse sourceToParse = new SourceToParse(
+                    indexRequest.id(),
+                    jsonSource,
+                    XContentType.JSON,
+                    indexRequest.routing(),
+                    Map.of(),
+                    Map.of(),
+                    false,
+                    XContentMeteringParserDecorator.NOOP,
+                    indexRequest.tsid(),
+                    parser
+                );
                 Engine.Index operation;
                 try {
                     operation = IndexShard.prepareIndex(
@@ -252,6 +282,13 @@ public final class ShardBatchIndexer {
         }
 
         return new ReplicaBatchResult(processedItems, location);
+    }
+
+    private static BytesReference rowToJsonSource(EirfRowReader row, EirfSchema schema) throws IOException {
+        try (XContentBuilder builder = JsonXContent.contentBuilder()) {
+            EirfRowToXContent.writeRow(row, schema, builder);
+            return BytesReference.bytes(builder);
+        }
     }
 
     record ReplicaBatchResult(int processedItems, @Nullable Translog.Location location) {}
