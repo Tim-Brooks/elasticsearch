@@ -33,6 +33,8 @@ import java.util.Map;
 public final class EirfSchema {
 
     private static final int INITIAL_CAPACITY = 8;
+    /** Maximum number of fields per level, constrained by u16 encoding in the batch header. */
+    static final int MAX_FIELDS = 65535;
 
     private final FieldLevel nonLeaves;
     private final FieldLevel leaves;
@@ -212,6 +214,9 @@ public final class EirfSchema {
                 return existing;
             }
             int index = names.size();
+            if (index >= MAX_FIELDS) {
+                throw new IllegalStateException("Schema field count exceeds maximum of " + MAX_FIELDS);
+            }
             names.add(name);
             if (index >= parents.length) {
                 parents = Arrays.copyOf(parents, parents.length << 1);

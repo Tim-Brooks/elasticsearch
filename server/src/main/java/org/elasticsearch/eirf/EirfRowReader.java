@@ -32,6 +32,8 @@ public final class EirfRowReader {
     private final int fixedSectionOffset;
     private final int varSectionOffset;
 
+    // TODO: This class currently does a scan to read every value. We will eventually want to optimize this for sequentially reading over a
+    // row.
     public EirfRowReader(BytesReference rowData, EirfSchema schema) {
         this.rowData = rowData;
         this.schema = schema;

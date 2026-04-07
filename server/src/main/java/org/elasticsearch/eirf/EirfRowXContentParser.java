@@ -118,9 +118,13 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
     // Pending child to emit content for after FIELD_NAME
     private SchemaNode pendingChild;
 
-    // Array iteration
-    private EirfArray arrayReader;
-    private boolean inArray;
+    // Compound iteration stack (arrays and key-value objects within arrays)
+    private static final byte COMPOUND_ARRAY = 0;
+    private static final byte COMPOUND_KV = 1;
+    private Object[] compoundReaders = new Object[4]; // EirfArray or EirfKeyValue
+    private byte[] compoundTypes = new byte[4];
+    private boolean[] compoundNeedValue = new boolean[4]; // for KV frames: true after emitting FIELD_NAME
+    private int compoundDepth;
 
     // Whether we've emitted the root START_OBJECT yet
     private boolean started;
@@ -137,8 +141,8 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             return null;
         }
 
-        if (inArray) {
-            return nextArrayToken();
+        if (compoundDepth > 0) {
+            return nextCompoundToken();
         }
 
         // Emit root START_OBJECT first
@@ -230,8 +234,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
                 currentToken = Token.VALUE_EMBEDDED_OBJECT;
             }
             case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> {
-                arrayReader = row.getArrayValue(colIdx);
-                inArray = true;
+                pushCompound(row.getArrayValue(colIdx), COMPOUND_ARRAY);
                 currentToken = Token.START_ARRAY;
             }
             default -> currentToken = Token.VALUE_NULL;
@@ -239,54 +242,165 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
         return currentToken;
     }
 
-    private Token nextArrayToken() {
-        if (arrayReader.next()) {
-            byte elemType = arrayReader.type();
-            switch (elemType) {
-                case EirfType.INT -> {
-                    currentType = EirfType.INT;
-                    cachedInt = arrayReader.intValue();
-                    currentToken = Token.VALUE_NUMBER;
-                }
-                case EirfType.LONG -> {
-                    currentType = EirfType.LONG;
-                    cachedLong = arrayReader.longValue();
-                    currentToken = Token.VALUE_NUMBER;
-                }
-                case EirfType.FLOAT -> {
-                    currentType = EirfType.FLOAT;
-                    cachedFloat = arrayReader.floatValue();
-                    currentToken = Token.VALUE_NUMBER;
-                }
-                case EirfType.DOUBLE -> {
-                    currentType = EirfType.DOUBLE;
-                    cachedDouble = arrayReader.doubleValue();
-                    currentToken = Token.VALUE_NUMBER;
-                }
-                case EirfType.STRING -> {
-                    currentType = EirfType.STRING;
-                    cachedText = new Text(arrayReader.stringValue());
-                    currentToken = Token.VALUE_STRING;
-                }
-                case EirfType.TRUE, EirfType.FALSE -> {
-                    currentType = elemType;
-                    currentToken = Token.VALUE_BOOLEAN;
-                }
-                case EirfType.NULL -> {
-                    currentType = EirfType.NULL;
-                    arrayReader.advance();
-                    currentToken = Token.VALUE_NULL;
-                }
-                default -> {
-                    throw new IllegalStateException("Unexpected array element type: " + elemType);
-                }
-            }
+    private Token nextCompoundToken() {
+        byte frameType = compoundTypes[compoundDepth - 1];
+        if (frameType == COMPOUND_ARRAY) {
+            return nextArrayFrameToken();
         } else {
-            inArray = false;
-            arrayReader = null;
+            return nextKvFrameToken();
+        }
+    }
+
+    private Token nextArrayFrameToken() {
+        EirfArray reader = (EirfArray) compoundReaders[compoundDepth - 1];
+        if (reader.next()) {
+            return emitArrayElementValue(reader);
+        } else {
+            popCompound();
             currentToken = Token.END_ARRAY;
+            return currentToken;
+        }
+    }
+
+    private Token emitArrayElementValue(EirfArray reader) {
+        byte elemType = reader.type();
+        switch (elemType) {
+            case EirfType.INT -> {
+                currentType = EirfType.INT;
+                cachedInt = reader.intValue();
+                currentToken = Token.VALUE_NUMBER;
+            }
+            case EirfType.LONG -> {
+                currentType = EirfType.LONG;
+                cachedLong = reader.longValue();
+                currentToken = Token.VALUE_NUMBER;
+            }
+            case EirfType.FLOAT -> {
+                currentType = EirfType.FLOAT;
+                cachedFloat = reader.floatValue();
+                currentToken = Token.VALUE_NUMBER;
+            }
+            case EirfType.DOUBLE -> {
+                currentType = EirfType.DOUBLE;
+                cachedDouble = reader.doubleValue();
+                currentToken = Token.VALUE_NUMBER;
+            }
+            case EirfType.STRING -> {
+                currentType = EirfType.STRING;
+                cachedText = new Text(reader.stringValue());
+                currentToken = Token.VALUE_STRING;
+            }
+            case EirfType.TRUE, EirfType.FALSE -> {
+                currentType = elemType;
+                currentToken = Token.VALUE_BOOLEAN;
+            }
+            case EirfType.NULL -> {
+                currentType = EirfType.NULL;
+                reader.advance();
+                currentToken = Token.VALUE_NULL;
+            }
+            case EirfType.KEY_VALUE -> {
+                pushCompound(reader.nestedKeyValue(), COMPOUND_KV);
+                currentToken = Token.START_OBJECT;
+            }
+            case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> {
+                pushCompound(reader.nestedArray(), COMPOUND_ARRAY);
+                currentToken = Token.START_ARRAY;
+            }
+            default -> throw new IllegalStateException("Unexpected array element type: " + elemType);
         }
         return currentToken;
+    }
+
+    private Token nextKvFrameToken() {
+        EirfKeyValue kv = (EirfKeyValue) compoundReaders[compoundDepth - 1];
+        if (compoundNeedValue[compoundDepth - 1]) {
+            compoundNeedValue[compoundDepth - 1] = false;
+            return emitKvValue(kv);
+        }
+        if (kv.next()) {
+            currentName = kv.key();
+            currentToken = Token.FIELD_NAME;
+            compoundNeedValue[compoundDepth - 1] = true;
+        } else {
+            popCompound();
+            currentToken = Token.END_OBJECT;
+        }
+        return currentToken;
+    }
+
+    private Token emitKvValue(EirfKeyValue kv) {
+        byte kvType = kv.type();
+        switch (kvType) {
+            case EirfType.INT -> {
+                currentType = EirfType.INT;
+                cachedInt = kv.intValue();
+                currentToken = Token.VALUE_NUMBER;
+            }
+            case EirfType.LONG -> {
+                currentType = EirfType.LONG;
+                cachedLong = kv.longValue();
+                currentToken = Token.VALUE_NUMBER;
+            }
+            case EirfType.FLOAT -> {
+                currentType = EirfType.FLOAT;
+                cachedFloat = kv.floatValue();
+                currentToken = Token.VALUE_NUMBER;
+            }
+            case EirfType.DOUBLE -> {
+                currentType = EirfType.DOUBLE;
+                cachedDouble = kv.doubleValue();
+                currentToken = Token.VALUE_NUMBER;
+            }
+            case EirfType.STRING -> {
+                currentType = EirfType.STRING;
+                cachedText = new Text(kv.stringValue());
+                currentToken = Token.VALUE_STRING;
+            }
+            case EirfType.TRUE, EirfType.FALSE -> {
+                currentType = kvType;
+                currentToken = Token.VALUE_BOOLEAN;
+            }
+            case EirfType.NULL -> {
+                currentType = EirfType.NULL;
+                kv.advance();
+                currentToken = Token.VALUE_NULL;
+            }
+            case EirfType.KEY_VALUE -> {
+                pushCompound(kv.nestedKeyValue(), COMPOUND_KV);
+                currentToken = Token.START_OBJECT;
+            }
+            case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> {
+                pushCompound(kv.nestedArray(), COMPOUND_ARRAY);
+                currentToken = Token.START_ARRAY;
+            }
+            default -> throw new IllegalStateException("Unexpected key-value type: " + kvType);
+        }
+        return currentToken;
+    }
+
+    private void pushCompound(Object reader, byte type) {
+        if (compoundDepth >= compoundReaders.length) {
+            int newLen = compoundReaders.length * 2;
+            Object[] newReaders = new Object[newLen];
+            byte[] newTypes = new byte[newLen];
+            boolean[] newNeedValue = new boolean[newLen];
+            System.arraycopy(compoundReaders, 0, newReaders, 0, compoundDepth);
+            System.arraycopy(compoundTypes, 0, newTypes, 0, compoundDepth);
+            System.arraycopy(compoundNeedValue, 0, newNeedValue, 0, compoundDepth);
+            compoundReaders = newReaders;
+            compoundTypes = newTypes;
+            compoundNeedValue = newNeedValue;
+        }
+        compoundReaders[compoundDepth] = reader;
+        compoundTypes[compoundDepth] = type;
+        compoundNeedValue[compoundDepth] = false;
+        compoundDepth++;
+    }
+
+    private void popCompound() {
+        compoundDepth--;
+        compoundReaders[compoundDepth] = null;
     }
 
     private void push(SchemaNode node) {

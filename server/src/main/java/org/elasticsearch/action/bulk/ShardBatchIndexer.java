@@ -9,6 +9,8 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.DocWriteRequest;
@@ -24,7 +26,6 @@ import org.elasticsearch.eirf.EirfRowReader;
 import org.elasticsearch.eirf.EirfRowToXContent;
 import org.elasticsearch.eirf.EirfRowXContentParser;
 import org.elasticsearch.eirf.EirfSchema;
-import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.SourceToParse;
 import org.elasticsearch.index.seqno.SequenceNumbers;
@@ -50,6 +51,8 @@ import static org.elasticsearch.common.settings.Setting.boolSetting;
  */
 public final class ShardBatchIndexer {
 
+    private static final Logger logger = LogManager.getLogger(ShardBatchIndexer.class);
+
     public static final FeatureFlag BATCH_INDEXING_FEATURE_FLAG = new FeatureFlag("batch_indexing");
     public static final Setting<Boolean> BATCH_INDEXING = boolSetting("indices.batch_indexing", false, value -> {
         if (value && BATCH_INDEXING_FEATURE_FLAG.isEnabled() == false) {
@@ -69,7 +72,7 @@ public final class ShardBatchIndexer {
      * Returns true if batch indexing is enabled, an EIRF batch is present, synthetic source is active,
      * and all operations are index/create (no deletes, no updates).
      */
-    public static boolean canUseBatchIndexing(BulkShardRequest request, boolean batchIndexingEnabled, IndexSettings indexSettings) {
+    public static boolean canUseBatchIndexing(BulkShardRequest request, boolean batchIndexingEnabled) {
         if (batchIndexingEnabled == false) {
             return false;
         }
@@ -164,12 +167,15 @@ public final class ShardBatchIndexer {
                         primary.getRelativeTimeInNanos()
                     );
                 } catch (Exception e) {
+                    logger.debug("batch indexing on primary failed to prepare index for item [{}], falling back", i, e);
                     return;
                 }
                 if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
+                    logger.debug("batch indexing on primary encountered dynamic mapping update at item [{}], falling back", i);
                     return;
                 }
                 if (seenUids.add(operation.uid()) == false) {
+                    logger.debug("batch indexing on primary encountered duplicate uid at item [{}], falling back", i);
                     return;
                 }
                 operations.add(operation);
@@ -250,12 +256,15 @@ public final class ShardBatchIndexer {
                         replica.getRelativeTimeInNanos()
                     );
                 } catch (Exception e) {
+                    logger.debug("batch indexing on replica failed to prepare index for item [{}], falling back", i, e);
                     break;
                 }
                 if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
+                    logger.debug("batch indexing on replica encountered dynamic mapping update at item [{}], falling back", i);
                     break;
                 }
                 if (seenUids.add(operation.uid()) == false) {
+                    logger.debug("batch indexing on replica encountered duplicate uid at item [{}], falling back", i);
                     break;
                 }
                 operations.add(operation);

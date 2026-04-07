@@ -9,11 +9,15 @@
 
 package org.elasticsearch.eirf;
 
+import org.elasticsearch.common.bytes.BytesArray;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParser.Token;
+import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 
 public class EirfRowXContentParserTests extends ESTestCase {
@@ -184,6 +188,134 @@ public class EirfRowXContentParserTests extends ESTestCase {
                     assertEquals("test", map.get("title"));
                     assertEquals(7, map.get("count"));
                 }
+            }
+        }
+    }
+
+    public void testArrayOfObjects() throws IOException {
+        // {"items": [{"name": "a", "val": 1}, {"name": "b", "val": 2}]}
+        BytesReference source = new BytesArray("""
+            {"items": [{"name": "a", "val": 1}, {"name": "b", "val": 2}]}""");
+        try (EirfBatch batch = EirfEncoder.encode(List.of(source), XContentType.JSON)) {
+            EirfRowReader row = batch.getRowReader(0);
+            EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
+            try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
+                assertToken(parser, Token.START_OBJECT);
+                assertFieldName(parser, "items");
+                assertToken(parser, Token.START_ARRAY);
+
+                // First object
+                assertToken(parser, Token.START_OBJECT);
+                assertFieldName(parser, "name");
+                assertToken(parser, Token.VALUE_STRING);
+                assertEquals("a", parser.text());
+                assertFieldName(parser, "val");
+                assertToken(parser, Token.VALUE_NUMBER);
+                assertEquals(1, parser.intValue());
+                assertToken(parser, Token.END_OBJECT);
+
+                // Second object
+                assertToken(parser, Token.START_OBJECT);
+                assertFieldName(parser, "name");
+                assertToken(parser, Token.VALUE_STRING);
+                assertEquals("b", parser.text());
+                assertFieldName(parser, "val");
+                assertToken(parser, Token.VALUE_NUMBER);
+                assertEquals(2, parser.intValue());
+                assertToken(parser, Token.END_OBJECT);
+
+                assertToken(parser, Token.END_ARRAY);
+                assertToken(parser, Token.END_OBJECT);
+                assertNull(parser.nextToken());
+            }
+        }
+    }
+
+    public void testNestedArrays() throws IOException {
+        // {"matrix": [[1, 2], [3, 4]]}
+        BytesReference source = new BytesArray("""
+            {"matrix": [[1, 2], [3, 4]]}""");
+        try (EirfBatch batch = EirfEncoder.encode(List.of(source), XContentType.JSON)) {
+            EirfRowReader row = batch.getRowReader(0);
+            EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
+            try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
+                assertToken(parser, Token.START_OBJECT);
+                assertFieldName(parser, "matrix");
+                assertToken(parser, Token.START_ARRAY);
+
+                // First inner array
+                assertToken(parser, Token.START_ARRAY);
+                assertToken(parser, Token.VALUE_NUMBER);
+                assertEquals(1, parser.intValue());
+                assertToken(parser, Token.VALUE_NUMBER);
+                assertEquals(2, parser.intValue());
+                assertToken(parser, Token.END_ARRAY);
+
+                // Second inner array
+                assertToken(parser, Token.START_ARRAY);
+                assertToken(parser, Token.VALUE_NUMBER);
+                assertEquals(3, parser.intValue());
+                assertToken(parser, Token.VALUE_NUMBER);
+                assertEquals(4, parser.intValue());
+                assertToken(parser, Token.END_ARRAY);
+
+                assertToken(parser, Token.END_ARRAY);
+                assertToken(parser, Token.END_OBJECT);
+                assertNull(parser.nextToken());
+            }
+        }
+    }
+
+    public void testArrayOfObjectsWithNestedArrays() throws IOException {
+        // {"items": [{"tags": ["x", "y"], "id": 1}]}
+        BytesReference source = new BytesArray("""
+            {"items": [{"tags": ["x", "y"], "id": 1}]}""");
+        try (EirfBatch batch = EirfEncoder.encode(List.of(source), XContentType.JSON)) {
+            EirfRowReader row = batch.getRowReader(0);
+            EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
+            try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
+                assertToken(parser, Token.START_OBJECT);
+                assertFieldName(parser, "items");
+                assertToken(parser, Token.START_ARRAY);
+
+                // Object with nested array
+                assertToken(parser, Token.START_OBJECT);
+                assertFieldName(parser, "tags");
+                assertToken(parser, Token.START_ARRAY);
+                assertToken(parser, Token.VALUE_STRING);
+                assertEquals("x", parser.text());
+                assertToken(parser, Token.VALUE_STRING);
+                assertEquals("y", parser.text());
+                assertToken(parser, Token.END_ARRAY);
+                assertFieldName(parser, "id");
+                assertToken(parser, Token.VALUE_NUMBER);
+                assertEquals(1, parser.intValue());
+                assertToken(parser, Token.END_OBJECT);
+
+                assertToken(parser, Token.END_ARRAY);
+                assertToken(parser, Token.END_OBJECT);
+                assertNull(parser.nextToken());
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testArrayOfObjectsMapParsing() throws IOException {
+        // End-to-end: parse array-of-objects via map() and verify structure
+        BytesReference source = new BytesArray("""
+            {"items": [{"k": "a", "v": 1}, {"k": "b", "v": 2}], "count": 2}""");
+        try (EirfBatch batch = EirfEncoder.encode(List.of(source), XContentType.JSON)) {
+            EirfRowReader row = batch.getRowReader(0);
+            EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
+            try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
+                Map<String, Object> map = parser.map();
+                assertEquals(2, map.get("count"));
+                List<Map<String, Object>> items = (List<Map<String, Object>>) map.get("items");
+                assertEquals(2, items.size());
+                assertEquals("a", items.get(0).get("k"));
+                assertEquals(1, items.get(0).get("v"));
+                assertEquals("b", items.get(1).get("k"));
+                assertEquals(2, items.get(1).get("v"));
             }
         }
     }
