@@ -47,30 +47,40 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
           }
         }""";
 
-    private static final Settings INDEX_SETTINGS = indexSettings(IndexVersion.current(), 1, 0).put("index.mapping.source.mode", "synthetic")
-        .build();
+    private static final Settings SYNTHETIC_SOURCE_SETTINGS = indexSettings(IndexVersion.current(), 1, 0).put(
+        "index.mapping.source.mode",
+        "synthetic"
+    ).build();
+
+    private static final Settings STORED_SOURCE_SETTINGS = indexSettings(IndexVersion.current(), 1, 0).build();
 
     private IndexShard newMappedPrimaryShard() throws IOException {
-        IndexMetadata metadata = IndexMetadata.builder("index").putMapping(MAPPING).settings(INDEX_SETTINGS).primaryTerm(0, 1).build();
+        return newMappedPrimaryShard(SYNTHETIC_SOURCE_SETTINGS);
+    }
+
+    private IndexShard newMappedPrimaryShard(Settings settings) throws IOException {
+        IndexMetadata metadata = IndexMetadata.builder("index").putMapping(MAPPING).settings(settings).primaryTerm(0, 1).build();
         IndexShard shard = newShard(new ShardId(metadata.getIndex(), 0), true, "n1", metadata, null);
         recoverShardFromStore(shard);
         return shard;
     }
 
     private IndexShard newMappedReplicaShard() throws IOException {
-        IndexMetadata metadata = IndexMetadata.builder("index").putMapping(MAPPING).settings(INDEX_SETTINGS).primaryTerm(0, 1).build();
+        return newMappedReplicaShard(SYNTHETIC_SOURCE_SETTINGS);
+    }
+
+    private IndexShard newMappedReplicaShard(Settings settings) throws IOException {
+        IndexMetadata metadata = IndexMetadata.builder("index").putMapping(MAPPING).settings(settings).primaryTerm(0, 1).build();
         IndexShard shard = newShard(new ShardId(metadata.getIndex(), 0), false, "n1", metadata, null);
         recoveryEmptyReplica(shard, true);
         return shard;
     }
 
-    private static IndexSettings syntheticSourceIndexSettings() {
-        return new IndexSettings(IndexMetadata.builder("index").settings(INDEX_SETTINGS).primaryTerm(0, 1).build(), Settings.EMPTY);
-    }
-
-    private static IndexSettings storedSourceIndexSettings() {
-        Settings settings = indexSettings(IndexVersion.current(), 1, 0).put("index.mapping.source.mode", "stored").build();
-        return new IndexSettings(IndexMetadata.builder("index").settings(settings).primaryTerm(0, 1).build(), Settings.EMPTY);
+    private static IndexSettings testIndexSettings() {
+        return new IndexSettings(
+            IndexMetadata.builder("index").settings(SYNTHETIC_SOURCE_SETTINGS).primaryTerm(0, 1).build(),
+            Settings.EMPTY
+        );
     }
 
     private static IndexRequest indexRequest(String id) {
@@ -109,7 +119,7 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
             new BulkItemRequest(0, indexRequest("1")),
             new BulkItemRequest(1, indexRequest("2")) };
         try (EirfBatch batch = buildBatch(2)) {
-            assertTrue(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, syntheticSourceIndexSettings()));
+            assertTrue(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, testIndexSettings()));
         }
     }
 
@@ -118,7 +128,7 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
             new BulkItemRequest(0, indexRequest("1").create(true)),
             new BulkItemRequest(1, indexRequest("2").create(true)) };
         try (EirfBatch batch = buildBatch(2)) {
-            assertTrue(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, syntheticSourceIndexSettings()));
+            assertTrue(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, testIndexSettings()));
         }
     }
 
@@ -127,7 +137,7 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
             new BulkItemRequest(0, indexRequest("1")),
             new BulkItemRequest(1, indexRequest("2").create(true)) };
         try (EirfBatch batch = buildBatch(2)) {
-            assertTrue(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, syntheticSourceIndexSettings()));
+            assertTrue(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, testIndexSettings()));
         }
     }
 
@@ -136,7 +146,7 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
             new BulkItemRequest(0, indexRequest("1")),
             new BulkItemRequest(1, new DeleteRequest("index", "2")) };
         try (EirfBatch batch = buildBatch(2)) {
-            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, syntheticSourceIndexSettings()));
+            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, testIndexSettings()));
         }
     }
 
@@ -145,23 +155,14 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
             new BulkItemRequest(0, indexRequest("1")),
             new BulkItemRequest(1, new UpdateRequest("index", "2")) };
         try (EirfBatch batch = buildBatch(2)) {
-            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, syntheticSourceIndexSettings()));
+            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, testIndexSettings()));
         }
     }
 
     public void testCanUseBatchIndexingDisabled() {
         BulkItemRequest[] items = new BulkItemRequest[] { new BulkItemRequest(0, indexRequest("1")) };
         try (EirfBatch batch = buildBatch(1)) {
-            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), false, syntheticSourceIndexSettings()));
-        }
-    }
-
-    public void testCanUseBatchIndexingRequiresSyntheticSource() {
-        BulkItemRequest[] items = new BulkItemRequest[] {
-            new BulkItemRequest(0, indexRequest("1")),
-            new BulkItemRequest(1, indexRequest("2")) };
-        try (EirfBatch batch = buildBatch(2)) {
-            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true, storedSourceIndexSettings()));
+            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), false, testIndexSettings()));
         }
     }
 
@@ -169,7 +170,7 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
         BulkItemRequest[] items = new BulkItemRequest[] {
             new BulkItemRequest(0, indexRequest("1")),
             new BulkItemRequest(1, indexRequest("2")) };
-        assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithoutBatch(items), true, syntheticSourceIndexSettings()));
+        assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithoutBatch(items), true, testIndexSettings()));
     }
 
     // -- doBatchIndexOnPrimary tests with EirfBatch --
@@ -306,6 +307,39 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
         }
 
         assertFalse(context.hasMoreOperationsToExecute());
+
+        closeShards(shard);
+    }
+
+    public void testBatchIndexOnPrimaryStoredSource() throws Exception {
+        IndexShard shard = newMappedPrimaryShard(STORED_SOURCE_SETTINGS);
+
+        int numDocs = randomIntBetween(2, 10);
+        BulkItemRequest[] items = new BulkItemRequest[numDocs];
+        for (int i = 0; i < numDocs; i++) {
+            items[i] = new BulkItemRequest(i, indexRequest(Integer.toString(i)));
+        }
+        BulkShardRequest bulkShardRequest = new BulkShardRequest(shard.shardId(), RefreshPolicy.NONE, items);
+        BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(bulkShardRequest, shard);
+
+        try (EirfBatch batch = buildBatch(numDocs)) {
+            PlainActionFuture<Void> future = new PlainActionFuture<>();
+            ShardBatchIndexer.performBatchIndexOnPrimary(items, batch, context, future);
+            future.actionGet();
+        }
+
+        assertFalse(context.hasMoreOperationsToExecute());
+        for (int i = 0; i < numDocs; i++) {
+            BulkItemResponse response = items[i].getPrimaryResponse();
+            assertThat(response, notNullValue());
+            assertFalse(response.isFailed());
+            assertThat(response.getResponse().getResult(), equalTo(DocWriteResponse.Result.CREATED));
+        }
+
+        shard.refresh("test");
+        try (Engine.Searcher searcher = shard.acquireSearcher("test")) {
+            assertThat(searcher.getIndexReader().numDocs(), equalTo(numDocs));
+        }
 
         closeShards(shard);
     }

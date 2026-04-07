@@ -26,7 +26,6 @@ import org.elasticsearch.eirf.EirfRowXContentParser;
 import org.elasticsearch.eirf.EirfSchema;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.engine.Engine;
-import org.elasticsearch.index.mapper.SourceFieldMapper;
 import org.elasticsearch.index.mapper.SourceToParse;
 import org.elasticsearch.index.seqno.SequenceNumbers;
 import org.elasticsearch.index.shard.IndexShard;
@@ -34,7 +33,6 @@ import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentType;
-import org.elasticsearch.xcontent.json.JsonXContent;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -76,9 +74,6 @@ public final class ShardBatchIndexer {
             return false;
         }
         if (request.getEirfBatch() == null) {
-            return false;
-        }
-        if (SourceFieldMapper.isSynthetic(indexSettings) == false) {
             return false;
         }
         for (BulkItemRequest item : request.items()) {
@@ -135,11 +130,12 @@ public final class ShardBatchIndexer {
                 final EirfRowReader row = batch.getRowReader(i);
                 final EirfRowXContentParser parser = new EirfRowXContentParser(schemaTree, row);
 
-                final BytesReference jsonSource = rowToJsonSource(row, batch.schema());
+                final XContentType xContentType = indexRequest.getContentType() != null ? indexRequest.getContentType() : XContentType.JSON;
+                final BytesReference source = rowToSource(row, batch.schema(), xContentType);
                 final SourceToParse sourceToParse = new SourceToParse(
                     indexRequest.id(),
-                    jsonSource,
-                    XContentType.JSON,
+                    source,
+                    xContentType,
                     indexRequest.routing(),
                     Map.of(),
                     Map.of(),
@@ -220,11 +216,12 @@ public final class ShardBatchIndexer {
                 final EirfRowReader row = batch.getRowReader(i);
                 final EirfRowXContentParser parser = new EirfRowXContentParser(schemaTree, row);
 
-                final BytesReference jsonSource = rowToJsonSource(row, batch.schema());
+                final XContentType xContentType = indexRequest.getContentType() != null ? indexRequest.getContentType() : XContentType.JSON;
+                final BytesReference source = rowToSource(row, batch.schema(), xContentType);
                 final SourceToParse sourceToParse = new SourceToParse(
                     indexRequest.id(),
-                    jsonSource,
-                    XContentType.JSON,
+                    source,
+                    xContentType,
                     indexRequest.routing(),
                     Map.of(),
                     Map.of(),
@@ -284,8 +281,8 @@ public final class ShardBatchIndexer {
         return new ReplicaBatchResult(processedItems, location);
     }
 
-    private static BytesReference rowToJsonSource(EirfRowReader row, EirfSchema schema) throws IOException {
-        try (XContentBuilder builder = JsonXContent.contentBuilder()) {
+    private static BytesReference rowToSource(EirfRowReader row, EirfSchema schema, XContentType xContentType) throws IOException {
+        try (XContentBuilder builder = XContentBuilder.builder(xContentType.xContent())) {
             EirfRowToXContent.writeRow(row, schema, builder);
             return BytesReference.bytes(builder);
         }
