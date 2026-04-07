@@ -9,15 +9,20 @@
 
 package org.elasticsearch.eirf;
 
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.core.RestApiVersion;
 import org.elasticsearch.xcontent.DeprecationHandler;
 import org.elasticsearch.xcontent.NamedXContentRegistry;
+import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentLocation;
+import org.elasticsearch.xcontent.XContentString;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.support.AbstractXContentParser;
 
 import java.io.IOException;
 import java.nio.CharBuffer;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * An {@link org.elasticsearch.xcontent.XContentParser} that walks a pre-built {@link SchemaNode} tree,
@@ -68,7 +73,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
     }
 
     private static SchemaNode buildObjectNode(String name, int nonLeafIdx, EirfSchema schema) {
-        java.util.List<SchemaNode> childList = new java.util.ArrayList<>();
+        List<SchemaNode> childList = new ArrayList<>();
 
         // Add child objects (non-leaf fields whose parent is this non-leaf)
         for (int i = 1; i < schema.nonLeafCount(); i++) {
@@ -89,7 +94,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
 
     // Tree and row data
     private final SchemaNode root;
-    private EirfRowReader row;
+    private final EirfRowReader row;
 
     // Walk state: stack of (node, childIndex) pairs
     private SchemaNode[] nodeStack = new SchemaNode[16];
@@ -107,8 +112,8 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
     private long cachedLong;
     private float cachedFloat;
     private double cachedDouble;
-    private String cachedString;
-    private boolean cachedBoolean;
+    private Text cachedText;
+    private BytesRef cachedBinary;
 
     // Pending child to emit content for after FIELD_NAME
     private SchemaNode pendingChild;
@@ -128,7 +133,9 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
 
     @Override
     public Token nextToken() throws IOException {
-        if (closed) return null;
+        if (closed) {
+            return null;
+        }
 
         if (inArray) {
             return nextArrayToken();
@@ -214,26 +221,20 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
                 currentToken = Token.VALUE_NUMBER;
             }
             case EirfType.STRING -> {
-                cachedString = row.getStringValue(colIdx);
+                cachedText = row.getStringValue(colIdx);
                 currentToken = Token.VALUE_STRING;
             }
-            case EirfType.TRUE -> {
-                cachedBoolean = true;
-                currentToken = Token.VALUE_BOOLEAN;
-            }
-            case EirfType.FALSE -> {
-                cachedBoolean = false;
-                currentToken = Token.VALUE_BOOLEAN;
+            case EirfType.TRUE, EirfType.FALSE -> currentToken = Token.VALUE_BOOLEAN;
+            case EirfType.BINARY -> {
+                cachedBinary = row.getBinaryValue(colIdx);
+                currentToken = Token.VALUE_EMBEDDED_OBJECT;
             }
             case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> {
-                byte[] data = row.getArrayValue(colIdx);
-                arrayReader = new EirfArray(data, 0, data.length, currentType == EirfType.FIXED_ARRAY);
+                arrayReader = row.getArrayValue(colIdx);
                 inArray = true;
                 currentToken = Token.START_ARRAY;
             }
-            default -> {
-                currentToken = Token.VALUE_NULL;
-            }
+            default -> currentToken = Token.VALUE_NULL;
         }
         return currentToken;
     }
@@ -264,33 +265,28 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
                 }
                 case EirfType.STRING -> {
                     currentType = EirfType.STRING;
-                    cachedString = arrayReader.stringValue();
+                    cachedText = new Text(arrayReader.stringValue());
                     currentToken = Token.VALUE_STRING;
                 }
-                case EirfType.TRUE -> {
-                    cachedBoolean = true;
-                    currentToken = Token.VALUE_BOOLEAN;
-                }
-                case EirfType.FALSE -> {
-                    cachedBoolean = false;
+                case EirfType.TRUE, EirfType.FALSE -> {
+                    currentType = elemType;
                     currentToken = Token.VALUE_BOOLEAN;
                 }
                 case EirfType.NULL -> {
+                    currentType = EirfType.NULL;
                     arrayReader.advance();
                     currentToken = Token.VALUE_NULL;
                 }
                 default -> {
-                    arrayReader.advance();
-                    currentToken = Token.VALUE_NULL;
+                    throw new IllegalStateException("Unexpected array element type: " + elemType);
                 }
             }
-            return currentToken;
         } else {
             inArray = false;
             arrayReader = null;
             currentToken = Token.END_ARRAY;
-            return currentToken;
         }
+        return currentToken;
     }
 
     private void push(SchemaNode node) {
@@ -313,8 +309,6 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
         nodeStack[stackDepth] = null;
     }
 
-    // ---- AbstractXContentParser implementation ----
-
     @Override
     public Token currentToken() {
         return currentToken;
@@ -327,19 +321,23 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
 
     @Override
     public String text() {
-        if (currentToken == Token.FIELD_NAME) return currentName;
-        if (currentType == EirfType.STRING) return cachedString;
-        if (currentToken == Token.VALUE_NUMBER) {
-            return switch (currentType) {
+        if (currentToken == null || currentToken.isValue() == false) {
+            throw new IllegalArgumentException("Expected text at " + getTokenLocation() + " but found " + currentToken);
+        }
+        return switch (currentToken) {
+            case VALUE_STRING -> cachedText.string();
+            case VALUE_NUMBER -> switch (currentType) {
                 case EirfType.INT -> Integer.toString(cachedInt);
                 case EirfType.LONG -> Long.toString(cachedLong);
                 case EirfType.FLOAT -> Float.toString(cachedFloat);
                 case EirfType.DOUBLE -> Double.toString(cachedDouble);
-                default -> "";
+                default -> throw new IllegalStateException("Unexpected number type: " + currentType);
             };
-        }
-        if (currentToken == Token.VALUE_BOOLEAN) return Boolean.toString(cachedBoolean);
-        return "";
+            case VALUE_BOOLEAN -> Boolean.toString(currentType == EirfType.TRUE);
+            case VALUE_NULL -> "null";
+            case VALUE_EMBEDDED_OBJECT -> "";
+            default -> throw new IllegalStateException("Unexpected token: " + currentToken);
+        };
     }
 
     @Override
@@ -349,12 +347,35 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
 
     @Override
     public Object objectText() {
-        return text();
+        return switch (currentToken) {
+            case VALUE_STRING -> text();
+            case VALUE_NUMBER -> numberValue();
+            case VALUE_BOOLEAN -> doBooleanValue();
+            case VALUE_NULL -> null;
+            default -> text();
+        };
     }
 
     @Override
     public Object objectBytes() {
-        return text();
+        return switch (currentToken) {
+            case VALUE_STRING -> charBuffer();
+            case VALUE_NUMBER -> numberValue();
+            case VALUE_BOOLEAN -> doBooleanValue();
+            case VALUE_NULL -> null;
+            default -> charBuffer();
+        };
+    }
+
+    @Override
+    public XContentString optimizedText() {
+        if (currentToken.isValue() == false) {
+            throw new IllegalArgumentException("Expected text at " + getTokenLocation() + " but found " + currentToken);
+        }
+        if (currentType == EirfType.STRING) {
+            return cachedText;
+        }
+        return new Text(text());
     }
 
     @Override
@@ -384,7 +405,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             case EirfType.LONG -> cachedLong;
             case EirfType.FLOAT -> cachedFloat;
             case EirfType.DOUBLE -> cachedDouble;
-            default -> 0;
+            default -> throw new IllegalStateException("Unexpected type: " + currentType);
         };
     }
 
@@ -395,13 +416,13 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             case EirfType.LONG -> NumberType.LONG;
             case EirfType.FLOAT -> NumberType.FLOAT;
             case EirfType.DOUBLE -> NumberType.DOUBLE;
-            default -> NumberType.INT;
+            default -> throw new IllegalStateException("Unexpected type: " + currentType);
         };
     }
 
     @Override
     protected boolean doBooleanValue() {
-        return cachedBoolean;
+        return currentType == EirfType.TRUE;
     }
 
     @Override
@@ -416,7 +437,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             case EirfType.LONG -> (int) cachedLong;
             case EirfType.FLOAT -> (int) cachedFloat;
             case EirfType.DOUBLE -> (int) cachedDouble;
-            default -> 0;
+            default -> throw new IllegalStateException("Unexpected type: " + currentType);
         };
     }
 
@@ -427,7 +448,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             case EirfType.INT -> cachedInt;
             case EirfType.FLOAT -> (long) cachedFloat;
             case EirfType.DOUBLE -> (long) cachedDouble;
-            default -> 0;
+            default -> throw new IllegalStateException("Unexpected type: " + currentType);
         };
     }
 
@@ -438,7 +459,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             case EirfType.DOUBLE -> (float) cachedDouble;
             case EirfType.INT -> (float) cachedInt;
             case EirfType.LONG -> (float) cachedLong;
-            default -> 0f;
+            default -> throw new IllegalStateException("Unexpected type: " + currentType);
         };
     }
 
@@ -449,27 +470,30 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             case EirfType.FLOAT -> cachedFloat;
             case EirfType.INT -> cachedInt;
             case EirfType.LONG -> (double) cachedLong;
-            default -> 0d;
+            default -> throw new IllegalStateException("Unexpected type: " + currentType);
         };
     }
 
     @Override
     public byte[] binaryValue() {
-        return new byte[0];
+        return BytesRef.deepCopyOf(cachedBinary).bytes;
     }
 
     @Override
     public XContentLocation getTokenLocation() {
+        // TODO: Handle
         return new XContentLocation(0, 0);
     }
 
     @Override
     public XContentLocation getCurrentLocation() {
+        // TODO: Handle
         return new XContentLocation(0, 0);
     }
 
     @Override
     public XContentType contentType() {
+        // TODO: Handle
         return XContentType.JSON;
     }
 

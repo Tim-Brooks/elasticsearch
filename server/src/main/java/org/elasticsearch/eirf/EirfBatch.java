@@ -107,6 +107,7 @@ public final class EirfBatch implements Releasable, Accountable {
         return new EirfSchema(nonLeafNames, nonLeafParents, leafNames, leafParents);
     }
 
+    // TODO: Move directly to bytes reference
     static int readU16LE(BytesReference data, int offset) {
         return (data.get(offset) & 0xFF) | ((data.get(offset + 1) & 0xFF) << 8);
     }

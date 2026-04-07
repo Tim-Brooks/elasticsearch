@@ -131,15 +131,18 @@ public final class ShardBatchIndexer {
                 final EirfRowXContentParser parser = new EirfRowXContentParser(schemaTree, row);
 
                 final XContentType xContentType = indexRequest.getContentType() != null ? indexRequest.getContentType() : XContentType.JSON;
+                // TODO: Right now we materialize a source back to avoid breaking translog assertions. We should fix the translog assertions
+                // and move to just materializing the original x-content source for stored source mapping
                 final BytesReference source = rowToSource(row, batch.schema(), xContentType);
+                // TODO: Metering and getIncludeSourceOnError currently do not work with EIRF parsing
                 final SourceToParse sourceToParse = new SourceToParse(
                     indexRequest.id(),
                     source,
                     xContentType,
                     indexRequest.routing(),
-                    Map.of(),
-                    Map.of(),
-                    false,
+                    indexRequest.getDynamicTemplates(),
+                    indexRequest.getDynamicTemplateParams(),
+                    indexRequest.getIncludeSourceOnError(),
                     XContentMeteringParserDecorator.NOOP,
                     indexRequest.tsid(),
                     parser
@@ -225,7 +228,7 @@ public final class ShardBatchIndexer {
                     indexRequest.routing(),
                     Map.of(),
                     Map.of(),
-                    false,
+                    indexRequest.getIncludeSourceOnError(),
                     XContentMeteringParserDecorator.NOOP,
                     indexRequest.tsid(),
                     parser

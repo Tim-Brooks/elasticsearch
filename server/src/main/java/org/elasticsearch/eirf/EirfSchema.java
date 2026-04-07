@@ -82,8 +82,6 @@ public final class EirfSchema {
         return nonLeaves.append(name, parentIdx);
     }
 
-    // ---- Leaf operations ----
-
     /**
      * Returns the number of leaf fields (columns).
      */

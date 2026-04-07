@@ -19,7 +19,7 @@ public final class EirfType {
     public static final byte TRUE = 0x01;
     public static final byte FALSE = 0x02;
 
-    // Scalar types
+    // 4-byte scalar types
     public static final byte INT = 0x03;
     public static final byte FLOAT = 0x04;
 

@@ -36,11 +36,11 @@ public class EirfRowBuilderTests extends ESTestCase {
             assertEquals(2, batch.columnCount());
 
             EirfRowReader row0 = batch.getRowReader(0);
-            assertEquals("alice", row0.getStringValue(0));
+            assertEquals("alice", row0.getStringValue(0).string());
             assertEquals(30, row0.getIntValue(1));
 
             EirfRowReader row1 = batch.getRowReader(1);
-            assertEquals("bob", row1.getStringValue(0));
+            assertEquals("bob", row1.getStringValue(0).string());
             assertEquals(25, row1.getIntValue(1));
 
             batch.close();
@@ -150,8 +150,12 @@ public class EirfRowBuilderTests extends ESTestCase {
             EirfBatch batch = builder.build();
             EirfRowReader row0 = batch.getRowReader(0);
             assertEquals(EirfType.KEY_VALUE, row0.getTypeByte(0));
-            byte[] readBack = row0.getKeyValueBytes(0);
-            assertArrayEquals(kvBytes, readBack);
+            EirfKeyValue kv = row0.getKeyValue(0);
+            assertTrue(kv.next());
+            assertEquals("x", kv.key());
+            assertEquals(EirfType.INT, kv.type());
+            assertEquals(42, kv.intValue());
+            assertFalse(kv.next());
 
             batch.close();
         }
@@ -177,7 +181,7 @@ public class EirfRowBuilderTests extends ESTestCase {
 
             EirfRowReader row1 = batch.getRowReader(1);
             assertTrue(row1.isNull(1));
-            assertEquals("bob@test.com", row1.getStringValue(2));
+            assertEquals("bob@test.com", row1.getStringValue(2).string());
 
             batch.close();
         }

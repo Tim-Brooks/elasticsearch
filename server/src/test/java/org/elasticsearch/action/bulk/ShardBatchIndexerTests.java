@@ -19,7 +19,9 @@ import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.action.update.UpdateResponse;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.eirf.EirfBatch;
+import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.eirf.EirfRowBuilder;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
@@ -27,9 +29,12 @@ import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.shard.IndexShardTestCase;
 import org.elasticsearch.index.shard.ShardId;
+import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
@@ -172,8 +177,6 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
             new BulkItemRequest(1, indexRequest("2")) };
         assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithoutBatch(items), true, testIndexSettings()));
     }
-
-    // -- doBatchIndexOnPrimary tests with EirfBatch --
 
     public void testBatchIndexOnPrimarySingleDoc() throws Exception {
         IndexShard shard = newMappedPrimaryShard();
@@ -431,6 +434,190 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
 
             closeShards(shard, replica);
         }
+    }
+
+    // -- nested / dotted field tests --
+
+    private static final String NESTED_MAPPING = """
+        {
+          "dynamic": "strict",
+          "properties": {
+            "host": {
+              "properties": {
+                "name":   { "type": "keyword" },
+                "ip":     { "type": "ip" }
+              }
+            },
+            "message": { "type": "text" }
+          }
+        }""";
+
+    private static final String ARRAY_MAPPING = """
+        {
+          "dynamic": "strict",
+          "properties": {
+            "tags":    { "type": "keyword" },
+            "scores":  { "type": "integer" },
+            "message": { "type": "text" }
+          }
+        }""";
+
+    private static final String NESTED_ARRAY_MAPPING = """
+        {
+          "dynamic": "strict",
+          "properties": {
+            "host": {
+              "properties": {
+                "name": { "type": "keyword" },
+                "tags": { "type": "keyword" }
+              }
+            },
+            "message": { "type": "text" }
+          }
+        }""";
+
+    private IndexShard newPrimaryShardWithMapping(String mapping) throws IOException {
+        IndexMetadata metadata = IndexMetadata.builder("index")
+            .putMapping(mapping)
+            .settings(SYNTHETIC_SOURCE_SETTINGS)
+            .primaryTerm(0, 1)
+            .build();
+        IndexShard shard = newShard(new ShardId(metadata.getIndex(), 0), true, "n1", metadata, null);
+        recoverShardFromStore(shard);
+        return shard;
+    }
+
+    public void testBatchIndexWithNestedFields() throws Exception {
+        IndexShard shard = newPrimaryShardWithMapping(NESTED_MAPPING);
+
+        int numDocs = randomIntBetween(2, 10);
+        BulkItemRequest[] items = new BulkItemRequest[numDocs];
+        List<BytesReference> sources = new ArrayList<>();
+        for (int i = 0; i < numDocs; i++) {
+            items[i] = new BulkItemRequest(i, indexRequest(Integer.toString(i)));
+            try (XContentBuilder b = XContentBuilder.builder(XContentType.JSON.xContent())) {
+                b.startObject();
+                b.startObject("host");
+                b.field("name", "host-" + i);
+                b.field("ip", "10.0.0." + i);
+                b.endObject();
+                b.field("message", "hello from " + i);
+                b.endObject();
+                sources.add(BytesReference.bytes(b));
+            }
+        }
+
+        try (EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON)) {
+            BulkShardRequest bulkShardRequest = new BulkShardRequest(shard.shardId(), RefreshPolicy.NONE, items);
+            BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(bulkShardRequest, shard);
+
+            PlainActionFuture<Void> future = new PlainActionFuture<>();
+            ShardBatchIndexer.performBatchIndexOnPrimary(items, batch, context, future);
+            future.actionGet();
+
+            assertFalse(context.hasMoreOperationsToExecute());
+            for (int i = 0; i < numDocs; i++) {
+                BulkItemResponse response = items[i].getPrimaryResponse();
+                assertThat(response, notNullValue());
+                assertFalse("doc " + i + " should not have failed", response.isFailed());
+                assertThat(response.getResponse().getResult(), equalTo(DocWriteResponse.Result.CREATED));
+            }
+
+            shard.refresh("test");
+            try (Engine.Searcher searcher = shard.acquireSearcher("test")) {
+                assertThat(searcher.getIndexReader().numDocs(), equalTo(numDocs));
+            }
+        }
+
+        closeShards(shard);
+    }
+
+    public void testBatchIndexWithArrayFields() throws Exception {
+        IndexShard shard = newPrimaryShardWithMapping(ARRAY_MAPPING);
+
+        int numDocs = randomIntBetween(2, 10);
+        BulkItemRequest[] items = new BulkItemRequest[numDocs];
+        List<BytesReference> sources = new ArrayList<>();
+        for (int i = 0; i < numDocs; i++) {
+            items[i] = new BulkItemRequest(i, indexRequest(Integer.toString(i)));
+            try (XContentBuilder b = XContentBuilder.builder(XContentType.JSON.xContent())) {
+                b.startObject();
+                b.array("tags", "tag-" + i + "-a", "tag-" + i + "-b");
+                b.array("scores", i * 10, i * 20);
+                b.field("message", "doc-" + i);
+                b.endObject();
+                sources.add(BytesReference.bytes(b));
+            }
+        }
+
+        try (EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON)) {
+            BulkShardRequest bulkShardRequest = new BulkShardRequest(shard.shardId(), RefreshPolicy.NONE, items);
+            BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(bulkShardRequest, shard);
+
+            PlainActionFuture<Void> future = new PlainActionFuture<>();
+            ShardBatchIndexer.performBatchIndexOnPrimary(items, batch, context, future);
+            future.actionGet();
+
+            assertFalse(context.hasMoreOperationsToExecute());
+            for (int i = 0; i < numDocs; i++) {
+                BulkItemResponse response = items[i].getPrimaryResponse();
+                assertThat(response, notNullValue());
+                assertFalse("doc " + i + " should not have failed", response.isFailed());
+                assertThat(response.getResponse().getResult(), equalTo(DocWriteResponse.Result.CREATED));
+            }
+
+            shard.refresh("test");
+            try (Engine.Searcher searcher = shard.acquireSearcher("test")) {
+                assertThat(searcher.getIndexReader().numDocs(), equalTo(numDocs));
+            }
+        }
+
+        closeShards(shard);
+    }
+
+    public void testBatchIndexWithNestedFieldsAndArrays() throws Exception {
+        IndexShard shard = newPrimaryShardWithMapping(NESTED_ARRAY_MAPPING);
+
+        int numDocs = randomIntBetween(2, 10);
+        BulkItemRequest[] items = new BulkItemRequest[numDocs];
+        List<BytesReference> sources = new ArrayList<>();
+        for (int i = 0; i < numDocs; i++) {
+            items[i] = new BulkItemRequest(i, indexRequest(Integer.toString(i)));
+            try (XContentBuilder b = XContentBuilder.builder(XContentType.JSON.xContent())) {
+                b.startObject();
+                b.startObject("host");
+                b.field("name", "host-" + i);
+                b.array("tags", "env-" + i, "prod");
+                b.endObject();
+                b.field("message", "combined test " + i);
+                b.endObject();
+                sources.add(BytesReference.bytes(b));
+            }
+        }
+
+        try (EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON)) {
+            BulkShardRequest bulkShardRequest = new BulkShardRequest(shard.shardId(), RefreshPolicy.NONE, items);
+            BulkPrimaryExecutionContext context = new BulkPrimaryExecutionContext(bulkShardRequest, shard);
+
+            PlainActionFuture<Void> future = new PlainActionFuture<>();
+            ShardBatchIndexer.performBatchIndexOnPrimary(items, batch, context, future);
+            future.actionGet();
+
+            assertFalse(context.hasMoreOperationsToExecute());
+            for (int i = 0; i < numDocs; i++) {
+                BulkItemResponse response = items[i].getPrimaryResponse();
+                assertThat(response, notNullValue());
+                assertFalse("doc " + i + " should not have failed", response.isFailed());
+                assertThat(response.getResponse().getResult(), equalTo(DocWriteResponse.Result.CREATED));
+            }
+
+            shard.refresh("test");
+            try (Engine.Searcher searcher = shard.acquireSearcher("test")) {
+                assertThat(searcher.getIndexReader().numDocs(), equalTo(numDocs));
+            }
+        }
+
+        closeShards(shard);
     }
 
     public void testBatchIndexOnReplicaNoopResponse() throws Exception {

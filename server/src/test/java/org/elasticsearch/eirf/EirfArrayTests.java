@@ -178,8 +178,12 @@ public class EirfArrayTests extends ESTestCase {
         EirfArray reader = new EirfArray(packed, false);
         assertTrue(reader.next());
         assertEquals(EirfType.KEY_VALUE, reader.type());
-        assertEquals(kvPayload.length, reader.compoundLength());
-        reader.skipCompound();
+        EirfKeyValue kv = reader.nestedKeyValue();
+        assertTrue(kv.next());
+        assertEquals("a", kv.key());
+        assertEquals(EirfType.INT, kv.type());
+        assertEquals(42, kv.intValue());
+        assertFalse(kv.next());
         assertFalse(reader.next());
     }
 }

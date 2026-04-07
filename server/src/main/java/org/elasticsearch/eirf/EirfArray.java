@@ -14,7 +14,7 @@ import org.elasticsearch.common.util.ByteUtils;
 import java.nio.charset.StandardCharsets;
 
 /**
- * A forward-only reader over a compact typed array in EIRF format.
+ * A forward-only reader over a array in EIRF format.
  *
  * <p>Two formats (both byte-length-terminated, no element count):
  * <ul>
@@ -59,11 +59,6 @@ public final class EirfArray {
         }
     }
 
-    /** Creates a union array reader over the full byte array. */
-    public EirfArray(byte[] data) {
-        this(data, 0, data.length, false);
-    }
-
     /** Creates an array reader over the full byte array. */
     public EirfArray(byte[] data, boolean fixed) {
         this(data, 0, data.length, fixed);
@@ -80,7 +75,7 @@ public final class EirfArray {
             elemType = fixedType;
         } else {
             elemType = data[pos];
-            pos++; // past type byte
+            pos++;
         }
         return true;
     }
@@ -139,25 +134,27 @@ public final class EirfArray {
         return val;
     }
 
-    /** Returns the offset of the compound element's payload (past the i32 length prefix). */
-    public int compoundOffset() {
-        return pos + 4;
-    }
-
-    /** Returns the byte length of the compound element's payload. */
-    public int compoundLength() {
-        return ByteUtils.readIntLE(data, pos);
-    }
-
-    /** Returns the backing byte array. */
-    public byte[] compoundBytes() {
-        return data;
-    }
-
-    /** Skips past the current compound element (length-prefixed). */
-    public void skipCompound() {
+    /**
+     * Creates a child {@link EirfArray} reader over the current compound array element's payload
+     * and advances past it. The current element must be a UNION_ARRAY or FIXED_ARRAY.
+     */
+    public EirfArray nestedArray() {
         int len = ByteUtils.readIntLE(data, pos);
-        pos += 4 + len;
+        int off = pos + 4;
+        boolean isFixed = elemType == EirfType.FIXED_ARRAY;
+        pos = off + len;
+        return new EirfArray(data, off, len, isFixed);
+    }
+
+    /**
+     * Creates a child {@link EirfKeyValue} reader over the current compound element's payload
+     * and advances past it. The current element must be of type KEY_VALUE.
+     */
+    public EirfKeyValue nestedKeyValue() {
+        int len = ByteUtils.readIntLE(data, pos);
+        int off = pos + 4;
+        pos = off + len;
+        return new EirfKeyValue(data, off, len);
     }
 
     private int currentDataSize() {

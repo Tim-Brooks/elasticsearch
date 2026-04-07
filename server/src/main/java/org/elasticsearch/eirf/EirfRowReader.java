@@ -11,8 +11,8 @@ package org.elasticsearch.eirf;
 
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesReference;
-
-import java.nio.charset.StandardCharsets;
+import org.elasticsearch.xcontent.Text;
+import org.elasticsearch.xcontent.XContentString;
 
 /**
  * Zero-copy reader for a single row in EIRF format.
@@ -104,30 +104,31 @@ public final class EirfRowReader {
         return Double.longBitsToDouble(rowData.getLongLE(offset));
     }
 
-    public String getStringValue(int col) {
+    public Text getStringValue(int col) {
+        BytesRef ref = getVarBytesRef(col);
+        return new Text(new XContentString.UTF8Bytes(ref.bytes, ref.offset, ref.length));
+    }
+
+    public BytesRef getBinaryValue(int col) {
+        return getVarBytesRef(col);
+    }
+
+    public EirfKeyValue getKeyValue(int col) {
+        BytesRef ref = getVarBytesRef(col);
+        return new EirfKeyValue(ref.bytes, ref.offset, ref.length);
+    }
+
+    public EirfArray getArrayValue(int col) {
+        boolean fixed = getTypeByte(col) == EirfType.FIXED_ARRAY;
+        BytesRef ref = getVarBytesRef(col);
+        return new EirfArray(ref.bytes, ref.offset, ref.length, fixed);
+    }
+
+    private BytesRef getVarBytesRef(int col) {
         long packed = readVarRef(col);
         int varOffset = varRefOffset(packed);
         int varLength = varRefLength(packed);
-        BytesRef bytesRef = rowData.slice(varSectionOffset + varOffset, varLength).toBytesRef();
-        return new String(bytesRef.bytes, bytesRef.offset, bytesRef.length, StandardCharsets.UTF_8);
-    }
-
-    public byte[] getBinaryValue(int col) {
-        long packed = readVarRef(col);
-        int varOffset = varRefOffset(packed);
-        int varLength = varRefLength(packed);
-        BytesRef bytesRef = rowData.slice(varSectionOffset + varOffset, varLength).toBytesRef();
-        byte[] result = new byte[varLength];
-        System.arraycopy(bytesRef.bytes, bytesRef.offset, result, 0, varLength);
-        return result;
-    }
-
-    public byte[] getKeyValueBytes(int col) {
-        return getBinaryValue(col);
-    }
-
-    public byte[] getArrayValue(int col) {
-        return getBinaryValue(col);
+        return rowData.slice(varSectionOffset + varOffset, varLength).toBytesRef();
     }
 
     /**
