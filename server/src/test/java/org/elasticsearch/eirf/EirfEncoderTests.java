@@ -177,7 +177,7 @@ public class EirfEncoderTests extends ESTestCase {
         batch.close();
     }
 
-    public void testLargeArrayProducesUnionArray() throws IOException {
+    public void testLargeHomogeneousArrayProducesFixedArray() throws IOException {
         StringBuilder json = new StringBuilder("{\"nums\":[");
         for (int i = 0; i < 200; i++) {
             if (i > 0) json.append(",");
@@ -189,14 +189,11 @@ public class EirfEncoderTests extends ESTestCase {
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
         EirfRowReader row0 = batch.getRowReader(0);
-        byte type = row0.getTypeByte(0);
-        // Large arrays (> 128 buffer) produce UNION_ARRAY
-        assertEquals(EirfType.UNION_ARRAY, type);
+        assertEquals(EirfType.FIXED_ARRAY, row0.getTypeByte(0));
 
         EirfArray reader = row0.getArrayValue(0);
         int count = 0;
         while (reader.next()) {
-            assertEquals(EirfType.INT, reader.type());
             assertEquals(count, reader.intValue());
             count++;
         }
@@ -394,6 +391,30 @@ public class EirfEncoderTests extends ESTestCase {
         assertEquals((long) Integer.MAX_VALUE + 1, row0.getLongValue(1));
 
         batch.close();
+    }
+
+    public void testDuplicateFieldRejected() {
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> EirfEncoder.encode(List.of(new BytesArray("{\"a\":1,\"a\":2}")), XContentType.JSON)
+        );
+        assertEquals("Duplicate field [a]", e.getMessage());
+    }
+
+    public void testDuplicateNestedFieldRejected() {
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> EirfEncoder.encode(List.of(new BytesArray("{\"obj\":{\"x\":1,\"x\":2}}")), XContentType.JSON)
+        );
+        assertEquals("Duplicate field [x]", e.getMessage());
+    }
+
+    public void testDuplicateNullFieldRejected() {
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> EirfEncoder.encode(List.of(new BytesArray("{\"a\":null,\"a\":1}")), XContentType.JSON)
+        );
+        assertEquals("Duplicate field [a]", e.getMessage());
     }
 
     public void testFixedArrayWithIntNarrowing() throws IOException {

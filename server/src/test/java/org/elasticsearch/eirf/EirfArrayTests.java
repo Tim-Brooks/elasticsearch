@@ -15,7 +15,7 @@ import org.elasticsearch.xcontent.XContentString;
 public class EirfArrayTests extends ESTestCase {
 
     public void testEmptyUnionArray() {
-        byte[] packed = EirfEncoder.packUnionArray(new byte[0], new Object[0], 0);
+        byte[] packed = EirfEncoder.packUnionArray(new byte[0], new long[0], new Object[0], 0);
         EirfArray reader = new EirfArray(packed, false);
         assertFalse(reader.next());
     }
@@ -29,8 +29,8 @@ public class EirfArrayTests extends ESTestCase {
 
     public void testUnionArraySingleInt() {
         byte[] elemTypes = { EirfType.INT };
-        Object[] elemData = { 42L };
-        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemData, 1);
+        long[] elemNumeric = { 42L };
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemNumeric, new Object[1], 1);
 
         EirfArray reader = new EirfArray(packed, false);
         assertTrue(reader.next());
@@ -40,8 +40,8 @@ public class EirfArrayTests extends ESTestCase {
     }
 
     public void testFixedArrayInts() {
-        Object[] elemData = { 1L, 2L, 3L };
-        byte[] packed = EirfEncoder.packFixedArray(EirfType.INT, elemData, 3);
+        long[] elemNumeric = { 1L, 2L, 3L };
+        byte[] packed = EirfEncoder.packFixedArray(EirfType.INT, elemNumeric, new Object[3], 3);
 
         EirfArray reader = new EirfArray(packed, true);
         assertTrue(reader.next());
@@ -57,8 +57,8 @@ public class EirfArrayTests extends ESTestCase {
     public void testFixedArrayStrings() {
         byte[] utf8a = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] utf8b = "world".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        Object[] elemData = { new XContentString.UTF8Bytes(utf8a, 0, utf8a.length), new XContentString.UTF8Bytes(utf8b, 0, utf8b.length) };
-        byte[] packed = EirfEncoder.packFixedArray(EirfType.STRING, elemData, 2);
+        Object[] elemVar = { new XContentString.UTF8Bytes(utf8a, 0, utf8a.length), new XContentString.UTF8Bytes(utf8b, 0, utf8b.length) };
+        byte[] packed = EirfEncoder.packFixedArray(EirfType.STRING, new long[2], elemVar, 2);
 
         EirfArray reader = new EirfArray(packed, true);
         assertTrue(reader.next());
@@ -71,13 +71,14 @@ public class EirfArrayTests extends ESTestCase {
     public void testUnionArrayMixedTypes() {
         byte[] utf8 = "world".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] elemTypes = { EirfType.INT, EirfType.STRING, EirfType.TRUE, EirfType.NULL, EirfType.FLOAT };
-        Object[] elemData = new Object[5];
-        elemData[0] = 42L;
-        elemData[1] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
+        long[] elemNumeric = new long[5];
+        Object[] elemVar = new Object[5];
+        elemNumeric[0] = 42L;
+        elemVar[1] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
         // TRUE and NULL have no data
-        elemData[4] = (long) Float.floatToRawIntBits(3.14f);
+        elemNumeric[4] = Float.floatToRawIntBits(3.14f);
 
-        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemData, 5);
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemNumeric, elemVar, 5);
         EirfArray reader = new EirfArray(packed, false);
 
         assertTrue(reader.next());
@@ -105,7 +106,7 @@ public class EirfArrayTests extends ESTestCase {
 
     public void testBooleanValues() {
         byte[] elemTypes = { EirfType.TRUE, EirfType.FALSE };
-        byte[] packed = EirfEncoder.packUnionArray(elemTypes, new Object[2], 2);
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, new long[2], new Object[2], 2);
 
         EirfArray reader = new EirfArray(packed, false);
         assertTrue(reader.next());
@@ -119,8 +120,8 @@ public class EirfArrayTests extends ESTestCase {
 
     public void testWithOffset() {
         byte[] elemTypes = { EirfType.INT };
-        Object[] elemData = { 99L };
-        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemData, 1);
+        long[] elemNumeric = { 99L };
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemNumeric, new Object[1], 1);
 
         byte[] withPrefix = new byte[5 + packed.length];
         System.arraycopy(packed, 0, withPrefix, 5, packed.length);
@@ -131,8 +132,8 @@ public class EirfArrayTests extends ESTestCase {
     }
 
     public void testFixedArrayLongs() {
-        Object[] elemData = { Long.MAX_VALUE, Long.MIN_VALUE };
-        byte[] packed = EirfEncoder.packFixedArray(EirfType.LONG, elemData, 2);
+        long[] elemNumeric = { Long.MAX_VALUE, Long.MIN_VALUE };
+        byte[] packed = EirfEncoder.packFixedArray(EirfType.LONG, elemNumeric, new Object[2], 2);
 
         EirfArray reader = new EirfArray(packed, true);
         assertTrue(reader.next());
@@ -143,8 +144,8 @@ public class EirfArrayTests extends ESTestCase {
     }
 
     public void testFixedArrayDoubles() {
-        Object[] elemData = { Double.doubleToRawLongBits(3.14), Double.doubleToRawLongBits(-2.718) };
-        byte[] packed = EirfEncoder.packFixedArray(EirfType.DOUBLE, elemData, 2);
+        long[] elemNumeric = { Double.doubleToRawLongBits(3.14), Double.doubleToRawLongBits(-2.718) };
+        byte[] packed = EirfEncoder.packFixedArray(EirfType.DOUBLE, elemNumeric, new Object[2], 2);
 
         EirfArray reader = new EirfArray(packed, true);
         assertTrue(reader.next());
@@ -170,8 +171,8 @@ public class EirfArrayTests extends ESTestCase {
         };
 
         byte[] elemTypes = { EirfType.KEY_VALUE };
-        Object[] elemData = { kvPayload };
-        byte[] packed = EirfEncoder.packUnionArray(elemTypes, elemData, 1);
+        Object[] elemVar = { kvPayload };
+        byte[] packed = EirfEncoder.packUnionArray(elemTypes, new long[1], elemVar, 1);
 
         EirfArray reader = new EirfArray(packed, false);
         assertTrue(reader.next());

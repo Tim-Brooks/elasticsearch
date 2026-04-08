@@ -249,6 +249,48 @@ public class EirfRowBuilderTests extends ESTestCase {
         }
     }
 
+    public void testDuplicateColumnRejected() {
+        try (EirfRowBuilder builder = new EirfRowBuilder()) {
+            builder.startDocument();
+            builder.setInt("a", 1);
+            expectThrows(IllegalStateException.class, () -> builder.setInt("a", 2));
+        }
+    }
+
+    public void testDuplicateColumnAtRejected() {
+        try (EirfRowBuilder builder = new EirfRowBuilder()) {
+            builder.startDocument();
+            builder.setIntAt(0, 1);
+            expectThrows(IllegalStateException.class, () -> builder.setStringAt(0, "overwrite"));
+        }
+    }
+
+    public void testDuplicateNullColumnRejected() {
+        try (EirfRowBuilder builder = new EirfRowBuilder()) {
+            builder.startDocument();
+            builder.setNull("a");
+            expectThrows(IllegalStateException.class, () -> builder.setInt("a", 1));
+        }
+    }
+
+    public void testSameColumnAcrossDocumentsAllowed() {
+        try (EirfRowBuilder builder = new EirfRowBuilder()) {
+            builder.startDocument();
+            builder.setInt("a", 1);
+            builder.endDocument();
+
+            builder.startDocument();
+            builder.setInt("a", 2);
+            builder.endDocument();
+
+            EirfBatch batch = builder.build();
+            assertEquals(2, batch.docCount());
+            assertEquals(1, batch.getRowReader(0).getIntValue(0));
+            assertEquals(2, batch.getRowReader(1).getIntValue(0));
+            batch.close();
+        }
+    }
+
     public void testManyColumns() {
         try (EirfRowBuilder builder = new EirfRowBuilder()) {
             builder.startDocument();

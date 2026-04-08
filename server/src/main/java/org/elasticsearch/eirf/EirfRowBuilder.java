@@ -61,6 +61,7 @@ public class EirfRowBuilder implements Releasable {
         int columnCount = schema.leafCount();
         Arrays.fill(scratch.typeBytes, 0, columnCount, (byte) 0);
         Arrays.fill(scratch.varData, 0, columnCount, null);
+        scratch.resetCounters();
     }
 
     public void endDocument() {
@@ -119,69 +120,97 @@ public class EirfRowBuilder implements Releasable {
 
     public void setBoolean(String path, boolean value) {
         int colIdx = resolveColumn(path);
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = value ? EirfType.TRUE : EirfType.FALSE;
     }
 
     public void setNull(String path) {
         int colIdx = resolveColumn(path);
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.NULL;
     }
 
     public void setBinary(String path, BytesReference bytes) {
         int colIdx = resolveColumn(path);
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.BINARY;
         scratch.varData[colIdx] = bytes;
+        scratch.totalVarSize += bytes.length();
+        scratch.varColumnCount++;
     }
 
     public void setUnionArray(String path, byte[] packed) {
         int colIdx = resolveColumn(path);
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.UNION_ARRAY;
         scratch.varData[colIdx] = new BytesArray(packed);
+        scratch.totalVarSize += packed.length;
+        scratch.varColumnCount++;
     }
 
     public void setFixedArray(String path, byte[] packed) {
         int colIdx = resolveColumn(path);
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.FIXED_ARRAY;
         scratch.varData[colIdx] = new BytesArray(packed);
+        scratch.totalVarSize += packed.length;
+        scratch.varColumnCount++;
     }
 
     public void setKeyValue(String path, byte[] bytes) {
         int colIdx = resolveColumn(path);
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.KEY_VALUE;
         scratch.varData[colIdx] = new BytesArray(bytes);
+        scratch.totalVarSize += bytes.length;
+        scratch.varColumnCount++;
     }
 
     public void setStringAt(int colIdx, String value) {
+        checkNotSet(colIdx);
         byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
         scratch.typeBytes[colIdx] = EirfType.STRING;
         scratch.varData[colIdx] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
+        scratch.totalVarSize += utf8.length;
+        scratch.varColumnCount++;
     }
 
     public void setStringAt(int colIdx, byte[] utf8, int offset, int length) {
+        checkNotSet(colIdx);
         byte[] copy = new byte[length];
         System.arraycopy(utf8, offset, copy, 0, length);
         scratch.typeBytes[colIdx] = EirfType.STRING;
         scratch.varData[colIdx] = new XContentString.UTF8Bytes(copy, 0, length);
+        scratch.totalVarSize += length;
+        scratch.varColumnCount++;
     }
 
     public void setIntAt(int colIdx, int value) {
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.INT;
         EirfEncoder.writeIntToFixed(scratch.fixedData, colIdx, value);
+        scratch.scalarFixedSize += 4;
     }
 
     public void setLongAt(int colIdx, long value) {
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.LONG;
         EirfEncoder.writeLongToFixed(scratch.fixedData, colIdx, value);
+        scratch.scalarFixedSize += 8;
     }
 
     public void setFloatAt(int colIdx, float value) {
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.FLOAT;
         EirfEncoder.writeIntToFixed(scratch.fixedData, colIdx, Float.floatToRawIntBits(value));
+        scratch.scalarFixedSize += 4;
     }
 
     public void setDoubleAt(int colIdx, double value) {
+        checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.DOUBLE;
         EirfEncoder.writeLongToFixed(scratch.fixedData, colIdx, Double.doubleToRawLongBits(value));
+        scratch.scalarFixedSize += 8;
     }
 
     /**
@@ -200,6 +229,12 @@ public class EirfRowBuilder implements Releasable {
 
     public int docCount() {
         return docCount;
+    }
+
+    private void checkNotSet(int colIdx) {
+        if (scratch.columnsSet.getAndSet(colIdx)) {
+            throw new IllegalStateException("Column [" + colIdx + "] already set");
+        }
     }
 
     /**
