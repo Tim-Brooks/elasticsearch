@@ -24,6 +24,10 @@ import java.nio.charset.StandardCharsets;
  * <p>Value data sizes follow the same rules as {@link EirfArray} elements:
  * INT/FLOAT=4 bytes LE, LONG/DOUBLE=8 bytes LE, STRING=i32 length LE + UTF-8 bytes,
  * NULL/TRUE/FALSE=0 bytes, KEY_VALUE/UNION_ARRAY/FIXED_ARRAY=i32 length LE + payload bytes.
+ *
+ * <p>Usage: call {@link #next()} to advance to each entry, then use {@link #key()} and the
+ * appropriate value accessor. {@code next()} handles all positioning — value accessors are
+ * pure reads and do not advance the cursor.
  */
 public final class EirfKeyValue {
 
@@ -33,6 +37,8 @@ public final class EirfKeyValue {
     private int pos;
     private String currentKey;
     private byte currentType;
+    private int dataStart; // start of current value's data (past type byte)
+    private int dataEnd;   // end of current value's data (next entry starts here)
 
     /**
      * Creates a key-value reader.
@@ -44,6 +50,7 @@ public final class EirfKeyValue {
         this.data = data;
         this.endOffset = offset + length;
         this.pos = offset;
+        this.dataEnd = offset;
     }
 
     /** Creates a key-value reader over the full byte array. */
@@ -53,10 +60,12 @@ public final class EirfKeyValue {
 
     /**
      * Advances to the next key-value entry. Returns false when all bytes have been consumed.
+     * Handles all positioning — any unconsumed data from the previous entry is skipped automatically.
      * After calling this, use {@link #key()} to get the key and {@link #type()} to get the
      * value type, then call the appropriate value accessor.
      */
     public boolean next() {
+        pos = dataEnd;
         if (pos >= endOffset) {
             return false;
         }
@@ -66,6 +75,9 @@ public final class EirfKeyValue {
         pos += keyLen;
         currentType = data[pos];
         pos++;
+        dataStart = pos;
+        int size = EirfType.elemDataSize(currentType);
+        dataEnd = size >= 0 ? pos + size : pos + 4 + ByteUtils.readIntLE(data, pos);
         return true;
     }
 
@@ -78,64 +90,44 @@ public final class EirfKeyValue {
     }
 
     public int intValue() {
-        int val = ByteUtils.readIntLE(data, pos);
-        pos += 4;
-        return val;
+        return ByteUtils.readIntLE(data, dataStart);
     }
 
     public float floatValue() {
-        float val = Float.intBitsToFloat(ByteUtils.readIntLE(data, pos));
-        pos += 4;
-        return val;
+        return Float.intBitsToFloat(ByteUtils.readIntLE(data, dataStart));
     }
 
     public long longValue() {
-        long val = ByteUtils.readLongLE(data, pos);
-        pos += 8;
-        return val;
+        return ByteUtils.readLongLE(data, dataStart);
     }
 
     public double doubleValue() {
-        double val = Double.longBitsToDouble(ByteUtils.readLongLE(data, pos));
-        pos += 8;
-        return val;
+        return Double.longBitsToDouble(ByteUtils.readLongLE(data, dataStart));
     }
 
     public String stringValue() {
-        int len = ByteUtils.readIntLE(data, pos);
-        String val = new String(data, pos + 4, len, StandardCharsets.UTF_8);
-        pos += 4 + len;
-        return val;
+        int len = ByteUtils.readIntLE(data, dataStart);
+        return new String(data, dataStart + 4, len, StandardCharsets.UTF_8);
     }
 
     /**
-     * Creates a child {@link EirfKeyValue} reader over the current value's payload
-     * and advances past it. The current value must be of type KEY_VALUE.
+     * Creates a child {@link EirfKeyValue} reader over the current value's payload.
+     * The current value must be of type KEY_VALUE.
      */
     public EirfKeyValue nestedKeyValue() {
-        int len = ByteUtils.readIntLE(data, pos);
-        int off = pos + 4;
-        pos = off + len;
+        int len = ByteUtils.readIntLE(data, dataStart);
+        int off = dataStart + 4;
         return new EirfKeyValue(data, off, len);
     }
 
     /**
-     * Creates a child {@link EirfArray} reader over the current value's payload
-     * and advances past it. The current value must be a UNION_ARRAY or FIXED_ARRAY.
+     * Creates a child {@link EirfArray} reader over the current value's payload.
+     * The current value must be a UNION_ARRAY or FIXED_ARRAY.
      */
     public EirfArray nestedArray() {
-        int len = ByteUtils.readIntLE(data, pos);
-        int off = pos + 4;
+        int len = ByteUtils.readIntLE(data, dataStart);
+        int off = dataStart + 4;
         boolean isFixed = currentType == EirfType.FIXED_ARRAY;
-        pos = off + len;
         return new EirfArray(data, off, len, isFixed);
-    }
-
-    /**
-     * Advances past the current value's data without reading it.
-     */
-    public void advance() {
-        int size = EirfType.elemDataSize(currentType);
-        pos += size == -1 ? 4 + ByteUtils.readIntLE(data, pos) : size;
     }
 }

@@ -69,22 +69,52 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
      * Builds a schema tree from an {@link EirfSchema}. Call once per batch, reuse across rows.
      */
     public static SchemaNode buildSchemaTree(EirfSchema schema) {
-        return buildObjectNode("", 0, schema);
+        // Group children by parent index in a single pass over each level
+        int nonLeafCount = schema.nonLeafCount();
+        int leafCount = schema.leafCount();
+
+        @SuppressWarnings("unchecked")
+        List<Integer>[] nonLeafChildren = new List[nonLeafCount];
+        for (int i = 1; i < nonLeafCount; i++) {
+            int parent = schema.getNonLeafParent(i);
+            if (nonLeafChildren[parent] == null) {
+                nonLeafChildren[parent] = new ArrayList<>();
+            }
+            nonLeafChildren[parent].add(i);
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Integer>[] leafChildren = new List[nonLeafCount];
+        for (int leafIdx = 0; leafIdx < leafCount; leafIdx++) {
+            int parent = schema.getLeafParent(leafIdx);
+            if (leafChildren[parent] == null) {
+                leafChildren[parent] = new ArrayList<>();
+            }
+            leafChildren[parent].add(leafIdx);
+        }
+
+        return buildObjectNode("", 0, schema, nonLeafChildren, leafChildren);
     }
 
-    private static SchemaNode buildObjectNode(String name, int nonLeafIdx, EirfSchema schema) {
+    private static SchemaNode buildObjectNode(
+        String name,
+        int nonLeafIdx,
+        EirfSchema schema,
+        List<Integer>[] nonLeafChildren,
+        List<Integer>[] leafChildren
+    ) {
         List<SchemaNode> childList = new ArrayList<>();
 
-        // Add child objects (non-leaf fields whose parent is this non-leaf)
-        for (int i = 1; i < schema.nonLeafCount(); i++) {
-            if (schema.getNonLeafParent(i) == nonLeafIdx) {
-                childList.add(buildObjectNode(schema.getNonLeafName(i), i, schema));
+        List<Integer> objectChildren = nonLeafChildren[nonLeafIdx];
+        if (objectChildren != null) {
+            for (int childIdx : objectChildren) {
+                childList.add(buildObjectNode(schema.getNonLeafName(childIdx), childIdx, schema, nonLeafChildren, leafChildren));
             }
         }
 
-        // Add child leaves whose parent is this non-leaf
-        for (int leafIdx = 0; leafIdx < schema.leafCount(); leafIdx++) {
-            if (schema.getLeafParent(leafIdx) == nonLeafIdx) {
+        List<Integer> leafChildList = leafChildren[nonLeafIdx];
+        if (leafChildList != null) {
+            for (int leafIdx : leafChildList) {
                 childList.add(SchemaNode.leaf(schema.getLeafName(leafIdx), leafIdx));
             }
         }
@@ -296,7 +326,6 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             }
             case EirfType.NULL -> {
                 currentType = EirfType.NULL;
-                reader.advance();
                 currentToken = Token.VALUE_NULL;
             }
             case EirfType.KEY_VALUE -> {
@@ -363,7 +392,6 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             }
             case EirfType.NULL -> {
                 currentType = EirfType.NULL;
-                kv.advance();
                 currentToken = Token.VALUE_NULL;
             }
             case EirfType.KEY_VALUE -> {

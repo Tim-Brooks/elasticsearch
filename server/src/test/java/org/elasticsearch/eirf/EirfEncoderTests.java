@@ -171,7 +171,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         assertTrue(reader.next());
         assertEquals(EirfType.TRUE, reader.type());
-        reader.advance();
+
         assertFalse(reader.next());
 
         batch.close();

@@ -144,10 +144,7 @@ public final class EirfRowToXContent {
             case EirfType.STRING -> builder.value(kv.stringValue());
             case EirfType.TRUE -> builder.value(true);
             case EirfType.FALSE -> builder.value(false);
-            case EirfType.NULL -> {
-                builder.nullValue();
-                kv.advance();
-            }
+            case EirfType.NULL -> builder.nullValue();
             case EirfType.KEY_VALUE -> writeKeyValue(kv.nestedKeyValue(), builder);
             case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> writeArray(kv.nestedArray(), builder);
         }

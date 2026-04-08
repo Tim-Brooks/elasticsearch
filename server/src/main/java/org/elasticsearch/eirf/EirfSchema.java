@@ -167,13 +167,15 @@ public final class EirfSchema {
         return chain;
     }
 
+    private record FieldKey(int parentIdx, String name) {}
+
     /**
      * Holds a parallel name list, parent array, and lookup map for one level of schema fields.
      */
     private static final class FieldLevel {
         private final List<String> names;
         private int[] parents;
-        private final Map<String, Integer> lookup;
+        private final Map<FieldKey, Integer> lookup;
 
         FieldLevel(int initialCapacity) {
             this.names = new ArrayList<>();
@@ -186,7 +188,7 @@ public final class EirfSchema {
             this.parents = Arrays.copyOf(parents, names.size());
             this.lookup = new HashMap<>(names.size());
             for (int i = 0; i < names.size(); i++) {
-                lookup.put(parents[i] + "/" + names.get(i), i);
+                lookup.put(new FieldKey(parents[i], names.get(i)), i);
             }
         }
 
@@ -203,12 +205,12 @@ public final class EirfSchema {
         }
 
         int find(String name, int parentIdx) {
-            Integer idx = lookup.get(parentIdx + "/" + name);
+            Integer idx = lookup.get(new FieldKey(parentIdx, name));
             return idx != null ? idx : -1;
         }
 
         int append(String name, int parentIdx) {
-            String key = parentIdx + "/" + name;
+            FieldKey key = new FieldKey(parentIdx, name);
             Integer existing = lookup.get(key);
             if (existing != null) {
                 return existing;

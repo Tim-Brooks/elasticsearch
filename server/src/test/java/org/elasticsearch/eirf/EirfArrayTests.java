@@ -91,12 +91,10 @@ public class EirfArrayTests extends ESTestCase {
         assertTrue(reader.next());
         assertEquals(EirfType.TRUE, reader.type());
         assertTrue(reader.booleanValue());
-        reader.advance();
 
         assertTrue(reader.next());
         assertEquals(EirfType.NULL, reader.type());
         assertTrue(reader.isNull());
-        reader.advance();
 
         assertTrue(reader.next());
         assertEquals(EirfType.FLOAT, reader.type());
@@ -112,10 +110,10 @@ public class EirfArrayTests extends ESTestCase {
         EirfArray reader = new EirfArray(packed, false);
         assertTrue(reader.next());
         assertTrue(reader.booleanValue());
-        reader.advance();
+
         assertTrue(reader.next());
         assertFalse(reader.booleanValue());
-        reader.advance();
+
         assertFalse(reader.next());
     }
 
