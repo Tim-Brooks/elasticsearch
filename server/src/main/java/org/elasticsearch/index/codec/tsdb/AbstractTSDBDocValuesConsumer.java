@@ -38,7 +38,6 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefBuilder;
-import org.apache.lucene.util.LongsRef;
 import org.apache.lucene.util.StringHelper;
 import org.apache.lucene.util.compress.LZ4;
 import org.apache.lucene.util.packed.DirectMonotonicWriter;
@@ -894,56 +893,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         writeSortedNumericField(field, new TsdbDocValuesProducer(source.mergeStats) {
             @Override
             public SortedNumericDocValues getSortedNumeric(final FieldInfo field) throws IOException {
-                SortedSetDocValues values = valuesProducer.getSortedSet(field);
-                return new SortedNumericDocValues() {
-
-                    long[] ords = LongsRef.EMPTY_LONGS;
-                    int i, docValueCount;
-
-                    @Override
-                    public long nextValue() {
-                        return ords[i++];
-                    }
-
-                    @Override
-                    public int docValueCount() {
-                        return docValueCount;
-                    }
-
-                    @Override
-                    public boolean advanceExact(int target) {
-                        throw new UnsupportedOperationException();
-                    }
-
-                    @Override
-                    public int docID() {
-                        return values.docID();
-                    }
-
-                    @Override
-                    public int nextDoc() throws IOException {
-                        int doc = values.nextDoc();
-                        if (doc != NO_MORE_DOCS) {
-                            docValueCount = values.docValueCount();
-                            ords = ArrayUtil.grow(ords, docValueCount);
-                            for (int j = 0; j < docValueCount; j++) {
-                                ords[j] = values.nextOrd();
-                            }
-                            i = 0;
-                        }
-                        return doc;
-                    }
-
-                    @Override
-                    public int advance(int target) throws IOException {
-                        throw new UnsupportedOperationException();
-                    }
-
-                    @Override
-                    public long cost() {
-                        return values.cost();
-                    }
-                };
+                return new SortedSetDocValuesAsSortedNumericDocValues(valuesProducer.getSortedSet(field));
             }
         }, maxOrd);
 

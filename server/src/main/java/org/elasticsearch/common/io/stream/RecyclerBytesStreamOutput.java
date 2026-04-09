@@ -186,6 +186,54 @@ public class RecyclerBytesStreamOutput extends BytesStream implements Releasable
         this.positionOffset = ((long) pageIndex) * pageSize - pageStart;
     }
 
+    public void writeByteBuffer(ByteBuffer buffer) {
+        int length = buffer.remaining();
+        if (length == 0) {
+            return;
+        }
+
+        int currentOffset = this.currentOffset;
+        int maxOffset = this.maxOffset;
+        if (length <= maxOffset - currentOffset) {
+            buffer.get(this.currentBufferPool, currentOffset, length);
+            this.currentOffset = currentOffset + length;
+        } else {
+            writeByteBufferMultiPage(buffer, length, this.currentBufferPool, currentOffset, maxOffset);
+        }
+    }
+
+    private void writeByteBufferMultiPage(
+        ByteBuffer sourceBuffer,
+        int lengthToCopy,
+        byte[] targetBufferPool,
+        int targetOffset,
+        int maxTargetOffset
+    ) {
+        ensureCapacity(lengthToCopy);
+
+        int pageIndex = this.pageIndex;
+        int pageStart = 0;
+        while (true) {
+            final int toCopyThisLoop = Math.min(maxTargetOffset - targetOffset, lengthToCopy);
+            sourceBuffer.get(targetBufferPool, targetOffset, toCopyThisLoop);
+            lengthToCopy -= toCopyThisLoop;
+            if (lengthToCopy > 0) {
+                final var nextPage = pages.get(++pageIndex).v();
+                targetBufferPool = nextPage.bytes;
+                targetOffset = pageStart = nextPage.offset;
+                maxTargetOffset = nextPage.offset + nextPage.length;
+            } else {
+                targetOffset += toCopyThisLoop;
+                break;
+            }
+        }
+        this.pageIndex = pageIndex;
+        this.currentBufferPool = targetBufferPool;
+        this.currentOffset = targetOffset;
+        this.maxOffset = maxTargetOffset;
+        this.positionOffset = ((long) pageIndex) * pageSize - pageStart;
+    }
+
     @Override
     public void writeVInt(int i) {
         if ((i & 0xFFFF_FF80) != 0) {

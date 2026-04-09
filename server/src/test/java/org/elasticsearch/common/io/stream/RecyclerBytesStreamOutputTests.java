@@ -33,6 +33,7 @@ import org.junit.After;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.time.OffsetTime;
 import java.time.ZoneId;
@@ -195,6 +196,108 @@ public class RecyclerBytesStreamOutputTests extends ESTestCase {
         // ie. we cross over into a third
         out.writeBytes(expectedData, initialOffset, additionalLength);
         assertEquals(expectedData.length, out.size());
+        assertArrayEquals(expectedData, BytesReference.toBytes(out.bytes()));
+
+        out.close();
+    }
+
+    public void testWriteByteBufferEmpty() throws Exception {
+        RecyclerBytesStreamOutput out = new RecyclerBytesStreamOutput(recycler);
+
+        out.writeByteBuffer(ByteBuffer.allocate(0));
+        assertEquals(0, out.size());
+        assertEquals(0, out.bytes().length());
+
+        out.close();
+    }
+
+    public void testWriteByteBufferSinglePage() throws Exception {
+        RecyclerBytesStreamOutput out = new RecyclerBytesStreamOutput(recycler);
+
+        int expectedSize = 10;
+        byte[] expectedData = randomizedByteArrayWithSize(expectedSize);
+
+        out.writeByteBuffer(ByteBuffer.wrap(expectedData));
+        assertEquals(expectedSize, out.size());
+        assertArrayEquals(expectedData, BytesReference.toBytes(out.bytes()));
+
+        out.close();
+    }
+
+    public void testWriteByteBufferFullPage() throws Exception {
+        RecyclerBytesStreamOutput out = new RecyclerBytesStreamOutput(recycler);
+
+        int expectedSize = PageCacheRecycler.BYTE_PAGE_SIZE;
+        byte[] expectedData = randomizedByteArrayWithSize(expectedSize);
+
+        out.writeByteBuffer(ByteBuffer.wrap(expectedData));
+        assertEquals(expectedSize, out.size());
+        assertArrayEquals(expectedData, BytesReference.toBytes(out.bytes()));
+
+        out.close();
+    }
+
+    public void testWriteByteBufferCrossPage() throws Exception {
+        RecyclerBytesStreamOutput out = new RecyclerBytesStreamOutput(recycler);
+
+        int initialOffset = 10;
+        int additionalLength = PageCacheRecycler.BYTE_PAGE_SIZE;
+        byte[] expectedData = randomizedByteArrayWithSize(initialOffset + additionalLength);
+
+        out.writeBytes(expectedData, 0, initialOffset);
+        assertEquals(initialOffset, out.size());
+
+        out.writeByteBuffer(ByteBuffer.wrap(expectedData, initialOffset, additionalLength));
+        assertEquals(expectedData.length, out.size());
+        assertArrayEquals(expectedData, BytesReference.toBytes(out.bytes()));
+
+        out.close();
+    }
+
+    public void testWriteByteBufferMultiPageCrossover() throws Exception {
+        RecyclerBytesStreamOutput out = new RecyclerBytesStreamOutput(recycler);
+
+        int initialOffset = 10;
+        int additionalLength = PageCacheRecycler.BYTE_PAGE_SIZE * 2;
+        byte[] expectedData = randomizedByteArrayWithSize(initialOffset + additionalLength);
+        out.writeBytes(expectedData, 0, initialOffset);
+        assertEquals(initialOffset, out.size());
+
+        out.writeByteBuffer(ByteBuffer.wrap(expectedData, initialOffset, additionalLength));
+        assertEquals(expectedData.length, out.size());
+        assertArrayEquals(expectedData, BytesReference.toBytes(out.bytes()));
+
+        out.close();
+    }
+
+    public void testWriteByteBufferWithSlicedBuffer() throws Exception {
+        RecyclerBytesStreamOutput out = new RecyclerBytesStreamOutput(recycler);
+
+        int expectedSize = 100;
+        byte[] paddedData = randomizedByteArrayWithSize(expectedSize + 20);
+        ByteBuffer buffer = ByteBuffer.wrap(paddedData, 10, expectedSize).slice();
+
+        byte[] expectedData = new byte[expectedSize];
+        System.arraycopy(paddedData, 10, expectedData, 0, expectedSize);
+
+        out.writeByteBuffer(buffer);
+        assertEquals(expectedSize, out.size());
+        assertArrayEquals(expectedData, BytesReference.toBytes(out.bytes()));
+
+        out.close();
+    }
+
+    public void testWriteByteBufferDirect() throws Exception {
+        RecyclerBytesStreamOutput out = new RecyclerBytesStreamOutput(recycler);
+
+        int expectedSize = PageCacheRecycler.BYTE_PAGE_SIZE + 10;
+        byte[] expectedData = randomizedByteArrayWithSize(expectedSize);
+        ByteBuffer directBuffer = ByteBuffer.allocateDirect(expectedSize);
+        directBuffer.put(expectedData);
+        directBuffer.flip();
+
+        out.writeByteBuffer(directBuffer);
+        assertEquals(expectedSize, out.size());
         assertArrayEquals(expectedData, BytesReference.toBytes(out.bytes()));
 
         out.close();

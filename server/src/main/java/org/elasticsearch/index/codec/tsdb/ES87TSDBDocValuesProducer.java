@@ -1016,10 +1016,6 @@ final class ES87TSDBDocValuesProducer extends DocValuesProducer {
         entry.termsIndexAddressesLength = meta.readLong();
     }
 
-    private abstract static class NumericValues {
-        abstract long advance(long index) throws IOException;
-    }
-
     private NumericDocValues getNumeric(NumericEntry entry, long maxOrd) throws IOException {
         if (entry.docsWithFieldOffset == -2) {
             // empty
@@ -1260,7 +1256,7 @@ final class ES87TSDBDocValuesProducer extends DocValuesProducer {
             private final long[] currentBlock = new long[ES87TSDBDocValuesFormat.NUMERIC_BLOCK_SIZE];
 
             @Override
-            long advance(long index) throws IOException {
+            public long advance(long index) throws IOException {
                 final long blockIndex = index >>> ES87TSDBDocValuesFormat.NUMERIC_BLOCK_SHIFT;
                 final int blockInIndex = (int) (index & ES87TSDBDocValuesFormat.NUMERIC_BLOCK_MASK);
                 if (blockIndex != currentBlockIndex) {
@@ -1291,60 +1287,8 @@ final class ES87TSDBDocValuesProducer extends DocValuesProducer {
         final NumericValues values = getValues(entry, maxOrd);
 
         if (entry.docsWithFieldOffset == -1) {
-            // dense
-            return new SortedNumericDocValues() {
-
-                int doc = -1;
-                long start, end;
-                int count;
-
-                @Override
-                public int nextDoc() throws IOException {
-                    return advance(doc + 1);
-                }
-
-                @Override
-                public int docID() {
-                    return doc;
-                }
-
-                @Override
-                public long cost() {
-                    return maxDoc;
-                }
-
-                @Override
-                public int advance(int target) throws IOException {
-                    if (target >= maxDoc) {
-                        return doc = NO_MORE_DOCS;
-                    }
-                    start = addresses.get(target);
-                    end = addresses.get(target + 1L);
-                    count = (int) (end - start);
-                    return doc = target;
-                }
-
-                @Override
-                public boolean advanceExact(int target) throws IOException {
-                    start = addresses.get(target);
-                    end = addresses.get(target + 1L);
-                    count = (int) (end - start);
-                    doc = target;
-                    return true;
-                }
-
-                @Override
-                public long nextValue() throws IOException {
-                    return values.advance(start++);
-                }
-
-                @Override
-                public int docValueCount() {
-                    return count;
-                }
-            };
+            return new DenseSortedNumericDocValues(maxDoc, addresses, values);
         } else {
-            // sparse
             final IndexedDISI disi = new IndexedDISI(
                 data,
                 entry.docsWithFieldOffset,
@@ -1353,62 +1297,7 @@ final class ES87TSDBDocValuesProducer extends DocValuesProducer {
                 entry.denseRankPower,
                 entry.numDocsWithField
             );
-            return new SortedNumericDocValues() {
-
-                boolean set;
-                long start, end;
-                int count;
-
-                @Override
-                public int nextDoc() throws IOException {
-                    set = false;
-                    return disi.nextDoc();
-                }
-
-                @Override
-                public int docID() {
-                    return disi.docID();
-                }
-
-                @Override
-                public long cost() {
-                    return disi.cost();
-                }
-
-                @Override
-                public int advance(int target) throws IOException {
-                    set = false;
-                    return disi.advance(target);
-                }
-
-                @Override
-                public boolean advanceExact(int target) throws IOException {
-                    set = false;
-                    return disi.advanceExact(target);
-                }
-
-                @Override
-                public long nextValue() throws IOException {
-                    set();
-                    return values.advance(start++);
-                }
-
-                @Override
-                public int docValueCount() {
-                    set();
-                    return count;
-                }
-
-                private void set() {
-                    if (set == false) {
-                        final int index = disi.index();
-                        start = addresses.get(index);
-                        end = addresses.get(index + 1L);
-                        count = (int) (end - start);
-                        set = true;
-                    }
-                }
-            };
+            return new SparseSortedNumericDocValues(disi, addresses, values);
         }
     }
 
