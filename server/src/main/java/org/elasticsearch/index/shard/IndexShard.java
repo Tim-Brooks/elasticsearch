@@ -51,6 +51,7 @@ import org.elasticsearch.cluster.service.ClusterApplierService;
 import org.elasticsearch.cluster.service.MasterService;
 import org.elasticsearch.common.CheckedBiConsumer;
 import org.elasticsearch.common.UUIDs;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.compress.CompressedXContent;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
@@ -63,6 +64,7 @@ import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.CollectionUtils;
 import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
+import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Assertions;
 import org.elasticsearch.core.Booleans;
@@ -1146,6 +1148,25 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         );
     }
 
+    /**
+     * Applies a batch of index operations on the primary. Returns null if any operation requires a mapping update,
+     * signaling the caller to fall back to the item-by-item path.
+     */
+    public List<Engine.IndexResult> applyIndexOperationBatchOnPrimary(List<Engine.Index> operations) throws IOException {
+        ensureWriteAllowed(Engine.Operation.Origin.PRIMARY);
+        final Engine engine = getEngine();
+        return indexBatch(operations, BytesArray.EMPTY);
+    }
+
+    /**
+     * Applies a batch of index operations on a replica.
+     */
+    public List<Engine.IndexResult> applyIndexOperationBatchOnReplica(List<Engine.Index> operations) throws IOException {
+        ensureWriteAllowed(Engine.Operation.Origin.REPLICA);
+        final Engine engine = getEngine();
+        return indexBatch(operations, BytesArray.EMPTY);
+    }
+
     private Engine.IndexResult index(Engine engine, Engine.Index index) throws IOException {
         try {
             final Engine.IndexResult result;
@@ -1322,8 +1343,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         return new Engine.Delete(id, Uid.encodeId(id), seqNo, primaryTerm, version, versionType, origin, startTime, ifSeqNo, ifPrimaryTerm);
     }
 
-    public Engine.GetResult get(Engine.Get get) {
-        return innerGet(get, false, this::wrapSearcher);
+    public Engine.GetResult get(Engine.Get get, SplitShardCountSummary splitShardCountSummary) {
+        return innerGet(get, false, splitShardCountSummary, this::wrapSearcher);
     }
 
     /**
@@ -1333,8 +1354,8 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
     public void mget(Consumer<MultiEngineGet> mgetter) {
         final MultiEngineGet mget = new MultiEngineGet(this::wrapSearcher) {
             @Override
-            public GetResult get(Engine.Get get) {
-                return innerGet(get, false, this::wrapSearchSearchWithCache);
+            public GetResult get(Engine.Get get, SplitShardCountSummary splitShardCountSummary) {
+                return innerGet(get, false, splitShardCountSummary, this::wrapSearchSearchWithCache);
             }
         };
         try {
@@ -1344,12 +1365,17 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         }
     }
 
-    public Engine.GetResult getFromTranslog(Engine.Get get) {
+    public Engine.GetResult getFromTranslog(Engine.Get get, SplitShardCountSummary splitShardCountSummary) {
         assert get.realtime();
-        return innerGet(get, true, this::wrapSearcher);
+        return innerGet(get, true, splitShardCountSummary, this::wrapSearcher);
     }
 
-    private Engine.GetResult innerGet(Engine.Get get, boolean translogOnly, Function<Engine.Searcher, Engine.Searcher> searcherWrapper) {
+    private Engine.GetResult innerGet(
+        Engine.Get get,
+        boolean translogOnly,
+        SplitShardCountSummary splitShardCountSummary,
+        Function<Engine.Searcher, Engine.Searcher> searcherWrapper
+    ) {
         readAllowed();
         MappingLookup mappingLookup = mapperService.mappingLookup();
         if (mappingLookup.hasMappings() == false) {
@@ -1361,7 +1387,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         if (translogOnly) {
             return withEngine(engine -> engine.getFromTranslog(get, mappingLookup, mapperService.documentParser(), searcherWrapper));
         }
-        return withEngine(engine -> engine.get(get, mappingLookup, mapperService.documentParser(), searcherWrapper));
+        return withEngine(
+            engine -> engine.get(get, mappingLookup, mapperService.documentParser(), splitShardCountSummary, searcherWrapper)
+        );
     }
 
     /**
@@ -3469,9 +3497,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
             try {
                 doCheckIndex();
             } catch (IOException e) {
-                if (ExceptionsHelper.unwrap(e, AlreadyClosedException.class) != null) {
+                if (ExceptionsHelper.unwrap(e, AlreadyClosedException.class) != null || isRejectedDueToShutdown(e)) {
                     // Cache-based read operations on Lucene files can throw an AlreadyClosedException wrapped into an IOException in case
-                    // of evictions. We don't want to mark the store as corrupted for this.
+                    // of evictions, or the read might be rejected if the node is shutting down. We don't want to mark the store as
+                    // corrupted for this.
                 } else {
                     store.markStoreCorrupted(e);
                 }
@@ -5020,5 +5049,10 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 + Thread.currentThread()
                 + "] to not hold the engine write lock (lock ordering should be: engineMutex -> engineResetLock -> mutex)";
         return true;
+    }
+
+    private static boolean isRejectedDueToShutdown(IOException e) {
+        var rejected = ExceptionsHelper.unwrap(e, EsRejectedExecutionException.class);
+        return rejected instanceof EsRejectedExecutionException esRejected && esRejected.isExecutorShutdown();
     }
 }

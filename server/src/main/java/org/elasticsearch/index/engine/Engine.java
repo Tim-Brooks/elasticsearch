@@ -51,6 +51,7 @@ import org.elasticsearch.action.support.replication.StaleRequestException;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.routing.SplitShardCountSummary;
 import org.elasticsearch.cluster.service.ClusterApplierService;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.compress.CompressedXContent;
 import org.elasticsearch.common.logging.Loggers;
@@ -729,6 +730,10 @@ public abstract class Engine implements Closeable {
         return results;
     }
 
+    public List<IndexResult> indexBatch(List<Index> operations) throws IOException {
+        return indexBatch(operations, BytesArray.EMPTY);
+    }
+
     /**
      * Perform document delete operation on the engine
      * @param delete operation to perform
@@ -1006,6 +1011,7 @@ public abstract class Engine implements Closeable {
         Get get,
         MappingLookup mappingLookup,
         DocumentParser documentParser,
+        SplitShardCountSummary splitShardCountSummary,
         Function<Engine.Searcher, Engine.Searcher> searcherWrapper
     );
 

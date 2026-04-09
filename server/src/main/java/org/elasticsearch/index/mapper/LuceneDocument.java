@@ -103,11 +103,12 @@ public class LuceneDocument implements Iterable<IndexableField> {
     /**
      * only add the key to the keyedFields, it don't add the field to the field list
      */
-    public void onlyAddKey(Object key, IndexableField field) {
+    public void onlyAddKey(final Object key, final IndexableField field) {
+        assert field != null : "field must not be null";
         if (keyedFields == null) {
             keyedFields = new HashMap<>();
         }
-        IndexableField existing = keyedFields.putIfAbsent(key, field);
+        final var existing = keyedFields.put(key, field);
         if (existing != null) {
             throw new IllegalStateException("Only one field can be stored per key");
         }

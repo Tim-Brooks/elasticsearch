@@ -712,7 +712,6 @@ public class BatchBulkIT extends ESIntegTestCase {
     public void testTimeSeriesIndexViaBatchMode() throws IOException {
         String index = "test-batch-tsdb";
 
-        // Create a time series index with batch mode enabled
         XContentBuilder mapping = JsonXContent.contentBuilder();
         mapping.startObject();
         {

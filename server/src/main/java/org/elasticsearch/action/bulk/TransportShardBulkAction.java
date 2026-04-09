@@ -480,15 +480,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 return null; // couldn't determine types — fall back to serial
             }
 
-            // Preflight merge to validate the mapping update
-            CompressedXContent mergedSource = mapperService.merge(
-                MapperService.SINGLE_MAPPING_NAME,
-                mappingUpdate,
-                MapperService.MergeReason.MAPPING_AUTO_UPDATE_PREFLIGHT
-            ).mappingSource();
-
-            DocumentMapper existingMapper = mapperService.documentMapper();
-            if (existingMapper != null && mergedSource.equals(existingMapper.mappingSource())) {
+            // Preflight check: does the mapping update actually change anything?
+            if (mapperService.isNoOpUpdate(mappingUpdate)) {
                 // Mapping already up to date (concurrent update?) — proceed with refreshed lookup
                 // Fall through to parse with the current mappingLookup which should now have the fields
             } else {

@@ -511,11 +511,6 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                 // Get effective shardCount for shardId and pass it on as parameter to new BulkShardRequest
                 var indexMetadata = project.getIndexSafe(shardId.getIndex());
                 SplitShardCountSummary reshardSplitShardCountSummary = SplitShardCountSummary.forIndexing(indexMetadata, shardId.getId());
-
-                for (BulkItemRequest bir : requests) {
-                    if (bir.request() instanceof IndexRequest ir2) {
-                    }
-                }
                 BulkShardRequest bulkShardRequest = new BulkShardRequest(
                     shardId,
                     reshardSplitShardCountSummary,
@@ -563,8 +558,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
 
                 Releasable bulkItemRequestComplete = bulkItemRequestCompleteRefCount.acquire();
                 Releasable finalReleasable = releasable;
-                boolean redactSeqNo = IndexSettings.DISABLE_SEQUENCE_NUMBERS_FEATURE_FLAG
-                    && IndexSettings.DISABLE_SEQUENCE_NUMBERS.get(indexMetadata.getSettings());
+                boolean redactSeqNo = IndexSettings.DISABLE_SEQUENCE_NUMBERS.get(indexMetadata.getSettings());
                 executeBulkShardRequest(
                     bulkShardRequest,
                     project.id(),
