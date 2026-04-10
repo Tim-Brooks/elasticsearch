@@ -14,25 +14,20 @@ import org.apache.lucene.index.IndexableField;
 import java.util.AbstractList;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
-import java.util.RandomAccess;
 
 /**
  * A {@link java.util.List} implementation backed by shared pooled object arrays from
  * {@link BatchLuceneDocuments}. Fields are appended via {@link #add(IndexableField)} during
- * document parsing, then {@link #freeze()} is called to resolve the backing array for fast
- * iteration and random access with no per-element arithmetic.
- * <p>
- * If all fields reside within a single pool page (the common case for ~80-field documents),
- * freeze captures the page's array reference directly. If fields span pages, freeze copies
- * them into a dedicated array.
+ * document parsing. After all fields are added, {@link #freeze()} resolves the backing page
+ * array and offset for direct slice iteration with no per-element arithmetic.
  */
-final class PooledFieldList extends AbstractList<IndexableField> implements RandomAccess {
+final class PooledFieldList extends AbstractList<IndexableField> {
 
     private final BatchLuceneDocuments pool;
     private final int startOffset;
     private int size;
 
-    // Resolved by freeze()
+    // Resolved by freeze() — direct reference to the page array and the offset within it
     private Object[] array;
     private int arrayOffset;
 
@@ -50,8 +45,9 @@ final class PooledFieldList extends AbstractList<IndexableField> implements Rand
     }
 
     /**
-     * Resolves the backing array for fast iteration. Must be called after all fields have been
-     * added and before the document is passed to Lucene's IndexWriter.
+     * Resolves the backing page array for direct slice access. For the common case where all
+     * fields fit in a single page, this just captures the page reference and offset — zero copy.
+     * For the rare cross-page case, fields are copied into a dedicated array.
      */
     void freeze() {
         if (size == 0) {
@@ -63,17 +59,14 @@ final class PooledFieldList extends AbstractList<IndexableField> implements Rand
         int startPage = startOffset / pageSize;
         int endPage = (startOffset + size - 1) / pageSize;
         if (startPage == endPage) {
-            // Common case: all fields fit in a single page — just reference the page array directly
             array = pool.getPage(startPage);
             arrayOffset = startOffset % pageSize;
         } else {
-            // Rare case: fields span pages — copy into a dedicated contiguous array
             Object[] copy = new Object[size];
+            int globalIndex = startOffset;
             for (int i = 0; i < size; i++) {
-                int globalIndex = startOffset + i;
-                int pageIndex = globalIndex / pageSize;
-                int offsetInPage = globalIndex % pageSize;
-                copy[i] = pool.getPage(pageIndex)[offsetInPage];
+                copy[i] = pool.getPage(globalIndex / pageSize)[globalIndex % pageSize];
+                globalIndex++;
             }
             array = copy;
             arrayOffset = 0;
@@ -85,8 +78,12 @@ final class PooledFieldList extends AbstractList<IndexableField> implements Rand
         if (index < 0 || index >= size) {
             throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
         }
-        assert array != null : "PooledFieldList must be frozen before access";
-        return (IndexableField) array[arrayOffset + index];
+        if (array != null) {
+            return (IndexableField) array[arrayOffset + index];
+        }
+        int globalIndex = startOffset + index;
+        int pageSize = pool.pageSize();
+        return (IndexableField) pool.getPage(globalIndex / pageSize)[globalIndex % pageSize];
     }
 
     @Override
@@ -96,23 +93,38 @@ final class PooledFieldList extends AbstractList<IndexableField> implements Rand
 
     @Override
     public Iterator<IndexableField> iterator() {
-        assert array != null : "PooledFieldList must be frozen before iteration";
-        return new Iterator<>() {
-            private int cursor = arrayOffset;
-            private final int end = arrayOffset + size;
+        if (array != null) {
+            return new ArraySliceIterator(array, arrayOffset, size);
+        }
+        return super.iterator();
+    }
 
-            @Override
-            public boolean hasNext() {
-                return cursor < end;
-            }
+    /**
+     * Named iterator class for iterating a slice of an Object[] as IndexableField.
+     * Named (not anonymous) so the JIT can build a stable type profile and inline fully.
+     */
+    static final class ArraySliceIterator implements Iterator<IndexableField> {
+        private final Object[] array;
+        private final int end;
+        private int cursor;
 
-            @Override
-            public IndexableField next() {
-                if (cursor >= end) {
-                    throw new NoSuchElementException();
-                }
-                return (IndexableField) array[cursor++];
+        ArraySliceIterator(Object[] array, int offset, int size) {
+            this.array = array;
+            this.cursor = offset;
+            this.end = offset + size;
+        }
+
+        @Override
+        public boolean hasNext() {
+            return cursor < end;
+        }
+
+        @Override
+        public IndexableField next() {
+            if (cursor >= end) {
+                throw new NoSuchElementException();
             }
-        };
+            return (IndexableField) array[cursor++];
+        }
     }
 }

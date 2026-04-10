@@ -701,10 +701,9 @@ public final class RowBatchDocumentParser {
                     metadataMapper.postParse(contexts[i]);
                 }
 
-                // Step 6: Freeze pooled field lists for fast iteration during indexing
+                // Step 6: Freeze pooled field lists for direct array-slice iteration.
                 if (batchDocs != null) {
-                    List<IndexableField> fields = contexts[i].document.getFields();
-                    if (fields instanceof PooledFieldList pooledFields) {
+                    if (contexts[i].document.getFields() instanceof PooledFieldList pooledFields) {
                         pooledFields.freeze();
                     }
                 }
