@@ -18,14 +18,23 @@ import java.util.RandomAccess;
 
 /**
  * A {@link java.util.List} implementation backed by shared pooled object arrays from
- * {@link BatchLuceneDocuments}. Each instance represents a contiguous range of fields
- * starting at a global offset in the pool. Fields may span page boundaries transparently.
+ * {@link BatchLuceneDocuments}. Fields are appended via {@link #add(IndexableField)} during
+ * document parsing, then {@link #freeze()} is called to resolve the backing array for fast
+ * iteration and random access with no per-element arithmetic.
+ * <p>
+ * If all fields reside within a single pool page (the common case for ~80-field documents),
+ * freeze captures the page's array reference directly. If fields span pages, freeze copies
+ * them into a dedicated array.
  */
 final class PooledFieldList extends AbstractList<IndexableField> implements RandomAccess {
 
     private final BatchLuceneDocuments pool;
     private final int startOffset;
     private int size;
+
+    // Resolved by freeze()
+    private Object[] array;
+    private int arrayOffset;
 
     PooledFieldList(BatchLuceneDocuments pool, int startOffset) {
         this.pool = pool;
@@ -40,12 +49,44 @@ final class PooledFieldList extends AbstractList<IndexableField> implements Rand
         return true;
     }
 
+    /**
+     * Resolves the backing array for fast iteration. Must be called after all fields have been
+     * added and before the document is passed to Lucene's IndexWriter.
+     */
+    void freeze() {
+        if (size == 0) {
+            array = new Object[0];
+            arrayOffset = 0;
+            return;
+        }
+        int pageSize = pool.pageSize();
+        int startPage = startOffset / pageSize;
+        int endPage = (startOffset + size - 1) / pageSize;
+        if (startPage == endPage) {
+            // Common case: all fields fit in a single page — just reference the page array directly
+            array = pool.getPage(startPage);
+            arrayOffset = startOffset % pageSize;
+        } else {
+            // Rare case: fields span pages — copy into a dedicated contiguous array
+            Object[] copy = new Object[size];
+            for (int i = 0; i < size; i++) {
+                int globalIndex = startOffset + i;
+                int pageIndex = globalIndex / pageSize;
+                int offsetInPage = globalIndex % pageSize;
+                copy[i] = pool.getPage(pageIndex)[offsetInPage];
+            }
+            array = copy;
+            arrayOffset = 0;
+        }
+    }
+
     @Override
     public IndexableField get(int index) {
         if (index < 0 || index >= size) {
             throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
         }
-        return pool.getField(startOffset + index);
+        assert array != null : "PooledFieldList must be frozen before access";
+        return (IndexableField) array[arrayOffset + index];
     }
 
     @Override
@@ -55,20 +96,22 @@ final class PooledFieldList extends AbstractList<IndexableField> implements Rand
 
     @Override
     public Iterator<IndexableField> iterator() {
+        assert array != null : "PooledFieldList must be frozen before iteration";
         return new Iterator<>() {
-            private int cursor = 0;
+            private int cursor = arrayOffset;
+            private final int end = arrayOffset + size;
 
             @Override
             public boolean hasNext() {
-                return cursor < size;
+                return cursor < end;
             }
 
             @Override
             public IndexableField next() {
-                if (cursor >= size) {
+                if (cursor >= end) {
                     throw new NoSuchElementException();
                 }
-                return pool.getField(startOffset + cursor++);
+                return (IndexableField) array[cursor++];
             }
         };
     }

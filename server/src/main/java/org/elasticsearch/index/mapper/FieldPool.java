@@ -23,9 +23,9 @@ import org.apache.lucene.util.BytesRef;
  */
 final class FieldPool {
 
-    static final int SORTED_NUMERIC_POOL_SIZE = 10_000;
-    static final int NUMERIC_POOL_SIZE = 1_000;
-    static final int KEYWORD_POOL_SIZE = 5_000;
+    static final int SORTED_NUMERIC_POOL_SIZE = 100_000;
+    static final int NUMERIC_POOL_SIZE = 5_000;
+    static final int KEYWORD_POOL_SIZE = 50_000;
 
     private final PooledSortedNumericDocValuesField[] sortedNumericPool;
     private int sortedNumericCursor;

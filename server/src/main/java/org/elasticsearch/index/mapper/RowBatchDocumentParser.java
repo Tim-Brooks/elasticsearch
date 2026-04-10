@@ -11,6 +11,7 @@ package org.elasticsearch.index.mapper;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.bulk.DocBatchRowIterator;
 import org.elasticsearch.action.bulk.DocBatchRowReader;
@@ -700,7 +701,15 @@ public final class RowBatchDocumentParser {
                     metadataMapper.postParse(contexts[i]);
                 }
 
-                // Step 6: Build ParsedDocument
+                // Step 6: Freeze pooled field lists for fast iteration during indexing
+                if (batchDocs != null) {
+                    List<IndexableField> fields = contexts[i].document.getFields();
+                    if (fields instanceof PooledFieldList pooledFields) {
+                        pooledFields.freeze();
+                    }
+                }
+
+                // Step 7: Build ParsedDocument
                 // Dynamic mapping updates are intentionally NOT produced here. The batch path
                 // pre-handles dynamic mappings in performRowBatchOnPrimary before calling
                 // parseRowBatch. Even if parseBinaryObjectForDocument encounters unmapped fields

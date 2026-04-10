@@ -24,8 +24,8 @@ import java.util.List;
  * stored in shared {@code Object[]} pages obtained from the recycler.
  * <p>
  * Documents are created via {@link #newDocument()} which returns a standard {@link LuceneDocument}
- * backed by a {@link PooledFieldList}. Fields are written sequentially via a global cursor and
- * can span page boundaries transparently.
+ * backed by a {@link PooledFieldList}. Fields are written sequentially via a cursor into the
+ * current page — no per-field arithmetic is needed.
  * <p>
  * Additionally, this class provides access to a thread-local {@link FieldPool} of pre-allocated
  * Lucene field instances (e.g., {@link org.apache.lucene.document.SortedNumericDocValuesField},
@@ -45,6 +45,10 @@ public final class BatchLuceneDocuments implements Releasable {
     private final FieldPool fieldPool;
     private int globalOffset;
 
+    // Cursor into the current page for O(1) field writes
+    private Object[] currentPage;
+    private int currentPageOffset;
+
     public BatchLuceneDocuments(PageCacheRecycler recycler) {
         this.recycler = recycler;
         this.pageSize = PageCacheRecycler.OBJECT_PAGE_SIZE;
@@ -52,7 +56,10 @@ public final class BatchLuceneDocuments implements Releasable {
         this.globalOffset = 0;
         this.fieldPool = FIELD_POOL.get();
         // Acquire the first page
-        pages.add(recycler.objectPage());
+        Recycler.V<Object[]> firstPage = recycler.objectPage();
+        pages.add(firstPage);
+        this.currentPage = firstPage.v();
+        this.currentPageOffset = 0;
     }
 
     /**
@@ -97,26 +104,36 @@ public final class BatchLuceneDocuments implements Releasable {
     }
 
     /**
-     * Adds a field to the current position in the pooled storage. If the current page is full,
-     * a new page is acquired from the recycler.
+     * Adds a field to the current position in the pooled storage. Uses a cursor into the
+     * current page so that the common case is a single array write with no arithmetic.
      */
     void addField(IndexableField field) {
-        int pageIndex = globalOffset / pageSize;
-        int offsetInPage = globalOffset % pageSize;
-        if (pageIndex >= pages.size()) {
-            pages.add(recycler.objectPage());
+        if (currentPageOffset == pageSize) {
+            advancePage();
         }
-        pages.get(pageIndex).v()[offsetInPage] = field;
+        currentPage[currentPageOffset++] = field;
         globalOffset++;
     }
 
+    private void advancePage() {
+        Recycler.V<Object[]> newPage = recycler.objectPage();
+        pages.add(newPage);
+        currentPage = newPage.v();
+        currentPageOffset = 0;
+    }
+
     /**
-     * Retrieves the field at the given global index, translating to the appropriate page and offset.
+     * Returns the page size used by this pool.
      */
-    IndexableField getField(int globalIndex) {
-        int pageIndex = globalIndex / pageSize;
-        int offsetInPage = globalIndex % pageSize;
-        return (IndexableField) pages.get(pageIndex).v()[offsetInPage];
+    int pageSize() {
+        return pageSize;
+    }
+
+    /**
+     * Returns the raw object array for the given page index.
+     */
+    Object[] getPage(int pageIndex) {
+        return pages.get(pageIndex).v();
     }
 
     @Override
