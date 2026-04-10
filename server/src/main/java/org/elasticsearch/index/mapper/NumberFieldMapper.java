@@ -30,6 +30,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.common.Explicit;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.common.Numbers;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.settings.Setting;
@@ -2467,9 +2468,10 @@ public class NumberFieldMapper extends FieldMapper {
         final LuceneDocument doc = context.doc();
         final String name = ft.name();
         final IndexType indexType = ft.indexType;
+        final FieldPool fieldPool = context.fieldPool();
         switch (type) {
-            case BYTE, SHORT, INTEGER -> addIntFields(doc, name, numericValue.intValue(), indexType);
-            case LONG -> addLongFields(doc, name, numericValue.longValue(), indexType);
+            case BYTE, SHORT, INTEGER -> addIntFields(doc, name, numericValue.intValue(), indexType, fieldPool);
+            case LONG -> addLongFields(doc, name, numericValue.longValue(), indexType, fieldPool);
             default -> type.addFields(doc, name, numericValue, indexType, stored);
         }
 
@@ -2487,11 +2489,13 @@ public class NumberFieldMapper extends FieldMapper {
         }
     }
 
-    private void addIntFields(LuceneDocument document, String name, int i, IndexType indexType) {
+    private void addIntFields(LuceneDocument document, String name, int i, IndexType indexType, @Nullable FieldPool fieldPool) {
         if (indexType.hasPoints() && indexType.hasDocValues()) {
             document.add(new IntField(name, i, Field.Store.NO));
         } else if (indexType.hasDocValues()) {
-            if (indexType.hasDocValuesSkipper()) {
+            if (fieldPool != null) {
+                document.add(fieldPool.nextSortedNumeric(name, i));
+            } else if (indexType.hasDocValuesSkipper()) {
                 document.add(SortedNumericDocValuesField.indexedField(name, i));
             } else {
                 document.add(new SortedNumericDocValuesField(name, i));
@@ -2504,11 +2508,13 @@ public class NumberFieldMapper extends FieldMapper {
         }
     }
 
-    private void addLongFields(LuceneDocument document, String name, long l, IndexType indexType) {
+    private void addLongFields(LuceneDocument document, String name, long l, IndexType indexType, @Nullable FieldPool fieldPool) {
         if (indexType.hasPoints() && indexType.hasDocValues()) {
             document.add(new LongField(name, l, Field.Store.NO));
         } else if (indexType.hasDocValues()) {
-            if (indexType.hasDocValuesSkipper()) {
+            if (fieldPool != null) {
+                document.add(fieldPool.nextSortedNumeric(name, l));
+            } else if (indexType.hasDocValuesSkipper()) {
                 document.add(SortedNumericDocValuesField.indexedField(name, l));
             } else {
                 document.add(new SortedNumericDocValuesField(name, l));

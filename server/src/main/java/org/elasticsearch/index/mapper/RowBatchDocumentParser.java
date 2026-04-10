@@ -20,6 +20,8 @@ import org.elasticsearch.action.bulk.RowType;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.compress.CompressedXContent;
+import org.elasticsearch.common.util.PageCacheRecycler;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
 import org.elasticsearch.xcontent.XContentLocation;
 import org.elasticsearch.xcontent.XContentParser;
@@ -503,6 +505,25 @@ public final class RowBatchDocumentParser {
      * @return a result containing parsed documents and per-document exceptions
      */
     public BatchResult parseRowBatch(RowDocumentBatch rowBatch, List<IndexRequest> indexRequests, MappingLookup mappingLookup) {
+        return parseRowBatch(rowBatch, indexRequests, mappingLookup, null);
+    }
+
+    /**
+     * Parse all documents in a row batch into parsed documents.
+     *
+     * @param rowBatch           the row-oriented document batch
+     * @param indexRequests      the index requests (for metadata: id, routing, xContentType, tsid)
+     * @param mappingLookup      the current mapping lookup
+     * @param pageCacheRecycler  optional recycler for pooled document storage; if non-null, documents will
+     *                           use pooled field lists backed by shared object arrays
+     * @return a result containing parsed documents and per-document exceptions
+     */
+    public BatchResult parseRowBatch(
+        RowDocumentBatch rowBatch,
+        List<IndexRequest> indexRequests,
+        MappingLookup mappingLookup,
+        @Nullable PageCacheRecycler pageCacheRecycler
+    ) {
         final int docCount = indexRequests.size();
         final DocBatchSchema schema = rowBatch.schema();
         final MetadataFieldMapper[] metadataFieldMappers = mappingLookup.getMapping().getSortedMetadataMappers();
@@ -558,6 +579,8 @@ public final class RowBatchDocumentParser {
             }
         }
 
+        BatchLuceneDocuments batchDocs = pageCacheRecycler != null ? new BatchLuceneDocuments(pageCacheRecycler) : null;
+
         int fieldCountHint = columnMappers.length;
         for (int i = 0; i < docCount; i++) {
             try {
@@ -580,16 +603,30 @@ public final class RowBatchDocumentParser {
                 );
 
                 // Step 2: Create context
-                contexts[i] = new BatchDocumentParserContext(
-                    mappingLookup,
-                    mappingParserContext,
-                    sources[i],
-                    sharedCopyToFields,
-                    sharedDynamicMappers,
-                    sharedDynamicObjectMappers,
-                    sharedDynamicRuntimeFields,
-                    fieldCountHint + 2 // TODO: Unsure
-                );
+                if (batchDocs != null) {
+                    contexts[i] = new BatchDocumentParserContext(
+                        mappingLookup,
+                        mappingParserContext,
+                        sources[i],
+                        sharedCopyToFields,
+                        sharedDynamicMappers,
+                        sharedDynamicObjectMappers,
+                        sharedDynamicRuntimeFields,
+                        batchDocs.newDocument(),
+                        batchDocs.fieldPool()
+                    );
+                } else {
+                    contexts[i] = new BatchDocumentParserContext(
+                        mappingLookup,
+                        mappingParserContext,
+                        sources[i],
+                        sharedCopyToFields,
+                        sharedDynamicMappers,
+                        sharedDynamicObjectMappers,
+                        sharedDynamicRuntimeFields,
+                        fieldCountHint + 2 // TODO: Unsure
+                    );
+                }
 
                 // Step 3: metadata preParse
                 for (MetadataFieldMapper metadataMapper : metadataFieldMappers) {
@@ -695,7 +732,7 @@ public final class RowBatchDocumentParser {
             }
         }
 
-        return new BatchResult(results, exceptions);
+        return new BatchResult(results, exceptions, batchDocs);
     }
 
     /**
@@ -938,7 +975,9 @@ public final class RowBatchDocumentParser {
      * @param documents  array of parsed documents; null entries indicate failures
      * @param exceptions array of exceptions; null entries indicate success
      */
-    public record BatchResult(ParsedDocument[] documents, Exception[] exceptions) {
+    public record BatchResult(ParsedDocument[] documents, Exception[] exceptions, @Nullable BatchLuceneDocuments pooledDocuments)
+        implements
+            org.elasticsearch.core.Releasable {
 
         /**
          * Returns the number of documents in the batch.
@@ -968,6 +1007,12 @@ public final class RowBatchDocumentParser {
             return exceptions[index] == null;
         }
 
+        @Override
+        public void close() {
+            if (pooledDocuments != null) {
+                pooledDocuments.close();
+            }
+        }
     }
 
     /**
@@ -980,10 +1025,12 @@ public final class RowBatchDocumentParser {
         private final ContentPath path = new ContentPath();
         private XContentParser parser;
         private final LuceneDocument document;
-        private final List<LuceneDocument> documents = new ArrayList<>();
+        private final List<LuceneDocument> documents = new ArrayList<>(2);
         private final long maxAllowedNumNestedDocs;
         private long numNestedDocs;
         private boolean docsReversed = false;
+        @Nullable
+        private final FieldPool fieldPool;
 
         BatchDocumentParserContext(
             MappingLookup mappingLookup,
@@ -994,6 +1041,30 @@ public final class RowBatchDocumentParser {
             Map<String, ObjectMapper.Builder> dynamicObjectMappers,
             Map<String, List<RuntimeField>> dynamicRuntimeFields,
             int fieldCountHint
+        ) {
+            this(
+                mappingLookup,
+                mappingParserContext,
+                source,
+                copyToFields,
+                dynamicMappers,
+                dynamicObjectMappers,
+                dynamicRuntimeFields,
+                new LuceneDocument(fieldCountHint),
+                null
+            );
+        }
+
+        BatchDocumentParserContext(
+            MappingLookup mappingLookup,
+            MappingParserContext mappingParserContext,
+            SourceToParse source,
+            Set<String> copyToFields,
+            Map<String, List<Mapper.Builder>> dynamicMappers,
+            Map<String, ObjectMapper.Builder> dynamicObjectMappers,
+            Map<String, List<RuntimeField>> dynamicRuntimeFields,
+            LuceneDocument pooledDocument,
+            @Nullable FieldPool fieldPool
         ) {
             super(
                 mappingLookup,
@@ -1010,10 +1081,16 @@ public final class RowBatchDocumentParser {
             // forNullValue() provides a minimal parser that satisfies the non-null requirement
             // for metadata preParse/postParse calls.
             this.parser = RowValueXContentParser.forNullValue();
-            this.document = new LuceneDocument(fieldCountHint);
+            this.document = pooledDocument;
             this.documents.add(document);
             this.maxAllowedNumNestedDocs = mappingParserContext.getIndexSettings().getMappingNestedDocsLimit();
             this.numNestedDocs = 0L;
+            this.fieldPool = fieldPool;
+        }
+
+        @Override
+        public FieldPool fieldPool() {
+            return fieldPool;
         }
 
         @Override

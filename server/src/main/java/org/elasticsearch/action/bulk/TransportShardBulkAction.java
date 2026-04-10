@@ -221,7 +221,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             var index = primary.shardId().getIndex();
             var indexMetadata = clusterState.metadata().lookupProject(index).map(p -> p.index(index)).orElse(null);
             return indexMetadata == null || (indexMetadata.mapping() != null && indexMetadata.getMappingVersion() != initialMappingVersion);
-        }), listener, executor(primary), postWriteRefresh, postWriteAction, documentParsingProvider);
+        }), listener, executor(primary), postWriteRefresh, postWriteAction, documentParsingProvider, pageCacheRecycler);
     }
 
     @Override
@@ -265,7 +265,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             executor,
             null,
             null,
-            DocumentParsingProvider.EMPTY_INSTANCE
+            DocumentParsingProvider.EMPTY_INSTANCE,
+            null
         );
     }
 
@@ -280,7 +281,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         Executor executor,
         @Nullable PostWriteRefresh postWriteRefresh,
         @Nullable Consumer<Runnable> postWriteAction,
-        DocumentParsingProvider documentParsingProvider
+        DocumentParsingProvider documentParsingProvider,
+        @Nullable PageCacheRecycler pageCacheRecycler
     ) {
         new ActionRunnable<>(listener) {
 
@@ -300,7 +302,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 // Try batch path if the coordinating node determined this request is batch-eligible
                 if (request.isRowBatchMode() && batchFallbackToSerial == false) {
                     try {
-                        var batchResult = performRowBatchOnPrimary(request, primary, postWriteRefresh, postWriteAction);
+                        var batchResult = performRowBatchOnPrimary(request, primary, postWriteRefresh, postWriteAction, pageCacheRecycler);
                         if (batchResult != null) {
                             primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBulkTime);
                             listener.onResponse(batchResult);
@@ -422,7 +424,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         BulkShardRequest request,
         IndexShard primary,
         @Nullable PostWriteRefresh postWriteRefresh,
-        @Nullable Consumer<Runnable> postWriteAction
+        @Nullable Consumer<Runnable> postWriteAction,
+        PageCacheRecycler pageCacheRecycler
     ) throws IOException {
         final BulkItemRequest[] items = request.items();
         final ShardId shardId = request.shardId();
@@ -503,113 +506,120 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
 
         // Phase 2: Parse batch using RowBatchDocumentParser
         var batchParser = mapperService.createRowBatchDocumentParser();
-        var parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
+        try (var parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup, pageCacheRecycler)) {
 
-        // Check if any parsed document needs a dynamic mapping update that wasn't predicted
-        // by the upfront requiresDynamicMapping check (mirrors serial path's check in
-        // IndexShard.applyIndexOperation after parsing)
-        for (int i = 0; i < batchDocCount; i++) {
-            if (parseResult.isSuccess(i)) {
-                CompressedXContent docMappingUpdate = parseResult.getDocument(i).dynamicMappingsUpdate();
-                if (docMappingUpdate != null) {
-                    // A parsed document discovered unmapped fields during parsing — need mapping update
-                    throw new BatchDynamicMappingUpdateRequired(docMappingUpdate);
+            // Check if any parsed document needs a dynamic mapping update that wasn't predicted
+            // by the upfront requiresDynamicMapping check (mirrors serial path's check in
+            // IndexShard.applyIndexOperation after parsing)
+            for (int i = 0; i < batchDocCount; i++) {
+                if (parseResult.isSuccess(i)) {
+                    CompressedXContent docMappingUpdate = parseResult.getDocument(i).dynamicMappingsUpdate();
+                    if (docMappingUpdate != null) {
+                        // A parsed document discovered unmapped fields during parsing — need mapping update
+                        throw new BatchDynamicMappingUpdateRequired(docMappingUpdate);
+                    }
                 }
             }
-        }
 
-        // Phase 3: Build Engine.Index operations for successfully parsed documents
-        final java.util.List<Engine.Index> engineOps = new java.util.ArrayList<>(batchDocCount);
-        final long startTimeNanos = primary.getRelativeTimeInNanos();
-        final long operationPrimaryTerm = primary.getOperationPrimaryTerm();
+            // Phase 3: Build Engine.Index operations for successfully parsed documents
+            final java.util.List<Engine.Index> engineOps = new java.util.ArrayList<>(batchDocCount);
+            final long startTimeNanos = primary.getRelativeTimeInNanos();
+            final long operationPrimaryTerm = primary.getOperationPrimaryTerm();
 
-        for (int i = 0; i < batchDocCount; i++) {
-            if (parseResult.isSuccess(i) == false) {
-                continue;
+            for (int i = 0; i < batchDocCount; i++) {
+                if (parseResult.isSuccess(i) == false) {
+                    continue;
+                }
+
+                var parsedDoc = parseResult.getDocument(i);
+                IndexRequest indexRequest = indexRequests.get(i);
+
+                Engine.Index engineIndex = new Engine.Index(
+                    org.elasticsearch.index.mapper.Uid.encodeId(parsedDoc.id()),
+                    parsedDoc,
+                    SequenceNumbers.UNASSIGNED_SEQ_NO,
+                    operationPrimaryTerm,
+                    indexRequest.version(),
+                    indexRequest.versionType(),
+                    Engine.Operation.Origin.PRIMARY,
+                    startTimeNanos,
+                    indexRequest.getAutoGeneratedTimestamp(),
+                    indexRequest.isRetry(),
+                    SequenceNumbers.UNASSIGNED_SEQ_NO,
+                    0
+                );
+
+                engineOps.add(engineIndex);
             }
 
-            var parsedDoc = parseResult.getDocument(i);
-            IndexRequest indexRequest = indexRequests.get(i);
+            // Phase 4: Execute on engine
+            final java.util.List<Engine.IndexResult> engineResults = primary.indexBatch(engineOps, rowBatch.getDataReference());
 
-            Engine.Index engineIndex = new Engine.Index(
-                org.elasticsearch.index.mapper.Uid.encodeId(parsedDoc.id()),
-                parsedDoc,
-                SequenceNumbers.UNASSIGNED_SEQ_NO,
-                operationPrimaryTerm,
-                indexRequest.version(),
-                indexRequest.versionType(),
-                Engine.Operation.Origin.PRIMARY,
-                startTimeNanos,
-                indexRequest.getAutoGeneratedTimestamp(),
-                indexRequest.isRetry(),
-                SequenceNumbers.UNASSIGNED_SEQ_NO,
-                0
-            );
+            // Phase 5: Build BulkItemResponse for each item
+            final BulkItemResponse[] responses = new BulkItemResponse[items.length];
+            Translog.Location locationToSync = null;
 
-            engineOps.add(engineIndex);
-        }
+            // Handle parse failures first
+            for (int i = 0; i < batchDocCount; i++) {
+                if (parseResult.isSuccess(i) == false) {
+                    BulkItemRequest item = items[i];
+                    Exception parseException = parseResult.getException(i);
+                    responses[i] = BulkItemResponse.failure(
+                        item.id(),
+                        item.request().opType(),
+                        new BulkItemResponse.Failure(request.index(), item.request().id(), parseException)
+                    );
+                    item.setPrimaryResponse(responses[i]);
+                }
+            }
 
-        // Phase 4: Execute on engine
-        final java.util.List<Engine.IndexResult> engineResults = primary.indexBatch(engineOps, rowBatch.getDataReference());
+            // Handle engine results for successfully parsed documents
+            int engineResultIdx = 0;
+            for (int i = 0; i < batchDocCount; i++) {
+                if (parseResult.isSuccess(i) == false) {
+                    continue;
+                }
 
-        // Phase 5: Build BulkItemResponse for each item
-        final BulkItemResponse[] responses = new BulkItemResponse[items.length];
-        Translog.Location locationToSync = null;
-
-        // Handle parse failures first
-        for (int i = 0; i < batchDocCount; i++) {
-            if (parseResult.isSuccess(i) == false) {
                 BulkItemRequest item = items[i];
-                Exception parseException = parseResult.getException(i);
-                responses[i] = BulkItemResponse.failure(
-                    item.id(),
-                    item.request().opType(),
-                    new BulkItemResponse.Failure(request.index(), item.request().id(), parseException)
-                );
+                Engine.IndexResult result = engineResults.get(engineResultIdx);
+                engineResultIdx++;
+
+                if (result.getResultType() == Engine.Result.Type.SUCCESS) {
+                    IndexRequest indexRequest = indexRequests.get(i);
+                    IndexResponse indexResponse = new IndexResponse(
+                        shardId,
+                        result.getId(),
+                        result.getSeqNo(),
+                        result.getTerm(),
+                        result.getVersion(),
+                        result.isCreated(),
+                        indexRequest.getExecutedPipelines()
+                    );
+                    indexResponse.setShardInfo(org.elasticsearch.action.support.replication.ReplicationResponse.ShardInfo.EMPTY);
+                    responses[i] = BulkItemResponse.success(item.id(), item.request().opType(), indexResponse);
+                    if (result.getTranslogLocation() != null) {
+                        locationToSync = result.getTranslogLocation();
+                    }
+                } else {
+                    responses[i] = BulkItemResponse.failure(
+                        item.id(),
+                        item.request().opType(),
+                        new BulkItemResponse.Failure(
+                            request.index(),
+                            result.getId(),
+                            result.getFailure(),
+                            result.getSeqNo(),
+                            result.getTerm()
+                        )
+                    );
+                }
                 item.setPrimaryResponse(responses[i]);
             }
+
+            BulkShardResponse shardResponse = new BulkShardResponse(shardId, responses);
+
+            return new WritePrimaryResult<>(request, shardResponse, locationToSync, primary, logger, postWriteRefresh, postWriteAction);
         }
-
-        // Handle engine results for successfully parsed documents
-        int engineResultIdx = 0;
-        for (int i = 0; i < batchDocCount; i++) {
-            if (parseResult.isSuccess(i) == false) {
-                continue;
-            }
-
-            BulkItemRequest item = items[i];
-            Engine.IndexResult result = engineResults.get(engineResultIdx);
-            engineResultIdx++;
-
-            if (result.getResultType() == Engine.Result.Type.SUCCESS) {
-                IndexRequest indexRequest = indexRequests.get(i);
-                IndexResponse indexResponse = new IndexResponse(
-                    shardId,
-                    result.getId(),
-                    result.getSeqNo(),
-                    result.getTerm(),
-                    result.getVersion(),
-                    result.isCreated(),
-                    indexRequest.getExecutedPipelines()
-                );
-                indexResponse.setShardInfo(org.elasticsearch.action.support.replication.ReplicationResponse.ShardInfo.EMPTY);
-                responses[i] = BulkItemResponse.success(item.id(), item.request().opType(), indexResponse);
-                if (result.getTranslogLocation() != null) {
-                    locationToSync = result.getTranslogLocation();
-                }
-            } else {
-                responses[i] = BulkItemResponse.failure(
-                    item.id(),
-                    item.request().opType(),
-                    new BulkItemResponse.Failure(request.index(), result.getId(), result.getFailure(), result.getSeqNo(), result.getTerm())
-                );
-            }
-            item.setPrimaryResponse(responses[i]);
-        }
-
-        BulkShardResponse shardResponse = new BulkShardResponse(shardId, responses);
-
-        return new WritePrimaryResult<>(request, shardResponse, locationToSync, primary, logger, postWriteRefresh, postWriteAction);
     }
 
     /**
@@ -1026,7 +1036,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         );
         ActionListener.completeWith(listener, () -> {
             final long startBulkTime = System.nanoTime();
-            final Translog.Location location = performOnReplica(request, replica);
+            final Translog.Location location = performOnReplica(request, replica, pageCacheRecycler);
             replica.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBulkTime);
             return new WriteReplicaResult<>(request, location, null, replica, logger, postWriteAction);
         });
@@ -1047,8 +1057,13 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     }
 
     public static Translog.Location performOnReplica(BulkShardRequest request, IndexShard replica) throws Exception {
+        return performOnReplica(request, replica, null);
+    }
+
+    public static Translog.Location performOnReplica(BulkShardRequest request, IndexShard replica, PageCacheRecycler pageCacheRecycler)
+        throws Exception {
         if (request.isRowBatchMode()) {
-            return performRowBatchOnReplica(request, replica);
+            return performRowBatchOnReplica(request, replica, pageCacheRecycler);
         }
 
         Translog.Location location = null;
@@ -1086,7 +1101,11 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         return location;
     }
 
-    private static Translog.Location performRowBatchOnReplica(BulkShardRequest request, IndexShard replica) throws Exception {
+    private static Translog.Location performRowBatchOnReplica(
+        BulkShardRequest request,
+        IndexShard replica,
+        PageCacheRecycler pageCacheRecycler
+    ) throws Exception {
         final RowDocumentBatch rowBatch = request.getRowDocumentBatch();
         final MapperService mapperService = replica.mapperService();
         final MappingLookup mappingLookup = mapperService.mappingLookup();
@@ -1100,71 +1119,72 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
 
         // Parse batch using RowBatchDocumentParser
         var batchParser = mapperService.createRowBatchDocumentParser();
-        var parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
+        try (var parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup, pageCacheRecycler)) {
 
-        // Build Engine.Index operations for successfully parsed & non-failed docs
-        final java.util.List<Engine.Index> engineOps = new java.util.ArrayList<>();
-        final long startTimeNanos = replica.getRelativeTimeInNanos();
+            // Build Engine.Index operations for successfully parsed & non-failed docs
+            final java.util.List<Engine.Index> engineOps = new java.util.ArrayList<>();
+            final long startTimeNanos = replica.getRelativeTimeInNanos();
 
-        for (int i = 0; i < items.length; i++) {
-            BulkItemRequest item = items[i];
-            BulkItemResponse response = item.getPrimaryResponse();
+            for (int i = 0; i < items.length; i++) {
+                BulkItemRequest item = items[i];
+                BulkItemResponse response = item.getPrimaryResponse();
 
-            if (response.isFailed()) {
-                if (response.getFailure().getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
-                    replica.markSeqNoAsNoop(
-                        response.getFailure().getSeqNo(),
-                        response.getFailure().getTerm() == SequenceNumbers.UNASSIGNED_PRIMARY_TERM
-                            ? replica.getOperationPrimaryTerm()
-                            : response.getFailure().getTerm(),
-                        response.getFailure().getMessage()
-                    );
+                if (response.isFailed()) {
+                    if (response.getFailure().getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
+                        replica.markSeqNoAsNoop(
+                            response.getFailure().getSeqNo(),
+                            response.getFailure().getTerm() == SequenceNumbers.UNASSIGNED_PRIMARY_TERM
+                                ? replica.getOperationPrimaryTerm()
+                                : response.getFailure().getTerm(),
+                            response.getFailure().getMessage()
+                        );
+                    }
+                    continue;
                 }
-                continue;
+
+                if (response.getResponse().getResult() == DocWriteResponse.Result.NOOP) {
+                    continue;
+                }
+
+                if (parseResult.isSuccess(i) == false) {
+                    continue;
+                }
+
+                var parsedDoc = parseResult.getDocument(i);
+                IndexRequest indexRequest = (IndexRequest) item.request();
+
+                Engine.Index engineIndex = new Engine.Index(
+                    org.elasticsearch.index.mapper.Uid.encodeId(parsedDoc.id()),
+                    parsedDoc,
+                    response.getResponse().getSeqNo(),
+                    response.getResponse().getPrimaryTerm(),
+                    response.getResponse().getVersion(),
+                    null,
+                    Engine.Operation.Origin.REPLICA,
+                    startTimeNanos,
+                    indexRequest.getAutoGeneratedTimestamp(),
+                    indexRequest.isRetry(),
+                    SequenceNumbers.UNASSIGNED_SEQ_NO,
+                    0
+                );
+
+                engineOps.add(engineIndex);
             }
 
-            if (response.getResponse().getResult() == DocWriteResponse.Result.NOOP) {
-                continue;
+            if (engineOps.isEmpty()) {
+                return null;
             }
 
-            if (parseResult.isSuccess(i) == false) {
-                continue;
+            java.util.List<Engine.IndexResult> replicaResults = replica.indexBatch(engineOps, rowBatch.getDataReference());
+
+            Translog.Location replicaLocation = null;
+            for (Engine.IndexResult result : replicaResults) {
+                if (result.getTranslogLocation() != null) {
+                    replicaLocation = result.getTranslogLocation();
+                }
             }
-
-            var parsedDoc = parseResult.getDocument(i);
-            IndexRequest indexRequest = (IndexRequest) item.request();
-
-            Engine.Index engineIndex = new Engine.Index(
-                org.elasticsearch.index.mapper.Uid.encodeId(parsedDoc.id()),
-                parsedDoc,
-                response.getResponse().getSeqNo(),
-                response.getResponse().getPrimaryTerm(),
-                response.getResponse().getVersion(),
-                null,
-                Engine.Operation.Origin.REPLICA,
-                startTimeNanos,
-                indexRequest.getAutoGeneratedTimestamp(),
-                indexRequest.isRetry(),
-                SequenceNumbers.UNASSIGNED_SEQ_NO,
-                0
-            );
-
-            engineOps.add(engineIndex);
+            return replicaLocation;
         }
-
-        if (engineOps.isEmpty()) {
-            return null;
-        }
-
-        java.util.List<Engine.IndexResult> replicaResults = replica.indexBatch(engineOps, rowBatch.getDataReference());
-
-        Translog.Location replicaLocation = null;
-        for (Engine.IndexResult result : replicaResults) {
-            if (result.getTranslogLocation() != null) {
-                replicaLocation = result.getTranslogLocation();
-            }
-        }
-        return replicaLocation;
     }
 
     private static Engine.Result performOpOnReplica(

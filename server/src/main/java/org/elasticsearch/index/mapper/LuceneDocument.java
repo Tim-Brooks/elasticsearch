@@ -36,6 +36,17 @@ public class LuceneDocument implements Iterable<IndexableField> {
         this.parent = parent;
     }
 
+    /**
+     * Package-private constructor that accepts an externally-provided field list.
+     * Used by {@link BatchLuceneDocuments} to supply pooled array-backed storage.
+     */
+    LuceneDocument(List<IndexableField> fields, String path, LuceneDocument parent) {
+        this.fields = fields;
+        this.path = path;
+        this.prefix = path.isEmpty() ? "" : path + ".";
+        this.parent = parent;
+    }
+
     public LuceneDocument() {
         this("", null);
     }

@@ -130,6 +130,11 @@ public abstract class DocumentParserContext {
         public BytesRef getTsid() {
             return in.getTsid();
         }
+
+        @Override
+        public FieldPool fieldPool() {
+            return in.fieldPool();
+        }
     }
 
     /**
@@ -1031,6 +1036,15 @@ public abstract class DocumentParserContext {
 
     @Nullable
     public abstract BytesRef getTsid();
+
+    /**
+     * Returns the field pool for reusing Lucene field instances across documents in a batch,
+     * or {@code null} if not in a batch parsing context.
+     */
+    @Nullable
+    public FieldPool fieldPool() {
+        return null;
+    }
 
     /**
      * Find a dynamic mapping template for the given field and its matching type

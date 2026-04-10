@@ -1465,8 +1465,12 @@ public final class KeywordFieldMapper extends FieldMapper {
         // and this fieldType has docValuesType=NONE. Then, when there is no index defined and the field is not stored, this field
         // is a no-op and we can skip adding it to the document.
         if (fieldType.indexOptions() != IndexOptions.NONE || fieldType.docValuesType() != DocValuesType.NONE || fieldType.stored()) {
-            Field field = buildKeywordField(binaryValue);
-            context.doc().add(field);
+            final FieldPool fieldPool = context.fieldPool();
+            if (fieldPool != null) {
+                context.doc().add(fieldPool.nextKeyword(fieldType().name(), binaryValue, fieldType));
+            } else {
+                context.doc().add(buildKeywordField(binaryValue));
+            }
         }
 
         if (fieldType().hasDocValues() == false && fieldType.omitNorms()) {

@@ -1232,7 +1232,10 @@ public final class DateFieldMapper extends FieldMapper {
             DataStreamTimestampFieldMapper.storeTimestampValueForReuse(context.doc(), timestamp);
         }
 
-        if (fieldType().hasDocValuesSkipper()) {
+        final FieldPool fieldPool = context.fieldPool();
+        if (fieldPool != null && docValuesParameters.enabled() && indexed == false) {
+            context.doc().add(fieldPool.nextSortedNumeric(fieldType().name(), timestamp));
+        } else if (fieldType().hasDocValuesSkipper()) {
             context.doc().add(SortedNumericDocValuesField.indexedField(fieldType().name(), timestamp));
         } else if (indexed && docValuesParameters.enabled()) {
             context.doc().add(new LongField(fieldType().name(), timestamp, Field.Store.NO));

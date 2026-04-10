@@ -83,7 +83,8 @@ public class VersionFieldMapper extends MetadataFieldMapper {
 
     @Override
     public void preParse(DocumentParserContext context) {
-        final Field version = versionField();
+        final FieldPool fieldPool = context.fieldPool();
+        final Field version = fieldPool != null ? fieldPool.nextNumeric(NAME, -1L) : versionField();
         context.version(version);
         context.doc().add(version);
     }

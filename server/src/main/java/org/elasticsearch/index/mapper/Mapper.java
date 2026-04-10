@@ -310,6 +310,17 @@ public abstract class Mapper implements ToXContentFragment, Iterable<Mapper> {
     public abstract int getTotalFieldsCount();
 
     /**
+     * Whether this mapper supports the batch-optimized document pooling path.
+     * When all column mappers in a batch return {@code true}, the batch parser
+     * uses pooled {@link LuceneDocument} instances backed by shared object arrays
+     * from the {@link org.elasticsearch.common.util.PageCacheRecycler} instead of
+     * individual ArrayLists.
+     */
+    public boolean batchOptimized() {
+        return false;
+    }
+
+    /**
      * @return whether this mapper supports storing leaf array elements natively when synthetic source is enabled.
      */
     public final boolean supportStoringArrayOffsets() {
