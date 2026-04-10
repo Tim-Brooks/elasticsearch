@@ -26,7 +26,7 @@ public class LuceneDocument implements Iterable<IndexableField> {
     private final LuceneDocument parent;
     private final String path;
     private final String prefix;
-    private final List<IndexableField> fields;
+    private List<IndexableField> fields;
     private Map<Object, IndexableField> keyedFields;
 
     LuceneDocument(String path, LuceneDocument parent) {
@@ -86,6 +86,10 @@ public class LuceneDocument implements Iterable<IndexableField> {
 
     public List<IndexableField> getFields() {
         return fields;
+    }
+
+    void setFields(List<IndexableField> fields) {
+        this.fields = fields;
     }
 
     public void addAll(List<? extends IndexableField> fields) {

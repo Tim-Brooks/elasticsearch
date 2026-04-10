@@ -12,24 +12,20 @@ package org.elasticsearch.index.mapper;
 import org.apache.lucene.index.IndexableField;
 
 import java.util.AbstractList;
-import java.util.Iterator;
-import java.util.NoSuchElementException;
+import java.util.Arrays;
 
 /**
  * A {@link java.util.List} implementation backed by shared pooled object arrays from
  * {@link BatchLuceneDocuments}. Fields are appended via {@link #add(IndexableField)} during
- * document parsing. After all fields are added, {@link #freeze()} resolves the backing page
- * array and offset for direct slice iteration with no per-element arithmetic.
+ * document parsing. After all fields are added, {@link #freeze(LuceneDocument)} copies the
+ * field references into an {@code IndexableField[]} and swaps the document's field list to
+ * a standard {@link Arrays#asList} wrapper whose iterator the JIT can fully devirtualize.
  */
 final class PooledFieldList extends AbstractList<IndexableField> {
 
     private final BatchLuceneDocuments pool;
     private final int startOffset;
     private int size;
-
-    // Resolved by freeze() — direct reference to the page array and the offset within it
-    private Object[] array;
-    private int arrayOffset;
 
     PooledFieldList(BatchLuceneDocuments pool, int startOffset) {
         this.pool = pool;
@@ -45,41 +41,34 @@ final class PooledFieldList extends AbstractList<IndexableField> {
     }
 
     /**
-     * Resolves the backing page array for direct slice access. For the common case where all
-     * fields fit in a single page, this just captures the page reference and offset — zero copy.
-     * For the rare cross-page case, fields are copied into a dedicated array.
+     * Copies the field references into a contiguous {@code IndexableField[]} and replaces the
+     * document's field list with a standard {@link Arrays#asList} wrapper. This ensures Lucene
+     * iterates fields via a well-known JDK iterator type, avoiding megamorphic dispatch at the
+     * iteration call site.
      */
-    void freeze() {
-        if (size == 0) {
-            array = new Object[0];
-            arrayOffset = 0;
-            return;
-        }
+    void freeze(LuceneDocument doc) {
+        IndexableField[] frozen = new IndexableField[size];
         int pageSize = pool.pageSize();
         int startPage = startOffset / pageSize;
-        int endPage = (startOffset + size - 1) / pageSize;
+        int endPage = size == 0 ? startPage : (startOffset + size - 1) / pageSize;
         if (startPage == endPage) {
-            array = pool.getPage(startPage);
-            arrayOffset = startOffset % pageSize;
+            // Common case: single page — bulk copy from the page array
+            System.arraycopy(pool.getPage(startPage), startOffset % pageSize, frozen, 0, size);
         } else {
-            Object[] copy = new Object[size];
+            // Rare case: fields span pages
             int globalIndex = startOffset;
             for (int i = 0; i < size; i++) {
-                copy[i] = pool.getPage(globalIndex / pageSize)[globalIndex % pageSize];
+                frozen[i] = (IndexableField) pool.getPage(globalIndex / pageSize)[globalIndex % pageSize];
                 globalIndex++;
             }
-            array = copy;
-            arrayOffset = 0;
         }
+        doc.setFields(Arrays.asList(frozen));
     }
 
     @Override
     public IndexableField get(int index) {
         if (index < 0 || index >= size) {
             throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
-        }
-        if (array != null) {
-            return (IndexableField) array[arrayOffset + index];
         }
         int globalIndex = startOffset + index;
         int pageSize = pool.pageSize();
@@ -89,42 +78,5 @@ final class PooledFieldList extends AbstractList<IndexableField> {
     @Override
     public int size() {
         return size;
-    }
-
-    @Override
-    public Iterator<IndexableField> iterator() {
-        if (array != null) {
-            return new ArraySliceIterator(array, arrayOffset, size);
-        }
-        return super.iterator();
-    }
-
-    /**
-     * Named iterator class for iterating a slice of an Object[] as IndexableField.
-     * Named (not anonymous) so the JIT can build a stable type profile and inline fully.
-     */
-    static final class ArraySliceIterator implements Iterator<IndexableField> {
-        private final Object[] array;
-        private final int end;
-        private int cursor;
-
-        ArraySliceIterator(Object[] array, int offset, int size) {
-            this.array = array;
-            this.cursor = offset;
-            this.end = offset + size;
-        }
-
-        @Override
-        public boolean hasNext() {
-            return cursor < end;
-        }
-
-        @Override
-        public IndexableField next() {
-            if (cursor >= end) {
-                throw new NoSuchElementException();
-            }
-            return (IndexableField) array[cursor++];
-        }
     }
 }

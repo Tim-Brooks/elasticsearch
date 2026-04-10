@@ -701,10 +701,12 @@ public final class RowBatchDocumentParser {
                     metadataMapper.postParse(contexts[i]);
                 }
 
-                // Step 6: Freeze pooled field lists for direct array-slice iteration.
+                // Step 6: Freeze pooled field lists — copies field references into an IndexableField[]
+                // and swaps the document's field list to Arrays.asList() for JIT-friendly iteration.
                 if (batchDocs != null) {
-                    if (contexts[i].document.getFields() instanceof PooledFieldList pooledFields) {
-                        pooledFields.freeze();
+                    LuceneDocument doc = contexts[i].document;
+                    if (doc.getFields() instanceof PooledFieldList pooledFields) {
+                        pooledFields.freeze(doc);
                     }
                 }
 
