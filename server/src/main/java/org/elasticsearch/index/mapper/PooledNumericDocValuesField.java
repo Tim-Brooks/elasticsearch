@@ -23,8 +23,10 @@ import org.apache.lucene.index.DocValuesType;
  * to be reused across documents and batches. Lucene's {@code IndexingChain} exclusively uses
  * {@code field.name()} to access the field name, making this safe.
  * <p>
- * The field also holds a reusable {@link MutableLong} returned from {@link #numericValue()}
+ * The field holds a reusable {@link MutableLong} returned from {@link #numericValue()}
  * to avoid allocating a boxed {@link Long} on every call during doc values indexing.
+ * {@link #setLongValue(long)} is overridden to update the same mutable instance, so that
+ * engine code (which stamps version/seqNo after parsing) works correctly.
  */
 final class PooledNumericDocValuesField extends Field {
 
@@ -42,6 +44,8 @@ final class PooledNumericDocValuesField extends Field {
 
     PooledNumericDocValuesField() {
         super("_pooled", FIELD_TYPE);
+        // fieldsData must be a Long so that setLongValue() passes Lucene's instanceof check.
+        this.fieldsData = 0L;
         this.pooledName = "_pooled";
     }
 
@@ -53,6 +57,11 @@ final class PooledNumericDocValuesField extends Field {
     @Override
     public Number numericValue() {
         return mutableValue;
+    }
+
+    @Override
+    public void setLongValue(long value) {
+        mutableValue.value = value;
     }
 
     /**

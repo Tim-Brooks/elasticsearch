@@ -9,6 +9,7 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.apache.logging.log4j.Level;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
@@ -20,6 +21,7 @@ import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.sort.SortOrder;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.elasticsearch.test.MockLog;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.json.JsonXContent;
@@ -1674,9 +1676,20 @@ public class BatchBulkIT extends ESIntegTestCase {
             bulkRequest.add(new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE).source(doc));
         }
 
-        BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
-        assertNoFailures(bulkResponse);
-        assertThat(bulkResponse.getItems().length, equalTo(numDocs));
+        // Assert the batch path does not fall back to serial due to errors
+        MockLog.assertThatLogger(() -> {
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+            assertNoFailures(bulkResponse);
+            assertThat(bulkResponse.getItems().length, equalTo(numDocs));
+        },
+            TransportShardBulkAction.class,
+            new MockLog.UnseenEventExpectation(
+                "no batch fallback",
+                TransportShardBulkAction.class.getCanonicalName(),
+                Level.ERROR,
+                "Row batch execution failed*"
+            )
+        );
 
         refresh(index);
 
