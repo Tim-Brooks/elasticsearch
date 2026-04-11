@@ -27,23 +27,23 @@ final class FieldPool {
     static final int NUMERIC_POOL_SIZE = 5_000;
     static final int KEYWORD_POOL_SIZE = 50_000;
 
-    private final PooledSortedNumericDocValuesField[] sortedNumericPool;
+    private final PooledDocValuesField[] sortedNumericPool;
     private int sortedNumericCursor;
 
-    private final PooledNumericDocValuesField[] numericPool;
+    private final PooledDocValuesField[] numericPool;
     private int numericCursor;
 
     private final PooledKeywordField[] keywordPool;
     private int keywordCursor;
 
     FieldPool() {
-        sortedNumericPool = new PooledSortedNumericDocValuesField[SORTED_NUMERIC_POOL_SIZE];
+        sortedNumericPool = new PooledDocValuesField[SORTED_NUMERIC_POOL_SIZE];
         for (int i = 0; i < SORTED_NUMERIC_POOL_SIZE; i++) {
-            sortedNumericPool[i] = new PooledSortedNumericDocValuesField();
+            sortedNumericPool[i] = PooledDocValuesField.sortedNumeric();
         }
-        numericPool = new PooledNumericDocValuesField[NUMERIC_POOL_SIZE];
+        numericPool = new PooledDocValuesField[NUMERIC_POOL_SIZE];
         for (int i = 0; i < NUMERIC_POOL_SIZE; i++) {
-            numericPool[i] = new PooledNumericDocValuesField();
+            numericPool[i] = PooledDocValuesField.numeric();
         }
         keywordPool = new PooledKeywordField[KEYWORD_POOL_SIZE];
         for (int i = 0; i < KEYWORD_POOL_SIZE; i++) {
@@ -57,7 +57,7 @@ final class FieldPool {
      */
     Field nextSortedNumeric(String name, long value) {
         if (sortedNumericCursor < sortedNumericPool.length) {
-            PooledSortedNumericDocValuesField field = sortedNumericPool[sortedNumericCursor++];
+            PooledDocValuesField field = sortedNumericPool[sortedNumericCursor++];
             field.reset(name, value);
             return field;
         }
@@ -70,7 +70,7 @@ final class FieldPool {
      */
     Field nextNumeric(String name, long value) {
         if (numericCursor < numericPool.length) {
-            PooledNumericDocValuesField field = numericPool[numericCursor++];
+            PooledDocValuesField field = numericPool[numericCursor++];
             field.reset(name, value);
             return field;
         }
