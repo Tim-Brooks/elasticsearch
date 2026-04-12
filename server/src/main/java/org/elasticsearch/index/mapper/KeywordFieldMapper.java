@@ -16,6 +16,7 @@ import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.InvertableType;
+import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.index.DocValuesSkipIndexType;
@@ -1285,6 +1286,9 @@ public final class KeywordFieldMapper extends FieldMapper {
 
     private final IndexVersion indexCreatedVersion;
 
+    private final MultiValuedBinaryDocValuesField.SeparateCount emptySeparateCount;
+    private final NumericDocValuesField emptyCountField;
+
     private KeywordFieldMapper(
         String simpleName,
         FieldType fieldType,
@@ -1311,6 +1315,18 @@ public final class KeywordFieldMapper extends FieldMapper {
         this.offsetsFieldName = offsetsFieldName;
         this.indexCreatedVersion = builder.indexCreatedVersion;
         sourceKeepMode = builder.sourceKeepMode.orElse(indexSettings.sourceKeepMode());
+        if (mappedFieldType.usesBinaryDocValues()) {
+            var empty = new MultiValuedBinaryDocValuesField.SeparateCount(mappedFieldType.name(), false);
+            empty.add(new BytesRef());
+            this.emptySeparateCount = empty;
+            this.emptyCountField = NumericDocValuesField.indexedField(
+                mappedFieldType.name() + MultiValuedBinaryDocValuesField.SeparateCount.COUNT_FIELD_SUFFIX,
+                1
+            );
+        } else {
+            this.emptySeparateCount = null;
+            this.emptyCountField = null;
+        }
     }
 
     @Override
@@ -1453,12 +1469,17 @@ public final class KeywordFieldMapper extends FieldMapper {
     private void indexBinaryValue(DocumentParserContext context, BytesRef binaryValue) {
         if (fieldType().usesBinaryDocValues()) {
             assert fieldType.docValuesType() == DocValuesType.NONE;
-            MultiValuedBinaryDocValuesField.SeparateCount.addToSeparateCountMultiBinaryFieldInDoc(
-                context,
-                fieldType().name(),
-                binaryValue,
-                false
-            );
+            if (binaryValue.length == 0 && context.isImmediateParentAnArray() == false) {
+                context.doc().add(emptySeparateCount);
+                context.doc().add(emptyCountField);
+            } else {
+                MultiValuedBinaryDocValuesField.SeparateCount.addToSeparateCountMultiBinaryFieldInDoc(
+                    context,
+                    fieldType().name(),
+                    binaryValue,
+                    false
+                );
+            }
         }
 
         // If we're using binary doc values, then the values are stored in a separate MultiValuedBinaryDocValuesField (see above)

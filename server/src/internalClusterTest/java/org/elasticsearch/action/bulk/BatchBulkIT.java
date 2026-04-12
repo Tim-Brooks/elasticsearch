@@ -9,6 +9,7 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.apache.logging.log4j.Level;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
@@ -20,6 +21,7 @@ import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.sort.SortOrder;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.elasticsearch.test.MockLog;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.json.JsonXContent;
@@ -1378,6 +1380,347 @@ public class BatchBulkIT extends ESIntegTestCase {
                     Map<String, Object> source = hits[firstBulkDocs + i].getSourceAsMap();
                     assertThat("name mismatch at doc " + i, source.get("name"), equalTo("second-" + i));
                     assertThat("value mismatch at doc " + i, source.get("value"), equalTo(firstBulkDocs + i));
+                }
+            }
+        );
+    }
+
+    /**
+     * Tests batch indexing with the full "hits" benchmark mapping: all fields {@code index: false},
+     * doc values skipper enabled, synthetic source, doc-values-only seq_no.
+     */
+    public void testHitsBenchmarkMapping() throws IOException {
+        String index = "hits-batch-test";
+
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            {
+                mapping.startObject("_source").field("mode", "synthetic").endObject();
+                mapping.field("dynamic", "strict");
+                mapping.startObject("properties");
+                {
+                    // Short fields
+                    for (String name : new String[] {
+                        "AdvEngineID",
+                        "Age",
+                        "ClientTimeZone",
+                        "CookieEnable",
+                        "CounterClass",
+                        "DontCountHits",
+                        "FlashMajor",
+                        "FlashMinor",
+                        "FlashMinor2",
+                        "GoodEvent",
+                        "HTTPError",
+                        "HasGCLID",
+                        "HistoryLength",
+                        "Income",
+                        "Interests",
+                        "IsArtifical",
+                        "IsDownload",
+                        "IsEvent",
+                        "IsLink",
+                        "IsMobile",
+                        "IsNotBounce",
+                        "IsOldCounter",
+                        "IsParameter",
+                        "IsRefresh",
+                        "JavaEnable",
+                        "JavascriptEnable",
+                        "MobilePhone",
+                        "NetMajor",
+                        "NetMinor",
+                        "OS",
+                        "ParamCurrencyID",
+                        "RefererCategoryID",
+                        "ResolutionDepth",
+                        "ResolutionHeight",
+                        "ResolutionWidth",
+                        "Robotness",
+                        "SearchEngineID",
+                        "Sex",
+                        "SilverlightVersion1",
+                        "SilverlightVersion2",
+                        "SilverlightVersion4",
+                        "SocialSourceNetworkID",
+                        "TraficSourceID",
+                        "URLCategoryID",
+                        "UserAgent",
+                        "UserAgentMajor",
+                        "WindowClientHeight",
+                        "WindowClientWidth",
+                        "WithHash" }) {
+                        mapping.startObject(name).field("type", "short").field("index", false).endObject();
+                    }
+                    // Integer fields
+                    for (String name : new String[] {
+                        "CLID",
+                        "ClientIP",
+                        "CodeVersion",
+                        "ConnectTiming",
+                        "CounterID",
+                        "DNSTiming",
+                        "FetchTiming",
+                        "HID",
+                        "IPNetworkID",
+                        "OpenerName",
+                        "RefererRegionID",
+                        "RegionID",
+                        "RemoteIP",
+                        "ResponseEndTiming",
+                        "ResponseStartTiming",
+                        "SendTiming",
+                        "SilverlightVersion3",
+                        "URLRegionID",
+                        "WindowName" }) {
+                        mapping.startObject(name).field("type", "integer").field("index", false).endObject();
+                    }
+                    // Long fields
+                    for (String name : new String[] { "FUniqID", "ParamPrice", "RefererHash", "URLHash", "UserID", "WatchID" }) {
+                        mapping.startObject(name).field("type", "long").field("index", false).endObject();
+                    }
+                    // Date fields
+                    mapping.startObject("ClientEventTime")
+                        .field("type", "date")
+                        .field("format", "yyyy-MM-dd HH:mm:ss")
+                        .field("index", false)
+                        .endObject();
+                    mapping.startObject("EventDate").field("type", "date").field("format", "yyyy-MM-dd").field("index", false).endObject();
+                    mapping.startObject("EventTime")
+                        .field("type", "date")
+                        .field("format", "yyyy-MM-dd HH:mm:ss")
+                        .field("index", false)
+                        .endObject();
+                    mapping.startObject("LocalEventTime")
+                        .field("type", "date")
+                        .field("format", "yyyy-MM-dd HH:mm:ss")
+                        .field("index", false)
+                        .endObject();
+                    // Keyword fields
+                    for (String name : new String[] {
+                        "BrowserCountry",
+                        "BrowserLanguage",
+                        "FromTag",
+                        "HitColor",
+                        "MobilePhoneModel",
+                        "OpenstatAdID",
+                        "OpenstatCampaignID",
+                        "OpenstatServiceName",
+                        "OpenstatSourceID",
+                        "PageCharset",
+                        "ParamCurrency",
+                        "ParamOrderID",
+                        "Params",
+                        "SocialAction",
+                        "SocialNetwork",
+                        "SocialSourcePage",
+                        "UTMCampaign",
+                        "UTMContent",
+                        "UTMMedium",
+                        "UTMSource",
+                        "UTMTerm",
+                        "UserAgentMinor" }) {
+                        mapping.startObject(name).field("type", "keyword").field("index", false).endObject();
+                    }
+                    // High-cardinality keyword fields
+                    for (String name : new String[] { "OriginalURL", "Referer", "SearchPhrase", "Title", "URL" }) {
+                        mapping.startObject(name).field("type", "keyword").field("index", false);
+                        mapping.startObject("doc_values").field("cardinality", "high").endObject();
+                        mapping.endObject();
+                    }
+                }
+                mapping.endObject(); // properties
+            }
+            mapping.endObject(); // _doc
+        }
+        mapping.endObject();
+
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put("index.mapping.source.mode", "synthetic")
+                        .put("index.mapping.use_doc_values_skipper", true)
+                        .put("index.seq_no.index_options", "doc_values_only")
+                        .put("index.sort.field", "CounterID,EventDate,UserID,EventTime,WatchID")
+                        .put("index.sort.order", "desc,desc,desc,desc,desc")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+        String coordinatingNode = findCoordinatingNode();
+
+        int numDocs = randomIntBetween(50, 200);
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int i = 0; i < numDocs; i++) {
+            XContentBuilder doc = JsonXContent.contentBuilder();
+            doc.startObject();
+            {
+                doc.field("WatchID", 8940174697547602584L + i);
+                doc.field("JavaEnable", (short) 1);
+                doc.field("Title", "Page Title " + i);
+                doc.field("GoodEvent", (short) 1);
+                doc.field("EventTime", "2013-07-15 03:39:17");
+                doc.field("EventDate", "2013-07-15");
+                doc.field("CounterID", 62290040 + i);
+                doc.field("ClientIP", 1701406667);
+                doc.field("RegionID", 229);
+                doc.field("UserID", 1502176461422705501L + i);
+                doc.field("CounterClass", (short) 0);
+                doc.field("OS", (short) 3);
+                doc.field("UserAgent", (short) 1);
+                doc.field("URL", "http://example.com/page?id=" + i);
+                doc.field("Referer", "http://example.com/ref/" + i);
+                doc.field("IsRefresh", (short) 0);
+                doc.field("RefererCategoryID", (short) 0);
+                doc.field("RefererRegionID", 0);
+                doc.field("URLCategoryID", (short) 0);
+                doc.field("URLRegionID", 0);
+                doc.field("ResolutionWidth", (short) 1920);
+                doc.field("ResolutionHeight", (short) 1080);
+                doc.field("ResolutionDepth", (short) 24);
+                doc.field("FlashMajor", (short) 11);
+                doc.field("FlashMinor", (short) 7);
+                doc.field("FlashMinor2", (short) 169);
+                doc.field("NetMajor", (short) 0);
+                doc.field("NetMinor", (short) 0);
+                doc.field("UserAgentMajor", (short) 37);
+                doc.field("UserAgentMinor", "0");
+                doc.field("CookieEnable", (short) 1);
+                doc.field("JavascriptEnable", (short) 1);
+                doc.field("IsMobile", (short) 0);
+                doc.field("MobilePhone", (short) 0);
+                doc.field("MobilePhoneModel", "");
+                doc.field("Params", "");
+                doc.field("IPNetworkID", 0);
+                doc.field("TraficSourceID", (short) 0);
+                doc.field("SearchEngineID", (short) 0);
+                doc.field("SearchPhrase", "");
+                doc.field("AdvEngineID", (short) 0);
+                doc.field("IsArtifical", (short) 0);
+                doc.field("WindowClientWidth", (short) 1920);
+                doc.field("WindowClientHeight", (short) 946);
+                doc.field("ClientTimeZone", (short) 180);
+                doc.field("ClientEventTime", "2013-07-15 03:39:17");
+                doc.field("SilverlightVersion1", (short) 0);
+                doc.field("SilverlightVersion2", (short) 0);
+                doc.field("SilverlightVersion3", 0);
+                doc.field("SilverlightVersion4", (short) 0);
+                doc.field("PageCharset", "UTF-8");
+                doc.field("CodeVersion", 1843712);
+                doc.field("IsLink", (short) 0);
+                doc.field("IsDownload", (short) 0);
+                doc.field("IsNotBounce", (short) 1);
+                doc.field("FUniqID", 7842017605334151337L + i);
+                doc.field("HID", 1140045505);
+                doc.field("IsOldCounter", (short) 0);
+                doc.field("IsEvent", (short) 0);
+                doc.field("IsParameter", (short) 0);
+                doc.field("DontCountHits", (short) 0);
+                doc.field("WithHash", (short) 0);
+                doc.field("HitColor", "W");
+                doc.field("LocalEventTime", "2013-07-15 03:39:17");
+                doc.field("Age", (short) 0);
+                doc.field("Sex", (short) 0);
+                doc.field("Income", (short) 0);
+                doc.field("Interests", (short) 0);
+                doc.field("Robotness", (short) 0);
+                doc.field("RemoteIP", 1701406667);
+                doc.field("WindowName", 1);
+                doc.field("OpenerName", -1);
+                doc.field("HistoryLength", (short) 1);
+                doc.field("BrowserLanguage", "ru");
+                doc.field("BrowserCountry", "RU");
+                doc.field("SocialNetwork", "");
+                doc.field("SocialAction", "");
+                doc.field("HTTPError", (short) 0);
+                doc.field("SendTiming", 0);
+                doc.field("DNSTiming", 0);
+                doc.field("ConnectTiming", 0);
+                doc.field("ResponseStartTiming", 0);
+                doc.field("ResponseEndTiming", 0);
+                doc.field("FetchTiming", 0);
+                doc.field("SocialSourceNetworkID", (short) 0);
+                doc.field("SocialSourcePage", "");
+                doc.field("ParamPrice", -1L);
+                doc.field("ParamOrderID", "");
+                doc.field("ParamCurrency", "");
+                doc.field("ParamCurrencyID", (short) 0);
+                doc.field("OpenstatServiceName", "");
+                doc.field("OpenstatCampaignID", "");
+                doc.field("OpenstatAdID", "");
+                doc.field("OpenstatSourceID", "");
+                doc.field("UTMSource", "");
+                doc.field("UTMMedium", "");
+                doc.field("UTMCampaign", "");
+                doc.field("UTMContent", "");
+                doc.field("UTMTerm", "");
+                doc.field("FromTag", "");
+                doc.field("HasGCLID", (short) 0);
+                doc.field("RefererHash", 0L);
+                doc.field("URLHash", 4836490838675973022L + i);
+                doc.field("CLID", 0);
+                doc.field("OriginalURL", "");
+            }
+            doc.endObject();
+
+            bulkRequest.add(new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE).source(doc));
+        }
+
+        // Assert the batch path does not fall back to serial due to errors
+        MockLog.assertThatLogger(() -> {
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+            assertNoFailures(bulkResponse);
+            assertThat(bulkResponse.getItems().length, equalTo(numDocs));
+        },
+            TransportShardBulkAction.class,
+            new MockLog.UnseenEventExpectation(
+                "no batch fallback",
+                TransportShardBulkAction.class.getCanonicalName(),
+                Level.ERROR,
+                "Row batch execution failed*"
+            )
+        );
+
+        refresh(index);
+
+        // Verify total count
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+
+        // Verify synthetic source reconstruction for a subset of fields
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.matchAllQuery())
+                .setSize(5)
+                .addSort("CounterID", SortOrder.DESC)
+                .setTrackTotalHits(true),
+            searchResponse -> {
+                assertNoFailures(searchResponse);
+                SearchHit[] hits = searchResponse.getHits().getHits();
+                assertThat(hits.length, equalTo(Math.min(5, numDocs)));
+                for (SearchHit hit : hits) {
+                    Map<String, Object> source = hit.getSourceAsMap();
+                    // Verify numeric fields are present and correct types
+                    assertNotNull("CounterID should be present", source.get("CounterID"));
+                    assertNotNull("WatchID should be present", source.get("WatchID"));
+                    assertNotNull("UserID should be present", source.get("UserID"));
+                    // Verify keyword fields
+                    assertThat(source.get("BrowserLanguage"), equalTo("ru"));
+                    assertThat(source.get("BrowserCountry"), equalTo("RU"));
+                    assertThat(source.get("HitColor"), equalTo("W"));
+                    assertThat(source.get("PageCharset"), equalTo("UTF-8"));
+                    // Verify short fields
+                    assertThat(source.get("ResolutionWidth"), equalTo(1920));
+                    assertThat(source.get("ResolutionHeight"), equalTo(1080));
+                    // Verify date fields are present
+                    assertNotNull("EventDate should be present", source.get("EventDate"));
+                    assertNotNull("EventTime should be present", source.get("EventTime"));
                 }
             }
         );
