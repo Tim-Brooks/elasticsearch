@@ -49,6 +49,9 @@ import java.nio.charset.StandardCharsets;
  */
 public final class DocBatchRowIterator extends AbstractXContentParser {
 
+    private static final XContentString.UTF8Bytes EMPTY_UTF8_BYTES = new XContentString.UTF8Bytes(new byte[0], 0, 0);
+    private static final Text EMPTY_TEXT = new Text(EMPTY_UTF8_BYTES);
+
     private final byte[] typeBytes;
     private final int typeBytesOffset;
     private final BytesReference fixedData;
@@ -142,6 +145,9 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         long packed = readFixedLong();
         int varOffset = (int) (packed >>> 32);
         int varLength = (int) packed;
+        if (varLength == 0) {
+            return EMPTY_UTF8_BYTES;
+        }
         BytesRef bytesRef = getBytesRef(varOffset, varLength);
         return new XContentString.UTF8Bytes(bytesRef.bytes, bytesRef.offset, bytesRef.length);
     }
@@ -242,7 +248,9 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     @Override
     public XContentString optimizedText() throws IOException {
         if (baseType == RowType.STRING) {
-            return new Text(stringUTF8Bytes());
+            XContentString.UTF8Bytes utf8 = stringUTF8Bytes();
+            if (utf8.length() == 0) return EMPTY_TEXT;
+            return new Text(utf8);
         }
         return new Text(text());
     }
