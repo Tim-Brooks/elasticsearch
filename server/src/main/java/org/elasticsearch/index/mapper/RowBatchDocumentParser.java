@@ -956,7 +956,6 @@ public final class RowBatchDocumentParser {
         for (int col = 0; col < schema.columnCount(); col++) {
             String fieldName = schema.getColumnName(col);
             Mapper mapper = resolveMapper(fieldName, mappingLookup);
-            System.err.println(mapper);
             if (mapper instanceof FieldMapper fm) {
                 if (fm.supportsColumnMode() == false) {
                     return false;
@@ -1097,8 +1096,7 @@ public final class RowBatchDocumentParser {
                         if (cw == null) continue;
 
                         if (fm instanceof NumberFieldMapper) {
-                            long value = rowIterator.longValue(false);
-                            cw.writeLong(batchDocId, value);
+                            cw.writeLong(batchDocId, rowIterator.rowLongValue());
                         } else if (fm instanceof DateFieldMapper dfm) {
                             byte baseType = rowIterator.baseType();
                             long timestamp;

@@ -68,6 +68,7 @@ import org.elasticsearch.plugins.internal.DocumentParsingProvider;
 import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
 import org.elasticsearch.search.fetch.subphase.FetchSourceContext;
 import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.transport.TransportRequestOptions;
 import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.xcontent.XContentType;
@@ -221,7 +222,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             var index = primary.shardId().getIndex();
             var indexMetadata = clusterState.metadata().lookupProject(index).map(p -> p.index(index)).orElse(null);
             return indexMetadata == null || (indexMetadata.mapping() != null && indexMetadata.getMappingVersion() != initialMappingVersion);
-        }), listener, executor(primary), postWriteRefresh, postWriteAction, documentParsingProvider);
+        }), listener, executor(primary), postWriteRefresh, postWriteAction, documentParsingProvider, pageCacheRecycler);
     }
 
     @Override
@@ -265,7 +266,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             executor,
             null,
             null,
-            DocumentParsingProvider.EMPTY_INSTANCE
+            DocumentParsingProvider.EMPTY_INSTANCE,
+            null
         );
     }
 
@@ -280,7 +282,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         Executor executor,
         @Nullable PostWriteRefresh postWriteRefresh,
         @Nullable Consumer<Runnable> postWriteAction,
-        DocumentParsingProvider documentParsingProvider
+        DocumentParsingProvider documentParsingProvider,
+        @Nullable PageCacheRecycler pageCacheRecycler
     ) {
         new ActionRunnable<>(listener) {
 
@@ -300,7 +303,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 // Try batch path if the coordinating node determined this request is batch-eligible
                 if (request.isRowBatchMode() && batchFallbackToSerial == false) {
                     try {
-                        var batchResult = performRowBatchOnPrimary(request, primary, postWriteRefresh, postWriteAction);
+                        var batchResult = performRowBatchOnPrimary(request, primary, postWriteRefresh, postWriteAction, pageCacheRecycler);
                         if (batchResult != null) {
                             primary.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBulkTime);
                             listener.onResponse(batchResult);
@@ -422,7 +425,8 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         BulkShardRequest request,
         IndexShard primary,
         @Nullable PostWriteRefresh postWriteRefresh,
-        @Nullable Consumer<Runnable> postWriteAction
+        @Nullable Consumer<Runnable> postWriteAction,
+        PageCacheRecycler pageCacheRecycler
     ) throws IOException {
         final BulkItemRequest[] items = request.items();
         final ShardId shardId = request.shardId();
@@ -509,7 +513,9 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         final org.elasticsearch.index.engine.ColumnBatchBuilder columnBatchBuilder;
 
         if (useColumnMode) {
-            var recycler = org.elasticsearch.transport.BytesRefRecycler.NON_RECYCLING_INSTANCE;
+            var recycler = pageCacheRecycler != null
+                ? new BytesRefRecycler(pageCacheRecycler)
+                : org.elasticsearch.transport.BytesRefRecycler.NON_RECYCLING_INSTANCE;
             var columnarResult = batchParser.parseRowBatchColumnar(rowBatch, indexRequests, mappingLookup, recycler);
             parseResult = new RowBatchDocumentParser.BatchResult(columnarResult.documents(), columnarResult.exceptions());
             columnBatchBuilder = columnarResult.columnBatchBuilder();
