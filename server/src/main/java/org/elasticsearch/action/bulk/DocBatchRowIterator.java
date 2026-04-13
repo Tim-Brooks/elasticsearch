@@ -56,8 +56,10 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     private final int typeBytesOffset;
     private final BytesReference fixedData;
     private final BytesReference varData;
-    private final boolean fixedDataHasArray;
-    private final boolean varDataHasArray;
+    private final byte[] fixedArray;
+    private final int fixedArrayOffset;
+    private final byte[] varArray;
+    private final int varArrayOffset;
     private final int rowColumnCount;
 
     // Column cursor state
@@ -84,8 +86,20 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
         }
         this.fixedData = data.slice(fixedSectionOffset, varSectionOffset - fixedSectionOffset).unwrap();
         this.varData = data.slice(varSectionOffset, data.length() - varSectionOffset).unwrap();
-        this.fixedDataHasArray = fixedData.hasArray();
-        this.varDataHasArray = varData.hasArray();
+        if (fixedData.hasArray()) {
+            this.fixedArray = fixedData.array();
+            this.fixedArrayOffset = fixedData.arrayOffset();
+        } else {
+            this.fixedArray = null;
+            this.fixedArrayOffset = -1;
+        }
+        if (varData.hasArray()) {
+            this.varArray = varData.array();
+            this.varArrayOffset = varData.arrayOffset();
+        } else {
+            this.varArray = null;
+            this.varArrayOffset = -1;
+        }
         this.rowColumnCount = rowColumnCount;
     }
 
@@ -170,15 +184,15 @@ public final class DocBatchRowIterator extends AbstractXContentParser {
     }
 
     private long readFixedLong() {
-        if (fixedDataHasArray) {
-            return ByteUtils.readLongBE(fixedData.array(), fixedData.arrayOffset() + fixedOffset);
+        if (fixedArray != null) {
+            return ByteUtils.readLongBE(fixedArray, fixedArrayOffset + fixedOffset);
         }
         return fixedData.getLong(fixedOffset);
     }
 
     private BytesRef getBytesRef(int varOffset, int varLength) {
-        if (varDataHasArray) {
-            return new BytesRef(varData.array(), varData.arrayOffset() + varOffset, varLength);
+        if (varArray != null) {
+            return new BytesRef(varArray, varArrayOffset + varOffset, varLength);
         }
         return varData.slice(varOffset, varLength).toBytesRef();
     }
