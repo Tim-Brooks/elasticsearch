@@ -2384,6 +2384,12 @@ public class NumberFieldMapper extends FieldMapper {
     }
 
     @Override
+    public boolean supportsColumnMode() {
+        NumberFieldType ft = fieldType();
+        return ft.indexType.hasDocValues() && ft.indexType.hasPoints() == false && stored == false && dimension == false;
+    }
+
+    @Override
     protected void parseCreateField(DocumentParserContext context) throws IOException {
         Number value;
         try {

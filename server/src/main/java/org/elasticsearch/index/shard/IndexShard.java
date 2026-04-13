@@ -93,6 +93,7 @@ import org.elasticsearch.index.cache.bitset.ShardBitsetFilterCache;
 import org.elasticsearch.index.cache.query.TrivialQueryCachingPolicy;
 import org.elasticsearch.index.cache.request.ShardRequestCache;
 import org.elasticsearch.index.codec.CodecService;
+import org.elasticsearch.index.engine.ColumnBatchBuilder;
 import org.elasticsearch.index.engine.CommitStats;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.engine.Engine.GetResult;
@@ -972,12 +973,20 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
      * @param batchData  the raw DocumentBatch bytes for translog storage
      */
     public List<Engine.IndexResult> indexBatch(List<Engine.Index> operations, BytesReference batchData) throws IOException {
+        return indexBatch(operations, batchData, null);
+    }
+
+    public List<Engine.IndexResult> indexBatch(
+        List<Engine.Index> operations,
+        BytesReference batchData,
+        @Nullable ColumnBatchBuilder columnBatchBuilder
+    ) throws IOException {
         final Engine engine = getEngine();
         List<Engine.Index> preIndexed = new ArrayList<>(operations.size());
         for (Engine.Index op : operations) {
             preIndexed.add(indexingOperationListeners.preIndex(shardId, op));
         }
-        List<Engine.IndexResult> results = engine.indexBatch(preIndexed, batchData);
+        List<Engine.IndexResult> results = engine.indexBatch(preIndexed, batchData, columnBatchBuilder);
         for (int i = 0; i < results.size(); i++) {
             indexingOperationListeners.postIndex(shardId, preIndexed.get(i), results.get(i));
         }

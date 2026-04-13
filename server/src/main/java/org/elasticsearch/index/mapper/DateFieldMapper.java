@@ -1159,6 +1159,11 @@ public final class DateFieldMapper extends FieldMapper {
     }
 
     @Override
+    public boolean supportsColumnMode() {
+        return docValuesParameters.enabled() && indexed == false && store == false;
+    }
+
+    @Override
     protected void parseCreateField(DocumentParserContext context) throws IOException {
 
         long timestamp;

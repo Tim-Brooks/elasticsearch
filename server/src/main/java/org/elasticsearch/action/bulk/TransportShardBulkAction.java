@@ -501,9 +501,22 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             extractTsidsFromBatch(rowBatch, indexRequests, mappingLookup, primary.indexSettings().getIndexVersionCreated());
         }
 
-        // Phase 2: Parse batch using RowBatchDocumentParser
+        // Phase 2: Parse batch — columnar or row mode
         var batchParser = mapperService.createRowBatchDocumentParser();
-        var parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
+        final boolean useColumnMode = RowBatchDocumentParser.isColumnModeEligible(rowBatch, mappingLookup, primary.indexSettings());
+
+        final RowBatchDocumentParser.BatchResult parseResult;
+        final org.elasticsearch.index.engine.ColumnBatchBuilder columnBatchBuilder;
+
+        if (useColumnMode) {
+            var recycler = org.elasticsearch.transport.BytesRefRecycler.NON_RECYCLING_INSTANCE;
+            var columnarResult = batchParser.parseRowBatchColumnar(rowBatch, indexRequests, mappingLookup, recycler);
+            parseResult = new RowBatchDocumentParser.BatchResult(columnarResult.documents(), columnarResult.exceptions());
+            columnBatchBuilder = columnarResult.columnBatchBuilder();
+        } else {
+            parseResult = batchParser.parseRowBatch(rowBatch, indexRequests, mappingLookup);
+            columnBatchBuilder = null;
+        }
 
         // Check if any parsed document needs a dynamic mapping update that wasn't predicted
         // by the upfront requiresDynamicMapping check (mirrors serial path's check in
@@ -513,6 +526,9 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 CompressedXContent docMappingUpdate = parseResult.getDocument(i).dynamicMappingsUpdate();
                 if (docMappingUpdate != null) {
                     // A parsed document discovered unmapped fields during parsing — need mapping update
+                    if (columnBatchBuilder != null) {
+                        columnBatchBuilder.close();
+                    }
                     throw new BatchDynamicMappingUpdateRequired(docMappingUpdate);
                 }
             }
@@ -550,7 +566,11 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         }
 
         // Phase 4: Execute on engine
-        final java.util.List<Engine.IndexResult> engineResults = primary.indexBatch(engineOps, rowBatch.getDataReference());
+        final java.util.List<Engine.IndexResult> engineResults = primary.indexBatch(
+            engineOps,
+            rowBatch.getDataReference(),
+            columnBatchBuilder
+        );
 
         // Phase 5: Build BulkItemResponse for each item
         final BulkItemResponse[] responses = new BulkItemResponse[items.length];

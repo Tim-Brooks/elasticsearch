@@ -11,6 +11,11 @@ package org.elasticsearch.index.mapper;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.document.SortedNumericDocValuesField;
+import org.apache.lucene.document.SortedSetDocValuesField;
+import org.apache.lucene.document.StringField;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.bulk.DocBatchRowIterator;
 import org.elasticsearch.action.bulk.DocBatchRowReader;
@@ -20,6 +25,9 @@ import org.elasticsearch.action.bulk.RowType;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.compress.CompressedXContent;
+import org.elasticsearch.common.recycler.Recycler;
+import org.elasticsearch.index.IndexSettings;
+import org.elasticsearch.index.engine.ColumnBatchBuilder;
 import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
 import org.elasticsearch.xcontent.XContentLocation;
 import org.elasticsearch.xcontent.XContentParser;
@@ -929,6 +937,257 @@ public final class RowBatchDocumentParser {
     private static void resetPath(int segmentCount, ContentPath path) {
         for (int i = 0; i < segmentCount; i++) {
             path.remove();
+        }
+    }
+
+    /**
+     * Checks whether a row batch is eligible for column-mode indexing. Returns true when all
+     * mapped user field mappers support column mode, source is synthetic, and seq_no uses
+     * doc_values_only.
+     */
+    public static boolean isColumnModeEligible(RowDocumentBatch rowBatch, MappingLookup mappingLookup, IndexSettings indexSettings) {
+        if (SourceFieldMapper.isSynthetic(indexSettings) == false) {
+            return false;
+        }
+        if (indexSettings.seqNoIndexOptions() != SeqNoFieldMapper.SeqNoIndexOptions.DOC_VALUES_ONLY) {
+            return false;
+        }
+        DocBatchSchema schema = rowBatch.schema();
+        for (int col = 0; col < schema.columnCount(); col++) {
+            String fieldName = schema.getColumnName(col);
+            Mapper mapper = resolveMapper(fieldName, mappingLookup);
+            if (mapper instanceof FieldMapper fm) {
+                if (fm.supportsColumnMode() == false) {
+                    return false;
+                }
+            } else if (mapper instanceof ObjectMapper) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Result of columnar batch parsing.
+     */
+    public record ColumnarBatchResult(ParsedDocument[] documents, Exception[] exceptions, ColumnBatchBuilder columnBatchBuilder) {}
+
+    /**
+     * Parse a row batch in columnar mode: instead of producing per-document LuceneDocument fields,
+     * writes column data for each field into pooled byte pages via ColumnWriters. The resulting
+     * ColumnBatchBuilder is later finished in the engine (metadata columns) and passed to
+     * IndexWriter.addBatch().
+     */
+    public ColumnarBatchResult parseRowBatchColumnar(
+        RowDocumentBatch rowBatch,
+        List<IndexRequest> indexRequests,
+        MappingLookup mappingLookup,
+        Recycler<BytesRef> recycler
+    ) {
+        final int docCount = indexRequests.size();
+        final DocBatchSchema schema = rowBatch.schema();
+
+        // Pre-resolve mappers and create column writers
+        final FieldMapper[] columnMappers = new FieldMapper[schema.columnCount()];
+        final ColumnWriter[] columnWriters = new ColumnWriter[schema.columnCount()];
+        // Track high-cardinality keyword count columns (fieldName.counts)
+        final ColumnWriter[] countWriters = new ColumnWriter[schema.columnCount()];
+
+        final ColumnBatchBuilder builder = new ColumnBatchBuilder(recycler);
+
+        try {
+            for (int col = 0; col < schema.columnCount(); col++) {
+                String fieldName = schema.getColumnName(col);
+                Mapper mapper = resolveMapper(fieldName, mappingLookup);
+                if (mapper instanceof FieldMapper fm) {
+                    columnMappers[col] = fm;
+                    if (fm instanceof NumberFieldMapper nfm) {
+                        IndexableFieldType ft = nfm.fieldType().indexType.hasDocValuesSkipper()
+                            ? SortedNumericDocValuesField.indexedField("", 0).fieldType()
+                            : SortedNumericDocValuesField.TYPE;
+                        columnWriters[col] = new ColumnWriter(fieldName, ft, true, recycler);
+                    } else if (fm instanceof DateFieldMapper dfm) {
+                        IndexableFieldType ft = dfm.fieldType().hasDocValuesSkipper()
+                            ? SortedNumericDocValuesField.indexedField("", 0).fieldType()
+                            : SortedNumericDocValuesField.TYPE;
+                        columnWriters[col] = new ColumnWriter(fieldName, ft, true, recycler);
+                    } else if (fm instanceof KeywordFieldMapper kfm) {
+                        if (kfm.usesBinaryDocValues()) {
+                            // High-cardinality: binary doc values + count column
+                            columnWriters[col] = new ColumnWriter(fieldName, CustomDocValuesField.TYPE, false, recycler);
+                            String countFieldName = fieldName + MultiValuedBinaryDocValuesField.SeparateCount.COUNT_FIELD_SUFFIX;
+                            countWriters[col] = new ColumnWriter(
+                                countFieldName,
+                                NumericDocValuesField.indexedField("", 0).fieldType(),
+                                true,
+                                recycler
+                            );
+                        } else {
+                            columnWriters[col] = new ColumnWriter(fieldName, SortedSetDocValuesField.TYPE, false, recycler);
+                        }
+                    }
+                }
+            }
+
+            // Create _id column writer
+            ColumnWriter idWriter = new ColumnWriter(IdFieldMapper.NAME, StringField.TYPE_STORED, false, recycler);
+
+            // Prepare lightweight ParsedDocument shells
+            final ParsedDocument[] results = new ParsedDocument[docCount];
+            final Exception[] exceptions = new Exception[docCount];
+
+            final MetadataFieldMapper[] metadataFieldMappers = mappingLookup.getMapping().getSortedMetadataMappers();
+            final Set<String> sharedCopyToFields = mappingLookup.fieldTypesLookup().getCopyToDestinationFields();
+
+            int successCount = 0;
+            for (int i = 0; i < docCount; i++) {
+                try {
+                    IndexRequest indexRequest = indexRequests.get(i);
+                    XContentType xContentType = indexRequest.getContentType();
+                    if (xContentType == null) {
+                        xContentType = XContentType.JSON;
+                    }
+                    SourceToParse source = new SourceToParse(
+                        indexRequest.id(),
+                        BytesArray.EMPTY,
+                        xContentType,
+                        indexRequest.routing(),
+                        indexRequest.getDynamicTemplates(),
+                        indexRequest.getDynamicTemplateParams(),
+                        false,
+                        XContentMeteringParserDecorator.NOOP,
+                        indexRequest.tsid()
+                    );
+
+                    // Create a minimal context for metadata preParse/postParse
+                    BatchDocumentParserContext ctx = new BatchDocumentParserContext(
+                        mappingLookup,
+                        mappingParserContext,
+                        source,
+                        sharedCopyToFields,
+                        new HashMap<>(),
+                        new HashMap<>(),
+                        new HashMap<>(),
+                        4
+                    );
+
+                    // Run metadata preParse (sets _id, _version, _seq_no fields on the doc)
+                    for (MetadataFieldMapper metadataMapper : metadataFieldMappers) {
+                        metadataMapper.preParse(ctx);
+                    }
+
+                    // Write _id to column
+                    BytesRef encodedId = Uid.encodeId(indexRequest.id());
+                    int batchDocId = successCount;
+                    idWriter.writeBinary(batchDocId, encodedId);
+
+                    // Read row data and write to column writers
+                    int rowIndex = indexRequest.batchRowIndex() >= 0 ? indexRequest.batchRowIndex() : i;
+                    DocBatchRowReader rowReader = rowBatch.getRowReader(rowIndex);
+                    DocBatchRowIterator rowIterator = rowReader.iterator();
+
+                    while (rowIterator.next()) {
+                        if (rowIterator.isNull()) continue;
+                        int col = rowIterator.column();
+                        FieldMapper fm = columnMappers[col];
+                        if (fm == null) continue;
+
+                        ColumnWriter cw = columnWriters[col];
+                        if (cw == null) continue;
+
+                        if (fm instanceof NumberFieldMapper) {
+                            long value = rowIterator.longValue(false);
+                            cw.writeLong(batchDocId, value);
+                        } else if (fm instanceof DateFieldMapper dfm) {
+                            byte baseType = rowIterator.baseType();
+                            long timestamp;
+                            if (baseType == RowType.LONG) {
+                                timestamp = dfm.fieldType()
+                                    .resolution()
+                                    .convert(java.time.Instant.ofEpochMilli(rowIterator.rowLongValue()));
+                            } else {
+                                String text = rowIterator.textOrNull();
+                                timestamp = dfm.fieldType().parse(text);
+                            }
+                            cw.writeLong(batchDocId, timestamp);
+                        } else if (fm instanceof KeywordFieldMapper kfm) {
+                            BytesRef binaryValue;
+                            var utf8 = rowIterator.optimizedTextOrNull();
+                            if (utf8 == null) continue;
+                            var utf8Bytes = utf8.bytes();
+                            binaryValue = new BytesRef(utf8Bytes.bytes(), utf8Bytes.offset(), utf8Bytes.length());
+                            cw.writeBinary(batchDocId, binaryValue);
+                            if (countWriters[col] != null) {
+                                // High-cardinality: write count of 1 for single-valued
+                                countWriters[col].writeLong(batchDocId, 1);
+                            }
+                        }
+                    }
+
+                    // Run metadata postParse
+                    for (MetadataFieldMapper metadataMapper : metadataFieldMappers) {
+                        metadataMapper.postParse(ctx);
+                    }
+
+                    // Build a lightweight ParsedDocument shell
+                    results[i] = new ParsedDocument(
+                        ctx.version(),
+                        ctx.seqID(),
+                        ctx.id(),
+                        ctx.routing(),
+                        ctx.reorderParentAndGetDocs(),
+                        new BytesArray("{\"marker\":true}"),
+                        source.getXContentType(),
+                        null,
+                        XContentMeteringParserDecorator.UNKNOWN_SIZE
+                    ) {
+                        @Override
+                        public String documentDescription() {
+                            IdFieldMapper idMapper = (IdFieldMapper) mappingLookup.getMapping().getMetadataMapperByName(IdFieldMapper.NAME);
+                            return idMapper.documentDescription(this);
+                        }
+                    };
+                    successCount++;
+                } catch (Exception e) {
+                    exceptions[i] = e;
+                }
+            }
+
+            // Finish user columns and add to builder
+            builder.setNumDocs(successCount);
+            builder.addIdData(IdFieldMapper.NAME, StringField.TYPE_STORED, idWriter.finish(), idWriter.entryCount());
+
+            for (int col = 0; col < schema.columnCount(); col++) {
+                if (columnWriters[col] != null && columnWriters[col].entryCount() > 0) {
+                    ColumnWriter cw = columnWriters[col];
+                    builder.addUserColumn(cw.fieldName(), cw.fieldType(), cw.isLong(), cw.finish(), cw.entryCount());
+                }
+                if (countWriters[col] != null && countWriters[col].entryCount() > 0) {
+                    ColumnWriter cnt = countWriters[col];
+                    builder.addUserColumn(cnt.fieldName(), cnt.fieldType(), cnt.isLong(), cnt.finish(), cnt.entryCount());
+                }
+            }
+
+            // Close the ColumnWriter shells (data already moved via finish())
+            for (ColumnWriter cw : columnWriters) {
+                if (cw != null) cw.close();
+            }
+            for (ColumnWriter cw : countWriters) {
+                if (cw != null) cw.close();
+            }
+            idWriter.close();
+
+            return new ColumnarBatchResult(results, exceptions, builder);
+        } catch (Exception e) {
+            // Clean up on failure
+            builder.close();
+            for (ColumnWriter cw : columnWriters) {
+                if (cw != null) cw.close();
+            }
+            for (ColumnWriter cw : countWriters) {
+                if (cw != null) cw.close();
+            }
+            throw e;
         }
     }
 

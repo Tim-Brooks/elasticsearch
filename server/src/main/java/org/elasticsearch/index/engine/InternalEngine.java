@@ -1407,7 +1407,8 @@ public class InternalEngine extends Engine {
     }
 
     @Override
-    public List<IndexResult> indexBatch(List<Index> operations, BytesReference batchData) throws IOException {
+    public List<IndexResult> indexBatch(List<Index> operations, BytesReference batchData, @Nullable ColumnBatchBuilder columnBatchBuilder)
+        throws IOException {
         try (var ignored = acquireEnsureOpenRef()) {
             final int batchSize = operations.size();
             final IndexResult[] allResults = new IndexResult[batchSize];
@@ -1446,7 +1447,9 @@ public class InternalEngine extends Engine {
                     acquired = acquiredList.stream().mapToInt(Integer::intValue).toArray();
                     deferred = deferredList.stream().mapToInt(Integer::intValue).toArray();
 
-                    processSubBatch(operations, batchData, acquired, allResults);
+                    // Only pass columnBatchBuilder on the first sub-batch (it covers all docs)
+                    processSubBatch(operations, batchData, acquired, allResults, columnBatchBuilder);
+                    columnBatchBuilder = null; // consumed
                 } finally {
                     for (Releasable lock : locks) {
                         lock.close();
@@ -1460,8 +1463,13 @@ public class InternalEngine extends Engine {
         }
     }
 
-    private void processSubBatch(List<Index> operations, BytesReference batchData, int[] acquired, IndexResult[] allResults)
-        throws IOException {
+    private void processSubBatch(
+        List<Index> operations,
+        BytesReference batchData,
+        int[] acquired,
+        IndexResult[] allResults,
+        @Nullable ColumnBatchBuilder columnBatchBuilder
+    ) throws IOException {
         final int subBatchSize = acquired.length;
 
         final Index[] updatedOps = new Index[subBatchSize];
@@ -1581,15 +1589,27 @@ public class InternalEngine extends Engine {
                 updatedOps[s] = op;
 
                 if (plan.indexIntoLucene && plan.useLuceneUpdateDocument == false) {
-                    // Update Lucene doc fields with the assigned seqNo/primaryTerm/version before indexing
-                    op.parsedDoc().updateSeqID(op.seqNo(), op.primaryTerm());
-                    op.parsedDoc().version().setLongValue(plan.versionForIndexing);
-                    appendDocs.addAll(op.parsedDoc().docs());
+                    if (columnBatchBuilder != null) {
+                        // Column mode: write metadata to the column batch builder
+                        columnBatchBuilder.writeSeqNo(origIdx, op.seqNo());
+                        columnBatchBuilder.writePrimaryTerm(origIdx, op.primaryTerm());
+                        columnBatchBuilder.writeVersion(origIdx, plan.versionForIndexing);
+                    } else {
+                        // Row mode: update Lucene doc fields with the assigned seqNo/primaryTerm/version
+                        op.parsedDoc().updateSeqID(op.seqNo(), op.primaryTerm());
+                        op.parsedDoc().version().setLongValue(plan.versionForIndexing);
+                        appendDocs.addAll(op.parsedDoc().docs());
+                    }
                 }
             }
 
             // Step 3: Batch Lucene add for append-only operations
-            if (appendDocs.isEmpty() == false) {
+            if (columnBatchBuilder != null) {
+                try (ElasticsearchBatch batch = columnBatchBuilder.build()) {
+                    batchIndexWriter.addBatch(batch);
+                    numDocAppends.inc(batch.numDocs());
+                }
+            } else if (appendDocs.isEmpty() == false) {
                 batchIndexWriter.batchAddDocuments(appendDocs);
                 numDocAppends.inc(appendDocs.size());
             }

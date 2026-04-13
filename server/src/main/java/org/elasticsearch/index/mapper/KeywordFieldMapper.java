@@ -1347,6 +1347,21 @@ public final class KeywordFieldMapper extends FieldMapper {
         return docValuesParameters;
     }
 
+    @Override
+    public boolean supportsColumnMode() {
+        return fieldType().hasDocValues()
+            && fieldType.indexOptions() == IndexOptions.NONE
+            && fieldType.stored() == false
+            && "default".equals(normalizerName);
+    }
+
+    /**
+     * Whether this keyword field uses binary doc values (high-cardinality mode).
+     */
+    public boolean usesBinaryDocValues() {
+        return fieldType().usesBinaryDocValues();
+    }
+
     protected void parseCreateField(DocumentParserContext context) throws IOException {
         var value = context.parser().optimizedTextOrNull();
 

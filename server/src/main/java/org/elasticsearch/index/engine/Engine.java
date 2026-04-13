@@ -722,6 +722,11 @@ public abstract class Engine implements Closeable {
      * @return list of IndexResults, one per operation, in the same order
      */
     public List<IndexResult> indexBatch(List<Index> operations, BytesReference batchData) throws IOException {
+        return indexBatch(operations, batchData, null);
+    }
+
+    public List<IndexResult> indexBatch(List<Index> operations, BytesReference batchData, @Nullable ColumnBatchBuilder columnBatchBuilder)
+        throws IOException {
         // Default implementation: fall back to serial indexing
         List<IndexResult> results = new java.util.ArrayList<>(operations.size());
         for (Index op : operations) {
@@ -731,7 +736,7 @@ public abstract class Engine implements Closeable {
     }
 
     public List<IndexResult> indexBatch(List<Index> operations) throws IOException {
-        return indexBatch(operations, BytesArray.EMPTY);
+        return indexBatch(operations, BytesArray.EMPTY, null);
     }
 
     /**

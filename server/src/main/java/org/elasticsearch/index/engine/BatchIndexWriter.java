@@ -9,6 +9,7 @@
 
 package org.elasticsearch.index.engine;
 
+import org.apache.lucene.document.Batch;
 import org.apache.lucene.index.IndexWriter;
 import org.elasticsearch.index.mapper.LuceneDocument;
 
@@ -29,5 +30,9 @@ public class BatchIndexWriter {
         }
         // TODO: Breaks on index sort
         // indexWriter.addDocuments(docs);
+    }
+
+    public void addBatch(Batch batch) throws IOException {
+        indexWriter.addBatch(batch);
     }
 }

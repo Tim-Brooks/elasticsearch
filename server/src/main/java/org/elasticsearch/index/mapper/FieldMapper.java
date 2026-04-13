@@ -196,6 +196,19 @@ public abstract class FieldMapper extends Mapper {
     }
 
     /**
+     * Whether this field mapper supports columnar batch indexing. When all field mappers
+     * in a batch support column mode, the batch path can produce Lucene {@code Column}s
+     * instead of per-document {@code LuceneDocument} fields, enabling
+     * {@code IndexWriter.addBatch(Batch)}.
+     * <p>
+     * Override to return {@code true} in field mappers that are doc-values-only
+     * (no points, no stored fields, no term index).
+     */
+    public boolean supportsColumnMode() {
+        return false;
+    }
+
+    /**
      * Parse the field value using the provided {@link DocumentParserContext}.
      */
     public void parse(DocumentParserContext context) throws IOException {
