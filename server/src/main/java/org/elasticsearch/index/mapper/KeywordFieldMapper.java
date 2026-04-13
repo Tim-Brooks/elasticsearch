@@ -1352,7 +1352,7 @@ public final class KeywordFieldMapper extends FieldMapper {
         return fieldType().hasDocValues()
             && fieldType.indexOptions() == IndexOptions.NONE
             && fieldType.stored() == false
-            && "default".equals(normalizerName);
+            && (normalizerName == null || "default".equals(normalizerName));
     }
 
     /**
