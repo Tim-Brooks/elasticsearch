@@ -25,6 +25,7 @@ import java.io.UncheckedIOException;
  * {@link RecyclerBytesStreamOutput} using pooled 16KB pages.
  * <p>
  * Long column entry layout: 4-byte LE int (doc-id) + 8-byte LE long (value) = 12 bytes.
+ * Dense long column entry layout: 8-byte LE long (value) only (no doc-id prefix).
  * Binary column entry layout: 4-byte LE int (doc-id) + 4-byte LE int (length) + N bytes data.
  */
 public final class ColumnWriter implements Releasable {
@@ -53,6 +54,24 @@ public final class ColumnWriter implements Releasable {
         } else {
             try {
                 output.writeIntLE(docId);
+                output.writeLongLE(value);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+        entryCount++;
+    }
+
+    /**
+     * Write a dense long entry (value only, no doc-id) to this column. All documents in the batch
+     * must have a value and values must be written in consecutive doc-id order.
+     */
+    public void writeDenseLong(long value) {
+        BytesRef page = output.tryGetPageForWrite(8);
+        if (page != null) {
+            ByteUtils.LITTLE_ENDIAN_LONG.set(page.bytes, page.offset, value);
+        } else {
+            try {
                 output.writeLongLE(value);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);

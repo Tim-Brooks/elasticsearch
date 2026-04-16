@@ -70,7 +70,7 @@ public final class BytesRefLongColumn extends LongColumn {
             currentRemaining -= ENTRY_SIZE;
         } else {
             // Slow path: entry straddles page boundary
-            readIntoScratch(ENTRY_SIZE);
+            readIntoScratch();
             currentDocId = (int) ByteUtils.LITTLE_ENDIAN_INT.get(scratch, 0);
             currentValue = (long) ByteUtils.LITTLE_ENDIAN_LONG.get(scratch, 4);
         }
@@ -83,13 +83,13 @@ public final class BytesRefLongColumn extends LongColumn {
         return currentValue;
     }
 
-    private void readIntoScratch(int bytes) {
+    private void readIntoScratch() {
         int written = 0;
-        while (written < bytes) {
+        while (written < BytesRefLongColumn.ENTRY_SIZE) {
             if (currentRemaining == 0) {
                 advancePage();
             }
-            int toCopy = Math.min(bytes - written, currentRemaining);
+            int toCopy = Math.min(BytesRefLongColumn.ENTRY_SIZE - written, currentRemaining);
             System.arraycopy(currentPage, currentOffset, scratch, written, toCopy);
             currentOffset += toCopy;
             currentRemaining -= toCopy;
@@ -129,5 +129,17 @@ public final class BytesRefLongColumn extends LongColumn {
             throw new UncheckedIOException(e);
         }
         return pages;
+    }
+
+    @Override
+    public void reset() {
+        pageIndex = 0;
+        entriesRead = 0;
+        if (pages.length > 0) {
+            BytesRef first = pages[0];
+            currentPage = first.bytes;
+            currentOffset = first.offset;
+            currentRemaining = first.length;
+        }
     }
 }

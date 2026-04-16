@@ -990,6 +990,7 @@ public final class RowBatchDocumentParser {
         // Pre-resolve mappers and create column writers
         final FieldMapper[] columnMappers = new FieldMapper[schema.columnCount()];
         final ColumnWriter[] columnWriters = new ColumnWriter[schema.columnCount()];
+        final boolean[] denseColumns = new boolean[schema.columnCount()];
         // Track high-cardinality keyword count columns (fieldName.counts)
         final ColumnWriter[] countWriters = new ColumnWriter[schema.columnCount()];
 
@@ -1006,11 +1007,13 @@ public final class RowBatchDocumentParser {
                             ? SortedNumericDocValuesField.indexedField("", 0).fieldType()
                             : SortedNumericDocValuesField.TYPE;
                         columnWriters[col] = new ColumnWriter(fieldName, ft, true, recycler);
+                        denseColumns[col] = true;
                     } else if (fm instanceof DateFieldMapper dfm) {
                         IndexableFieldType ft = dfm.fieldType().hasDocValuesSkipper()
                             ? SortedNumericDocValuesField.indexedField("", 0).fieldType()
                             : SortedNumericDocValuesField.TYPE;
                         columnWriters[col] = new ColumnWriter(fieldName, ft, true, recycler);
+                        denseColumns[col] = true;
                     } else if (fm instanceof KeywordFieldMapper kfm) {
                         if (kfm.usesBinaryDocValues()) {
                             // High-cardinality: binary doc values + count column
@@ -1096,7 +1099,7 @@ public final class RowBatchDocumentParser {
                         if (cw == null) continue;
 
                         if (fm instanceof NumberFieldMapper) {
-                            cw.writeLong(batchDocId, rowIterator.rowLongValue());
+                            cw.writeDenseLong(rowIterator.rowLongValue());
                         } else if (fm instanceof DateFieldMapper dfm) {
                             byte baseType = rowIterator.baseType();
                             long timestamp;
@@ -1108,7 +1111,7 @@ public final class RowBatchDocumentParser {
                                 String text = rowIterator.textOrNull();
                                 timestamp = dfm.fieldType().parse(text);
                             }
-                            cw.writeLong(batchDocId, timestamp);
+                            cw.writeDenseLong(timestamp);
                         } else if (fm instanceof KeywordFieldMapper kfm) {
                             BytesRef binaryValue;
                             var utf8 = rowIterator.optimizedTextOrNull();
@@ -1159,7 +1162,11 @@ public final class RowBatchDocumentParser {
             for (int col = 0; col < schema.columnCount(); col++) {
                 if (columnWriters[col] != null && columnWriters[col].entryCount() > 0) {
                     ColumnWriter cw = columnWriters[col];
-                    builder.addUserColumn(cw.fieldName(), cw.fieldType(), cw.isLong(), cw.finish(), cw.entryCount());
+                    if (denseColumns[col]) {
+                        builder.addDenseUserColumn(cw.fieldName(), cw.fieldType(), cw.finish(), cw.entryCount());
+                    } else {
+                        builder.addUserColumn(cw.fieldName(), cw.fieldType(), cw.isLong(), cw.finish(), cw.entryCount());
+                    }
                 }
                 if (countWriters[col] != null && countWriters[col].entryCount() > 0) {
                     ColumnWriter cnt = countWriters[col];

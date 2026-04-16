@@ -65,47 +65,58 @@ public final class ColumnBatchBuilder implements Releasable {
     }
 
     /**
-     * Add a finished user field column.
+     * Add a finished user field column (sparse format with doc-id prefixes).
      */
     public void addUserColumn(String name, IndexableFieldType fieldType, boolean isLong, ReleasableBytesReference data, int entryCount) {
-        userColumns.add(new ColumnInfo(name, fieldType, isLong, data, entryCount));
+        userColumns.add(new ColumnInfo(name, fieldType, isLong, false, data, entryCount));
+    }
+
+    /**
+     * Add a finished dense long user field column (packed longs, no doc-id prefixes).
+     * Every document in the batch must have exactly one value.
+     */
+    public void addDenseUserColumn(String name, IndexableFieldType fieldType, ReleasableBytesReference data, int entryCount) {
+        userColumns.add(new ColumnInfo(name, fieldType, true, true, data, entryCount));
     }
 
     /**
      * Add the finished {@code _id} column data.
      */
     public void addIdData(String name, IndexableFieldType fieldType, ReleasableBytesReference data, int entryCount) {
-        idColumn = new ColumnInfo(name, fieldType, false, data, entryCount);
+        idColumn = new ColumnInfo(name, fieldType, false, false, data, entryCount);
     }
 
     /**
-     * Write a {@code _seq_no} entry for a batch document.
+     * Write a {@code _seq_no} entry for a batch document. Values must be written in
+     * consecutive doc-id order (dense format).
      */
-    public void writeSeqNo(int docId, long seqNo) {
+    public void writeSeqNo(long seqNo) {
         if (seqNoWriter == null) {
             seqNoWriter = new ColumnWriter(SeqNoFieldMapper.NAME, NumericDocValuesField.TYPE, true, recycler);
         }
-        seqNoWriter.writeLong(docId, seqNo);
+        seqNoWriter.writeDenseLong(seqNo);
     }
 
     /**
-     * Write a {@code _primary_term} entry for a batch document.
+     * Write a {@code _primary_term} entry for a batch document. Values must be written in
+     * consecutive doc-id order (dense format).
      */
-    public void writePrimaryTerm(int docId, long primaryTerm) {
+    public void writePrimaryTerm(long primaryTerm) {
         if (primaryTermWriter == null) {
             primaryTermWriter = new ColumnWriter(SeqNoFieldMapper.PRIMARY_TERM_NAME, NumericDocValuesField.TYPE, true, recycler);
         }
-        primaryTermWriter.writeLong(docId, primaryTerm);
+        primaryTermWriter.writeDenseLong(primaryTerm);
     }
 
     /**
-     * Write a {@code _version} entry for a batch document.
+     * Write a {@code _version} entry for a batch document. Values must be written in
+     * consecutive doc-id order (dense format).
      */
-    public void writeVersion(int docId, long version) {
+    public void writeVersion(long version) {
         if (versionWriter == null) {
             versionWriter = new ColumnWriter(VersionFieldMapper.NAME, NumericDocValuesField.TYPE, true, recycler);
         }
-        versionWriter.writeLong(docId, version);
+        versionWriter.writeDenseLong(version);
     }
 
     /**
@@ -123,7 +134,9 @@ public final class ColumnBatchBuilder implements Releasable {
 
         // Add user field columns
         for (ColumnInfo info : userColumns) {
-            if (info.isLong) {
+            if (info.isDense) {
+                columns.add(new BytesRefDenseBinaryColumn(info.name, info.fieldType, info.data));
+            } else if (info.isLong) {
                 columns.add(new BytesRefLongColumn(info.name, info.fieldType, info.data, info.entryCount));
             } else {
                 columns.add(new BytesRefBinaryColumn(info.name, info.fieldType, info.data, info.entryCount));
@@ -131,24 +144,22 @@ public final class ColumnBatchBuilder implements Releasable {
             resources.add(info.data);
         }
 
-        // Finish and add metadata columns
+        // Finish and add metadata columns (dense format — every doc has metadata)
         if (seqNoWriter != null) {
             ReleasableBytesReference data = seqNoWriter.finish();
-            columns.add(new BytesRefLongColumn(seqNoWriter.fieldName(), seqNoWriter.fieldType(), data, seqNoWriter.entryCount()));
+            columns.add(new BytesRefDenseBinaryColumn(seqNoWriter.fieldName(), seqNoWriter.fieldType(), data));
             resources.add(data);
             seqNoWriter = null;
         }
         if (primaryTermWriter != null) {
             ReleasableBytesReference data = primaryTermWriter.finish();
-            columns.add(
-                new BytesRefLongColumn(primaryTermWriter.fieldName(), primaryTermWriter.fieldType(), data, primaryTermWriter.entryCount())
-            );
+            columns.add(new BytesRefDenseBinaryColumn(primaryTermWriter.fieldName(), primaryTermWriter.fieldType(), data));
             resources.add(data);
             primaryTermWriter = null;
         }
         if (versionWriter != null) {
             ReleasableBytesReference data = versionWriter.finish();
-            columns.add(new BytesRefLongColumn(versionWriter.fieldName(), versionWriter.fieldType(), data, versionWriter.entryCount()));
+            columns.add(new BytesRefDenseBinaryColumn(versionWriter.fieldName(), versionWriter.fieldType(), data));
             resources.add(data);
             versionWriter = null;
         }
@@ -167,5 +178,12 @@ public final class ColumnBatchBuilder implements Releasable {
         }
     }
 
-    private record ColumnInfo(String name, IndexableFieldType fieldType, boolean isLong, ReleasableBytesReference data, int entryCount) {}
+    private record ColumnInfo(
+        String name,
+        IndexableFieldType fieldType,
+        boolean isLong,
+        boolean isDense,
+        ReleasableBytesReference data,
+        int entryCount
+    ) {}
 }

@@ -121,4 +121,16 @@ public final class BytesRefBinaryColumn extends BinaryColumn {
         currentOffset = page.offset;
         currentRemaining = page.length;
     }
+
+    @Override
+    public void reset() {
+        pageIndex = 0;
+        entriesRead = 0;
+        if (pages.length > 0) {
+            BytesRef first = pages[0];
+            currentPage = first.bytes;
+            currentOffset = first.offset;
+            currentRemaining = first.length;
+        }
+    }
 }

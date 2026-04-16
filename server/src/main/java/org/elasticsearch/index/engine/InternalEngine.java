@@ -1591,9 +1591,9 @@ public class InternalEngine extends Engine {
                 if (plan.indexIntoLucene && plan.useLuceneUpdateDocument == false) {
                     if (columnBatchBuilder != null) {
                         // Column mode: write metadata to the column batch builder
-                        columnBatchBuilder.writeSeqNo(origIdx, op.seqNo());
-                        columnBatchBuilder.writePrimaryTerm(origIdx, op.primaryTerm());
-                        columnBatchBuilder.writeVersion(origIdx, plan.versionForIndexing);
+                        columnBatchBuilder.writeSeqNo(op.seqNo());
+                        columnBatchBuilder.writePrimaryTerm(op.primaryTerm());
+                        columnBatchBuilder.writeVersion(plan.versionForIndexing);
                     } else {
                         // Row mode: update Lucene doc fields with the assigned seqNo/primaryTerm/version
                         op.parsedDoc().updateSeqID(op.seqNo(), op.primaryTerm());
