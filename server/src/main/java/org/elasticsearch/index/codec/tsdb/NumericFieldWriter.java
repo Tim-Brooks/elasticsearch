@@ -38,6 +38,7 @@ public interface NumericFieldWriter {
      * @param maxOrd              the maximum ordinal value, or -1 if not using ordinals
      * @param offsetsConsumer     consumer for per-doc value counts (sorted-numeric offsets), or null
      * @param sortedFieldObserver observer notified of (docId, ord) pairs during the doc pass, or null
+     * @param skipIndexBuilder    builder for skip index accumulation during the value iteration, or null
      * @return array of [numDocsWithValue, numValues]
      */
     long[] writeField(
@@ -45,7 +46,32 @@ public interface NumericFieldWriter {
         TsdbDocValuesProducer valuesSource,
         long maxOrd,
         OffsetsConsumer offsetsConsumer,
-        SortedFieldObserver sortedFieldObserver
+        SortedFieldObserver sortedFieldObserver,
+        SkipIndexBuilder skipIndexBuilder
+    ) throws IOException;
+
+    /**
+     * Writes a numeric field without a pre-counting pass, for use on the flush path when
+     * merge stats are not available. Stats (numDocsWithValue, numValues) are computed during
+     * the encoding loop and returned, but NOT written to meta. The caller is responsible for
+     * writing stats to the real meta before copying the buffered encoding meta.
+     *
+     * <p>This method only handles the block encoding path (no ordinal range detection).
+     * It should only be called when {@code maxOrd < 0}.
+     *
+     * @param field               the field being written
+     * @param valuesSource        the source of doc values
+     * @param offsetsConsumer     consumer for per-doc value counts (sorted-numeric offsets), or null
+     * @param sortedFieldObserver observer notified of (docId, ord) pairs during the doc pass, or null
+     * @param skipIndexBuilder    builder for skip index accumulation during the value iteration, or null
+     * @return array of [numDocsWithValue, numValues]
+     */
+    long[] writeFieldDeferredStats(
+        FieldInfo field,
+        TsdbDocValuesProducer valuesSource,
+        OffsetsConsumer offsetsConsumer,
+        SortedFieldObserver sortedFieldObserver,
+        SkipIndexBuilder skipIndexBuilder
     ) throws IOException;
 
     /**

@@ -17,6 +17,7 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.store.ByteBuffersIndexOutput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.packed.DirectMonotonicWriter;
 import org.apache.lucene.util.packed.PackedInts;
 import org.elasticsearch.core.IOUtils;
@@ -26,6 +27,7 @@ import org.elasticsearch.index.codec.tsdb.DocOffsetsCodec;
 import org.elasticsearch.index.codec.tsdb.NumericFieldWriter;
 import org.elasticsearch.index.codec.tsdb.NumericFieldWriter.OffsetsConsumer;
 import org.elasticsearch.index.codec.tsdb.NumericWriteContext;
+import org.elasticsearch.index.codec.tsdb.SkipIndexBuilder;
 import org.elasticsearch.index.codec.tsdb.SortedFieldObserver;
 import org.elasticsearch.index.codec.tsdb.SortedFieldObserverFactory;
 import org.elasticsearch.index.codec.tsdb.TSDBDocValuesEncoder;
@@ -101,7 +103,8 @@ final class ES819TSDBDocValuesConsumer extends AbstractTSDBDocValuesConsumer {
             final TsdbDocValuesProducer valuesSource,
             long maxOrd,
             final OffsetsConsumer offsetsConsumer,
-            final SortedFieldObserver sortedFieldObserver
+            final SortedFieldObserver sortedFieldObserver,
+            final SkipIndexBuilder skipIndexBuilder
         ) throws IOException {
             final IndexOutput meta = ctx.meta();
             final IndexOutput data = ctx.data();
@@ -167,6 +170,10 @@ final class ES819TSDBDocValuesConsumer extends AbstractTSDBDocValuesConsumer {
                                 disiAccumulator.addDocId(doc);
                             }
                             final long nextOrd = values.nextValue();
+                            if (skipIndexBuilder != null) {
+                                skipIndexBuilder.onNewDoc(doc, values.docValueCount(), nextOrd);
+                                skipIndexBuilder.accumulate(nextOrd);
+                            }
                             if (nextOrd != lastOrd) {
                                 lastOrd = nextOrd;
                                 startDocs.add(doc);
@@ -203,6 +210,12 @@ final class ES819TSDBDocValuesConsumer extends AbstractTSDBDocValuesConsumer {
                             }
                             for (int i = 0; i < count; ++i) {
                                 final long v = values.nextValue();
+                                if (skipIndexBuilder != null) {
+                                    if (i == 0) {
+                                        skipIndexBuilder.onNewDoc(doc, count, v);
+                                    }
+                                    skipIndexBuilder.accumulate(v);
+                                }
                                 if (sortedFieldObserver != null) {
                                     sortedFieldObserver.onDoc(doc, v);
                                 }
@@ -246,6 +259,96 @@ final class ES819TSDBDocValuesConsumer extends AbstractTSDBDocValuesConsumer {
             } finally {
                 IOUtils.close(disiAccumulator);
             }
+
+            return new long[] { numDocsWithValue, numValues };
+        }
+
+        @Override
+        public long[] writeFieldDeferredStats(
+            final FieldInfo field,
+            final TsdbDocValuesProducer valuesSource,
+            final OffsetsConsumer offsetsConsumer,
+            final SortedFieldObserver sortedFieldObserver,
+            final SkipIndexBuilder skipIndexBuilder
+        ) throws IOException {
+            final IndexOutput meta = ctx.meta();
+            final IndexOutput data = ctx.data();
+            final int blockSize = ctx.blockSize();
+            final Encoder blockEncoder = encoder();
+            final int blockShift = Integer.numberOfTrailingZeros(blockSize);
+            final TSDBDocValuesFormatConfig formatConfig = ctx.formatConfig();
+
+            int numDocsWithValue = 0;
+            long numValues = 0;
+
+            // No counting pass — stats are computed during encoding.
+            final long[] buffer = new long[blockSize];
+            int bufferSize = 0;
+            long[] blockOffsets = new long[64];
+            int numBlocks = 0;
+
+            SortedNumericDocValues values = valuesSource.getSortedNumeric(field);
+            final long valuesDataOffset = data.getFilePointer();
+
+            for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
+                numDocsWithValue++;
+                final int count = values.docValueCount();
+                numValues += count;
+                if (offsetsConsumer != null) {
+                    offsetsConsumer.accept(count);
+                }
+                for (int i = 0; i < count; ++i) {
+                    final long v = values.nextValue();
+                    if (skipIndexBuilder != null) {
+                        if (i == 0) {
+                            skipIndexBuilder.onNewDoc(doc, count, v);
+                        }
+                        skipIndexBuilder.accumulate(v);
+                    }
+                    if (sortedFieldObserver != null) {
+                        sortedFieldObserver.onDoc(doc, v);
+                    }
+                    buffer[bufferSize++] = v;
+                    if (bufferSize == blockSize) {
+                        blockOffsets = ArrayUtil.grow(blockOffsets, numBlocks + 1);
+                        blockOffsets[numBlocks++] = data.getFilePointer() - valuesDataOffset;
+                        blockEncoder.encodeBlock(buffer, blockSize, data);
+                        bufferSize = 0;
+                    }
+                }
+            }
+            if (bufferSize > 0) {
+                blockOffsets = ArrayUtil.grow(blockOffsets, numBlocks + 1);
+                blockOffsets[numBlocks++] = data.getFilePointer() - valuesDataOffset;
+                Arrays.fill(buffer, bufferSize, blockSize, 0L);
+                blockEncoder.encodeBlock(buffer, blockSize, data);
+            }
+
+            // Write encoding metadata now that stats are known.
+            if (numValues > 0) {
+                final long valuesDataLength = data.getFilePointer() - valuesDataOffset;
+                final ByteBuffersDataOutput indexOut = new ByteBuffersDataOutput();
+                meta.writeInt(formatConfig.directMonotonicBlockShift());
+                final DirectMonotonicWriter indexWriter = DirectMonotonicWriter.getInstance(
+                    meta,
+                    new ByteBuffersIndexOutput(indexOut, "temp-dv-index", "temp-dv-index"),
+                    numBlocks,
+                    formatConfig.directMonotonicBlockShift()
+                );
+                for (int i = 0; i < numBlocks; i++) {
+                    indexWriter.add(blockOffsets[i]);
+                }
+                indexWriter.finish();
+
+                final long indexDataOffset = data.getFilePointer();
+                data.copyBytes(indexOut.toDataInput(), indexOut.size());
+                meta.writeLong(indexDataOffset);
+                meta.writeLong(data.getFilePointer() - indexDataOffset);
+                meta.writeLong(valuesDataOffset);
+                meta.writeLong(valuesDataLength);
+            }
+
+            writeDISI(meta, data, ctx, valuesSource, field, -1, numDocsWithValue, null);
 
             return new long[] { numDocsWithValue, numValues };
         }

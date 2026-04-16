@@ -24,12 +24,12 @@ import java.util.List;
  * to data and meta outputs. This replaces the old two-pass approach where skip index data
  * was computed in a separate iteration over all doc values.
  *
- * <p>Usage: create an instance, wrap doc values iterators via {@link #wrap}, let the field
- * writer consume values through the wrapper, then call {@link #writeSkipIndex} to flush.
- * If the field writer's encoding path doesn't iterate values (e.g. single-ordinal), use
- * {@link #buildFromValues} as a fallback.
+ * <p>Usage: create an instance, pass it to the field writer which calls {@link #onNewDoc}
+ * and {@link #accumulate} inline during the encoding loop, then call {@link #writeSkipIndex}
+ * to flush. If the field writer's encoding path doesn't iterate values (e.g. single-ordinal),
+ * use {@link #buildFromValues} as a fallback.
  */
-final class SkipIndexBuilder {
+public final class SkipIndexBuilder {
 
     private final int skipIndexIntervalSize;
     private final int skipIndexLevelShift;
@@ -59,7 +59,7 @@ final class SkipIndexBuilder {
      * Called when the first value of a new document is about to be consumed.
      * Handles the isDone check on the previous accumulator and creates a new one if needed.
      */
-    void onNewDoc(int docID, int docValueCount, long firstValue) throws IOException {
+    public void onNewDoc(int docID, int docValueCount, long firstValue) throws IOException {
         if (currentAccumulator != null && currentAccumulator.isDone(skipIndexIntervalSize, docValueCount, firstValue, docID)) {
             globalMaxValue = Math.max(globalMaxValue, currentAccumulator.maxValue);
             globalMinValue = Math.min(globalMinValue, currentAccumulator.minValue);
@@ -81,7 +81,7 @@ final class SkipIndexBuilder {
     /**
      * Accumulate a single value for the current document.
      */
-    void accumulate(long value) {
+    public void accumulate(long value) {
         currentAccumulator.accumulate(value);
     }
 
@@ -141,14 +141,6 @@ final class SkipIndexBuilder {
         assert globalDocCount <= maxDocId + 1;
         meta.writeInt(globalDocCount);
         meta.writeInt(maxDocId);
-    }
-
-    /**
-     * Wrap the given doc values iterator so that values consumed from it are accumulated
-     * into this builder's skip index data.
-     */
-    SortedNumericDocValues wrap(SortedNumericDocValues delegate) {
-        return new SkipAccumulatingSortedNumericDocValues(delegate);
     }
 
     private void writeLevels(List<SkipAccumulator> accumulators) throws IOException {
@@ -239,74 +231,6 @@ final class SkipIndexBuilder {
                 acc.accumulate(list.get(index + i));
             }
             return acc;
-        }
-    }
-
-    /**
-     * Wraps a {@link SortedNumericDocValues} to intercept value reads and feed them into
-     * the skip index builder. Only {@link #nextValue()} triggers accumulation, so iteration
-     * passes that only call {@link #nextDoc()} (e.g. stats-counting, address-writing) do not
-     * produce any skip data.
-     */
-    private class SkipAccumulatingSortedNumericDocValues extends SortedNumericDocValues {
-        private final SortedNumericDocValues delegate;
-        private boolean firstValueForDoc;
-
-        SkipAccumulatingSortedNumericDocValues(SortedNumericDocValues delegate) {
-            this.delegate = delegate;
-        }
-
-        @Override
-        public int nextDoc() throws IOException {
-            int doc = delegate.nextDoc();
-            if (doc != DocIdSetIterator.NO_MORE_DOCS) {
-                firstValueForDoc = true;
-            }
-            return doc;
-        }
-
-        @Override
-        public int advance(int target) throws IOException {
-            int doc = delegate.advance(target);
-            if (doc != DocIdSetIterator.NO_MORE_DOCS) {
-                firstValueForDoc = true;
-            }
-            return doc;
-        }
-
-        @Override
-        public boolean advanceExact(int target) throws IOException {
-            boolean found = delegate.advanceExact(target);
-            if (found) {
-                firstValueForDoc = true;
-            }
-            return found;
-        }
-
-        @Override
-        public long nextValue() throws IOException {
-            long value = delegate.nextValue();
-            if (firstValueForDoc) {
-                firstValueForDoc = false;
-                SkipIndexBuilder.this.onNewDoc(delegate.docID(), delegate.docValueCount(), value);
-            }
-            SkipIndexBuilder.this.accumulate(value);
-            return value;
-        }
-
-        @Override
-        public int docValueCount() {
-            return delegate.docValueCount();
-        }
-
-        @Override
-        public int docID() {
-            return delegate.docID();
-        }
-
-        @Override
-        public long cost() {
-            return delegate.cost();
         }
     }
 }

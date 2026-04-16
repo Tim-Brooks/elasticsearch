@@ -201,8 +201,10 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         };
         if (field.docValuesSkipIndexType() != DocValuesSkipIndexType.NONE) {
             writeFieldWithSkipIndex(field, producer, -1, null, numericBlockSize, null);
-        } else {
+        } else if (producer.mergeStats.supported()) {
             writeField(field, producer, -1, null, numericBlockSize, null);
+        } else {
+            writeFieldDeferredStats(field, producer, null, numericBlockSize, null, null);
         }
     }
 
@@ -213,6 +215,18 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         final OffsetsAccumulator offsetsAccumulator,
         int blockSize,
         final SortedFieldObserver sortedFieldObserver
+    ) throws IOException {
+        return writeField(field, valuesSource, maxOrd, offsetsAccumulator, blockSize, sortedFieldObserver, null);
+    }
+
+    private long[] writeField(
+        final FieldInfo field,
+        final TsdbDocValuesProducer valuesSource,
+        long maxOrd,
+        final OffsetsAccumulator offsetsAccumulator,
+        int blockSize,
+        final SortedFieldObserver sortedFieldObserver,
+        final SkipIndexBuilder skipIndexBuilder
     ) throws IOException {
         final NumericWriteContext ctx = new NumericWriteContext(
             meta,
@@ -229,15 +243,55 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
             valuesSource,
             maxOrd,
             offsetsAccumulator != null ? offsetsAccumulator::addDoc : null,
-            sortedFieldObserver
+            sortedFieldObserver,
+            skipIndexBuilder
         );
     }
 
     /**
+     * Write a numeric field without a pre-counting pass. Stats are computed during encoding and
+     * prepended to meta by this method. The encoding meta is buffered so that stats appear first
+     * in the meta stream. Only valid when {@code maxOrd < 0} (block encoding path).
+     */
+    private long[] writeFieldDeferredStats(
+        final FieldInfo field,
+        final TsdbDocValuesProducer valuesSource,
+        final NumericFieldWriter.OffsetsConsumer offsetsConsumer,
+        int blockSize,
+        final SortedFieldObserver sortedFieldObserver,
+        final SkipIndexBuilder skipIndexBuilder
+    ) throws IOException {
+        final ByteBuffersDataOutput fieldMetaBuffer = new ByteBuffersDataOutput();
+        final IndexOutput fieldMeta = new ByteBuffersIndexOutput(fieldMetaBuffer, "field-meta-buffer", "field-meta-buffer");
+        final NumericWriteContext ctx = new NumericWriteContext(
+            fieldMeta,
+            data,
+            dir,
+            context,
+            maxDoc,
+            blockSize,
+            primarySortFieldNumber,
+            formatConfig
+        );
+        final long[] stats = createNumericFieldWriter(ctx).writeFieldDeferredStats(
+            field,
+            valuesSource,
+            offsetsConsumer,
+            sortedFieldObserver,
+            skipIndexBuilder
+        );
+        // Prepend stats before the buffered encoding meta.
+        meta.writeLong(stats[1]); // numValues
+        meta.writeInt(Math.toIntExact(stats[0])); // numDocsWithValue
+        fieldMetaBuffer.copyTo(meta);
+        return stats;
+    }
+
+    /**
      * Write field data and skip index in a single pass over the doc values. The skip index data
-     * is accumulated during the field write via a wrapping doc values iterator, then flushed to
-     * the data and meta outputs afterwards. Field meta is buffered to preserve the sequential
-     * meta layout (skip meta must precede field meta in the stream).
+     * is accumulated inline during the field write loop, then flushed to the data and meta outputs
+     * afterwards. Field meta is buffered to preserve the sequential meta layout (skip meta must
+     * precede field meta in the stream).
      */
     private long[] writeFieldWithSkipIndex(
         final FieldInfo field,
@@ -248,19 +302,18 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         final SortedFieldObserver sortedFieldObserver
     ) throws IOException {
         final SkipIndexBuilder skipBuilder = new SkipIndexBuilder(formatConfig);
-        final TsdbDocValuesProducer wrappedSource = new TsdbDocValuesProducer(valuesSource.mergeStats) {
-            @Override
-            public SortedNumericDocValues getSortedNumeric(final FieldInfo f) throws IOException {
-                return skipBuilder.wrap(valuesSource.getSortedNumeric(f));
-            }
-        };
 
         final IndexOutput realMeta = this.meta;
         final ByteBuffersDataOutput metaBuffer = new ByteBuffersDataOutput();
         this.meta = new ByteBuffersIndexOutput(metaBuffer, "field-meta-buffer", "field-meta-buffer");
         final long[] stats;
         try {
-            stats = writeField(field, wrappedSource, maxOrd, offsetsAccumulator, blockSize, sortedFieldObserver);
+            if (maxOrd < 0 && valuesSource.mergeStats.supported() == false) {
+                NumericFieldWriter.OffsetsConsumer offsetsConsumer = offsetsAccumulator != null ? offsetsAccumulator::addDoc : null;
+                stats = writeFieldDeferredStats(field, valuesSource, offsetsConsumer, blockSize, sortedFieldObserver, skipBuilder);
+            } else {
+                stats = writeField(field, valuesSource, maxOrd, offsetsAccumulator, blockSize, sortedFieldObserver, skipBuilder);
+            }
         } finally {
             this.meta = realMeta;
         }
@@ -650,7 +703,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         if (field.docValuesSkipIndexType() != DocValuesSkipIndexType.NONE) {
             doAddSortedFieldWithSkipIndex(field, valuesProducer, producer, addTypeByte);
         } else {
-            doAddSortedFieldBody(field, valuesProducer, producer, addTypeByte);
+            doAddSortedFieldBody(field, valuesProducer, producer, addTypeByte, null);
         }
     }
 
@@ -661,18 +714,12 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         boolean addTypeByte
     ) throws IOException {
         final SkipIndexBuilder skipBuilder = new SkipIndexBuilder(formatConfig);
-        final TsdbDocValuesProducer wrappedProducer = new TsdbDocValuesProducer(producer.mergeStats) {
-            @Override
-            public SortedNumericDocValues getSortedNumeric(final FieldInfo f) throws IOException {
-                return skipBuilder.wrap(producer.getSortedNumeric(f));
-            }
-        };
 
         final IndexOutput realMeta = this.meta;
         final ByteBuffersDataOutput metaBuffer = new ByteBuffersDataOutput();
         this.meta = new ByteBuffersIndexOutput(metaBuffer, "field-meta-buffer", "field-meta-buffer");
         try {
-            doAddSortedFieldBody(field, valuesProducer, wrappedProducer, addTypeByte);
+            doAddSortedFieldBody(field, valuesProducer, producer, addTypeByte, skipBuilder);
         } finally {
             this.meta = realMeta;
         }
@@ -688,7 +735,8 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         final FieldInfo field,
         final DocValuesProducer valuesProducer,
         final TsdbDocValuesProducer producer,
-        boolean addTypeByte
+        boolean addTypeByte,
+        final SkipIndexBuilder skipBuilder
     ) throws IOException {
         if (addTypeByte) {
             meta.writeByte((byte) 0); // multiValued (0 = singleValued)
@@ -698,7 +746,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         final int maxOrd = sorted.getValueCount();
         addTermsDict(DocValues.singleton(sorted), observer);
         observer.prepareForDocs();
-        writeField(field, producer, maxOrd, null, numericBlockSize, observer);
+        writeField(field, producer, maxOrd, null, numericBlockSize, observer, skipBuilder);
         if (primarySortFieldNumber == field.number) {
             meta.writeByte(observer != SortedFieldObserver.NOOP ? (byte) 1 : (byte) 0);
         }
@@ -855,25 +903,19 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         if (field.docValuesSkipIndexType() != DocValuesSkipIndexType.NONE) {
             writeSortedNumericFieldWithSkipIndex(field, valuesSource, maxOrd);
         } else {
-            writeSortedNumericFieldBody(field, valuesSource, maxOrd);
+            writeSortedNumericFieldBody(field, valuesSource, maxOrd, null);
         }
     }
 
     private void writeSortedNumericFieldWithSkipIndex(final FieldInfo field, final TsdbDocValuesProducer valuesSource, long maxOrd)
         throws IOException {
         final SkipIndexBuilder skipBuilder = new SkipIndexBuilder(formatConfig);
-        final TsdbDocValuesProducer wrappedSource = new TsdbDocValuesProducer(valuesSource.mergeStats) {
-            @Override
-            public SortedNumericDocValues getSortedNumeric(final FieldInfo f) throws IOException {
-                return skipBuilder.wrap(valuesSource.getSortedNumeric(f));
-            }
-        };
 
         final IndexOutput realMeta = this.meta;
         final ByteBuffersDataOutput metaBuffer = new ByteBuffersDataOutput();
         this.meta = new ByteBuffersIndexOutput(metaBuffer, "field-meta-buffer", "field-meta-buffer");
         try {
-            writeSortedNumericFieldBody(field, wrappedSource, maxOrd);
+            writeSortedNumericFieldBody(field, valuesSource, maxOrd, skipBuilder);
         } finally {
             this.meta = realMeta;
         }
@@ -885,8 +927,12 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         metaBuffer.copyTo(meta);
     }
 
-    private void writeSortedNumericFieldBody(final FieldInfo field, final TsdbDocValuesProducer valuesSource, long maxOrd)
-        throws IOException {
+    private void writeSortedNumericFieldBody(
+        final FieldInfo field,
+        final TsdbDocValuesProducer valuesSource,
+        long maxOrd,
+        final SkipIndexBuilder skipBuilder
+    ) throws IOException {
         if (maxOrd > -1) {
             meta.writeByte((byte) 1); // multiValued (1 = multiValued)
         }
@@ -896,7 +942,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
             int numDocsWithField = valuesSource.mergeStats.sumNumDocsWithField();
             long numValues = valuesSource.mergeStats.sumNumValues();
             if (numDocsWithField == numValues) {
-                writeField(field, valuesSource, maxOrd, null, blockSize, null);
+                writeField(field, valuesSource, maxOrd, null, blockSize, null, skipBuilder);
             } else {
                 assert numValues > numDocsWithField;
                 try (
@@ -908,12 +954,23 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
                         formatConfig.directMonotonicBlockShift()
                     )
                 ) {
-                    writeField(field, valuesSource, maxOrd, accumulator, blockSize, null);
+                    writeField(field, valuesSource, maxOrd, accumulator, blockSize, null, skipBuilder);
                     accumulator.build(meta, data);
                 }
             }
+        } else if (maxOrd < 0) {
+            // Flush path for numeric/sorted-numeric: single pass with deferred stats and offsets.
+            final DeferredOffsetsAccumulator deferredOffsets = new DeferredOffsetsAccumulator();
+            long[] stats = writeFieldDeferredStats(field, valuesSource, deferredOffsets, blockSize, null, skipBuilder);
+            long numValues = stats[1];
+            int numDocsWithField = Math.toIntExact(stats[0]);
+            assert numValues >= numDocsWithField;
+
+            if (numValues > numDocsWithField) {
+                deferredOffsets.build(meta, data, formatConfig.directMonotonicBlockShift());
+            }
         } else {
-            long[] stats = writeField(field, valuesSource, maxOrd, null, blockSize, null);
+            long[] stats = writeField(field, valuesSource, maxOrd, null, blockSize, null, skipBuilder);
             int numDocsWithField = Math.toIntExact(stats[0]);
             long numValues = stats[1];
             assert numValues >= numDocsWithField;
