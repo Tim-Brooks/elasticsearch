@@ -51,9 +51,7 @@ public final class BytesRefDenseBinaryColumn extends DenseBinaryColumn {
         BytesRef[] pages = BytesRefLongColumn.toPageArray(data);
         for (int i = 0; i < pages.length; i++) {
             if ((pages[i].length & 7) != 0) {
-                throw new IllegalArgumentException(
-                    "page [" + i + "] length [" + pages[i].length + "] is not a multiple of Long.BYTES"
-                );
+                throw new IllegalArgumentException("page [" + i + "] length [" + pages[i].length + "] is not a multiple of Long.BYTES");
             }
         }
         return pages;
