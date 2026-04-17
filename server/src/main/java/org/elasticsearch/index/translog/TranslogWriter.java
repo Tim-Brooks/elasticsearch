@@ -306,7 +306,11 @@ public class TranslogWriter extends BaseTranslogReader implements Closeable {
 
             location = new Translog.Location(generation, offset, operation.length());
             // Use the min seqNo for the operation listener (matches the Batch's seqNo)
-            long batchSeqNo = docMetas.stream().mapToLong(Translog.Batch.DocMeta::seqNo).min().orElseThrow();
+            long batchSeqNo = Long.MAX_VALUE;
+            for (Translog.Batch.DocMeta docMeta : docMetas) {
+                batchSeqNo = Math.min(batchSeqNo, docMeta.seqNo());
+            }
+            // TODO: Broken
             operationListener.operationAdded(operation, batchSeqNo, location);
             bufferedBytes = buffer.size();
         }
