@@ -100,6 +100,7 @@ public final class EirfRowToXContent {
                 BytesRef binary = row.getBinaryValue(leafIdx);
                 builder.field(leafName).value(binary.bytes, binary.offset, binary.length);
             }
+            default -> throw new IllegalArgumentException("unsupported type [" + type + "]");
         }
     }
 
@@ -111,18 +112,19 @@ public final class EirfRowToXContent {
         builder.endArray();
     }
 
-    private static void writeElementValue(EirfArray reader, XContentBuilder builder) throws IOException {
-        switch (reader.type()) {
-            case EirfType.INT -> builder.value(reader.intValue());
-            case EirfType.FLOAT -> builder.value(reader.floatValue());
-            case EirfType.LONG -> builder.value(reader.longValue());
-            case EirfType.DOUBLE -> builder.value(reader.doubleValue());
-            case EirfType.STRING -> builder.value(reader.stringValue());
+    private static void writeElementValue(EirfArray array, XContentBuilder builder) throws IOException {
+        switch (array.type()) {
+            case EirfType.INT -> builder.value(array.intValue());
+            case EirfType.FLOAT -> builder.value(array.floatValue());
+            case EirfType.LONG -> builder.value(array.longValue());
+            case EirfType.DOUBLE -> builder.value(array.doubleValue());
+            case EirfType.STRING -> builder.value(array.stringValue());
             case EirfType.TRUE -> builder.value(true);
             case EirfType.FALSE -> builder.value(false);
             case EirfType.NULL -> builder.nullValue();
-            case EirfType.KEY_VALUE -> writeKeyValue(reader.nestedKeyValue(), builder);
-            case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> writeArray(reader.nestedArray(), builder);
+            case EirfType.KEY_VALUE -> writeKeyValue(array.nestedKeyValue(), builder);
+            case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> writeArray(array.nestedArray(), builder);
+            default -> throw new IllegalArgumentException("unsupported type [" + array.type() + "]");
         }
     }
 
@@ -147,6 +149,7 @@ public final class EirfRowToXContent {
             case EirfType.NULL -> builder.nullValue();
             case EirfType.KEY_VALUE -> writeKeyValue(kv.nestedKeyValue(), builder);
             case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> writeArray(kv.nestedArray(), builder);
+            default -> throw new IllegalArgumentException("unsupported type [" + kv.type() + "]");
         }
     }
 }

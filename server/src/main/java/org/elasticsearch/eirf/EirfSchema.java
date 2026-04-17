@@ -9,11 +9,12 @@
 
 package org.elasticsearch.eirf;
 
+import com.carrotsearch.hppc.ObjectIntHashMap;
+import com.carrotsearch.hppc.ObjectIntMap;
+
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Schema for the Elastic Internal Row Format (EIRF).
@@ -173,20 +174,21 @@ public final class EirfSchema {
      * Holds a parallel name list, parent array, and lookup map for one level of schema fields.
      */
     private static final class FieldLevel {
+        public static final int MISSING = -1;
         private final List<String> names;
         private int[] parents;
-        private final Map<FieldKey, Integer> lookup;
+        private final ObjectIntMap<FieldKey> lookup;
 
         FieldLevel(int initialCapacity) {
             this.names = new ArrayList<>();
             this.parents = new int[initialCapacity];
-            this.lookup = new HashMap<>();
+            this.lookup = new ObjectIntHashMap<>(initialCapacity);
         }
 
         FieldLevel(List<String> names, int[] parents) {
             this.names = new ArrayList<>(names);
             this.parents = Arrays.copyOf(parents, names.size());
-            this.lookup = new HashMap<>(names.size());
+            this.lookup = new ObjectIntHashMap<>(names.size());
             for (int i = 0; i < names.size(); i++) {
                 lookup.put(new FieldKey(parents[i], names.get(i)), i);
             }
@@ -205,14 +207,13 @@ public final class EirfSchema {
         }
 
         int find(String name, int parentIdx) {
-            Integer idx = lookup.get(new FieldKey(parentIdx, name));
-            return idx != null ? idx : -1;
+            return lookup.getOrDefault(new FieldKey(parentIdx, name), MISSING);
         }
 
         int append(String name, int parentIdx) {
             FieldKey key = new FieldKey(parentIdx, name);
-            Integer existing = lookup.get(key);
-            if (existing != null) {
+            int existing = lookup.getOrDefault(key, MISSING);
+            if (existing != MISSING) {
                 return existing;
             }
             int index = names.size();

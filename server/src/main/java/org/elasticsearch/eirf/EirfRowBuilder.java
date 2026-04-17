@@ -30,7 +30,7 @@ import java.util.Arrays;
  * <p>Field paths use dot notation for nested objects (e.g., "user.name").
  * The builder automatically creates non-leaf fields in the schema as needed.
  */
-public class EirfRowBuilder implements Releasable {
+public final class EirfRowBuilder implements Releasable {
 
     private static final int INITIAL_CAPACITY = 16;
 
