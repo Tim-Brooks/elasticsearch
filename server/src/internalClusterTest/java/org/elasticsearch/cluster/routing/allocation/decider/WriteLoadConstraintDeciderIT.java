@@ -643,13 +643,17 @@ public class WriteLoadConstraintDeciderIT extends ESIntegTestCase {
         range(0, writeThreadPoolSize + 1).forEach(i -> writeThreadPool.execute(() -> safeAwait(latch)));
         final long delayMillis = randomIntBetween(100, 200);
         safeSleep(delayMillis);
-        // Unblock the pool
-        latch.countDown();
-
-        refreshClusterInfo();
-        mostRecentQueueLatencyMetrics = getMostRecentQueueLatencyMetrics(dataNodes);
-        assertThat(mostRecentQueueLatencyMetrics.keySet(), hasSize(dataNodes.size()));
-        assertThat(mostRecentQueueLatencyMetrics.get(dataNodeToDelay), greaterThanOrEqualTo(delayMillis));
+        // Collect metrics while the write threads are still blocked so the queued task remains in the queue.
+        // This avoids a race where the task is dequeued (clearing peekMaxQueueLatencyInQueueMillis) but
+        // beforeExecute() hasn't yet updated maxQueueLatencyMillisSinceLastPoll, causing both to read zero.
+        try {
+            refreshClusterInfo();
+            mostRecentQueueLatencyMetrics = getMostRecentQueueLatencyMetrics(dataNodes);
+            assertThat(mostRecentQueueLatencyMetrics.keySet(), hasSize(dataNodes.size()));
+            assertThat(mostRecentQueueLatencyMetrics.get(dataNodeToDelay), greaterThanOrEqualTo(delayMillis));
+        } finally {
+            latch.countDown();
+        }
     }
 
     public void testAverageWriteLoadMetricIsPublished() {
