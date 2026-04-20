@@ -150,7 +150,7 @@ public class EirfRowBuilderTests extends ESTestCase {
             EirfBatch batch = builder.build();
             EirfRowReader row0 = batch.getRowReader(0);
             assertEquals(EirfType.KEY_VALUE, row0.getTypeByte(0));
-            EirfKeyValue kv = row0.getKeyValue(0);
+            EirfKeyValueReader kv = row0.getKeyValue(0);
             assertTrue(kv.next());
             assertEquals("x", kv.key());
             assertEquals(EirfType.INT, kv.type());

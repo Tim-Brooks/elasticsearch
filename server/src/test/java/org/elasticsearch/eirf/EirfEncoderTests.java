@@ -139,7 +139,7 @@ public class EirfEncoderTests extends ESTestCase {
         // Should be FIXED_ARRAY since all strings
         assertEquals(EirfType.FIXED_ARRAY, type);
 
-        EirfArray reader = row0.getArrayValue(0);
+        EirfArrayReader reader = row0.getArrayValue(0);
         assertTrue(reader.next());
         assertEquals("a", reader.stringValue());
         assertTrue(reader.next());
@@ -159,7 +159,7 @@ public class EirfEncoderTests extends ESTestCase {
         EirfRowReader row0 = batch.getRowReader(0);
         assertEquals(EirfType.UNION_ARRAY, row0.getTypeByte(0));
 
-        EirfArray reader = row0.getArrayValue(0);
+        EirfArrayReader reader = row0.getArrayValue(0);
 
         assertTrue(reader.next());
         assertEquals(EirfType.INT, reader.type());
@@ -191,7 +191,7 @@ public class EirfEncoderTests extends ESTestCase {
         EirfRowReader row0 = batch.getRowReader(0);
         assertEquals(EirfType.FIXED_ARRAY, row0.getTypeByte(0));
 
-        EirfArray reader = row0.getArrayValue(0);
+        EirfArrayReader reader = row0.getArrayValue(0);
         int count = 0;
         while (reader.next()) {
             assertEquals(count, reader.intValue());
@@ -426,7 +426,7 @@ public class EirfEncoderTests extends ESTestCase {
         EirfRowReader row0 = batch.getRowReader(0);
         assertEquals(EirfType.FIXED_ARRAY, row0.getTypeByte(0));
 
-        EirfArray reader = row0.getArrayValue(0);
+        EirfArrayReader reader = row0.getArrayValue(0);
         assertTrue(reader.next());
         assertEquals(EirfType.INT, reader.type());
         assertEquals(1, reader.intValue());

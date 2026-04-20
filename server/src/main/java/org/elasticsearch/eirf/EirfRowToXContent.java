@@ -104,7 +104,7 @@ public final class EirfRowToXContent {
         }
     }
 
-    static void writeArray(EirfArray reader, XContentBuilder builder) throws IOException {
+    static void writeArray(EirfArrayReader reader, XContentBuilder builder) throws IOException {
         builder.startArray();
         while (reader.next()) {
             writeElementValue(reader, builder);
@@ -112,7 +112,7 @@ public final class EirfRowToXContent {
         builder.endArray();
     }
 
-    private static void writeElementValue(EirfArray array, XContentBuilder builder) throws IOException {
+    private static void writeElementValue(EirfArrayReader array, XContentBuilder builder) throws IOException {
         switch (array.type()) {
             case EirfType.INT -> builder.value(array.intValue());
             case EirfType.FLOAT -> builder.value(array.floatValue());
@@ -128,7 +128,7 @@ public final class EirfRowToXContent {
         }
     }
 
-    static void writeKeyValue(EirfKeyValue kv, XContentBuilder builder) throws IOException {
+    static void writeKeyValue(EirfKeyValueReader kv, XContentBuilder builder) throws IOException {
         builder.startObject();
         while (kv.next()) {
             builder.field(kv.key());
@@ -137,7 +137,7 @@ public final class EirfRowToXContent {
         builder.endObject();
     }
 
-    private static void writeKvValue(EirfKeyValue kv, XContentBuilder builder) throws IOException {
+    private static void writeKvValue(EirfKeyValueReader kv, XContentBuilder builder) throws IOException {
         switch (kv.type()) {
             case EirfType.INT -> builder.value(kv.intValue());
             case EirfType.FLOAT -> builder.value(kv.floatValue());

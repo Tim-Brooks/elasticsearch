@@ -282,7 +282,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
     }
 
     private Token nextArrayFrameToken() {
-        EirfArray reader = (EirfArray) compoundReaders[compoundDepth - 1];
+        EirfArrayReader reader = (EirfArrayReader) compoundReaders[compoundDepth - 1];
         if (reader.next()) {
             return emitArrayElementValue(reader);
         } else {
@@ -292,7 +292,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
         }
     }
 
-    private Token emitArrayElementValue(EirfArray reader) {
+    private Token emitArrayElementValue(EirfArrayReader reader) {
         byte elemType = reader.type();
         switch (elemType) {
             case EirfType.INT -> {
@@ -342,7 +342,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
     }
 
     private Token nextKvFrameToken() {
-        EirfKeyValue kv = (EirfKeyValue) compoundReaders[compoundDepth - 1];
+        EirfKeyValueReader kv = (EirfKeyValueReader) compoundReaders[compoundDepth - 1];
         if (compoundNeedValue[compoundDepth - 1]) {
             compoundNeedValue[compoundDepth - 1] = false;
             return emitKvValue(kv);
@@ -358,7 +358,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
         return currentToken;
     }
 
-    private Token emitKvValue(EirfKeyValue kv) {
+    private Token emitKvValue(EirfKeyValueReader kv) {
         byte kvType = kv.type();
         switch (kvType) {
             case EirfType.INT -> {

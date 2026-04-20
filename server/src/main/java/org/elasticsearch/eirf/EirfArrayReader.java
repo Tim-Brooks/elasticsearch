@@ -31,7 +31,7 @@ import java.nio.charset.StandardCharsets;
  * and do not advance the cursor. There is no need to call {@code advance()} or consume
  * the value before calling {@code next()} again.
  */
-public final class EirfArray {
+public final class EirfArrayReader {
 
     private final byte[] data;
     private final int endOffset;
@@ -40,8 +40,8 @@ public final class EirfArray {
 
     private int pos;
     private byte elemType;
-    private int dataStart; // start of current element's data (past type byte)
-    private int dataEnd;   // end of current element's data (next element starts here)
+    private int currentStart; // start of current element's data (past type byte)
+    private int nextStart;   // end of current element's data (next element starts here)
 
     /**
      * Creates an array reader.
@@ -50,7 +50,7 @@ public final class EirfArray {
      * @param length total byte length of the array payload
      * @param fixed true for FIXED_ARRAY format, false for UNION_ARRAY
      */
-    public EirfArray(byte[] data, int offset, int length, boolean fixed) {
+    public EirfArrayReader(byte[] data, int offset, int length, boolean fixed) {
         this.data = data;
         this.endOffset = offset + length;
         this.fixed = fixed;
@@ -64,11 +64,11 @@ public final class EirfArray {
             this.fixedType = 0;
             this.pos = offset;
         }
-        this.dataEnd = this.pos;
+        this.nextStart = this.pos;
     }
 
     /** Creates an array reader over the full byte array. */
-    public EirfArray(byte[] data, boolean fixed) {
+    public EirfArrayReader(byte[] data, boolean fixed) {
         this(data, 0, data.length, fixed);
     }
 
@@ -77,7 +77,7 @@ public final class EirfArray {
      * Handles all positioning — any unconsumed data from the previous element is skipped automatically.
      */
     public boolean next() {
-        pos = dataEnd;
+        pos = nextStart;
         if (pos >= endOffset) {
             return false;
         }
@@ -87,9 +87,9 @@ public final class EirfArray {
             elemType = data[pos];
             pos++;
         }
-        dataStart = pos;
+        currentStart = pos;
         int size = EirfType.elemDataSize(elemType);
-        dataEnd = size >= 0 ? pos + size : pos + 4 + ByteUtils.readIntLE(data, pos);
+        nextStart = size >= 0 ? pos + size : pos + 4 + ByteUtils.readIntLE(data, pos);
         return true;
     }
 
@@ -112,44 +112,44 @@ public final class EirfArray {
     }
 
     public int intValue() {
-        return ByteUtils.readIntLE(data, dataStart);
+        return ByteUtils.readIntLE(data, currentStart);
     }
 
     public float floatValue() {
-        return Float.intBitsToFloat(ByteUtils.readIntLE(data, dataStart));
+        return Float.intBitsToFloat(ByteUtils.readIntLE(data, currentStart));
     }
 
     public long longValue() {
-        return ByteUtils.readLongLE(data, dataStart);
+        return ByteUtils.readLongLE(data, currentStart);
     }
 
     public double doubleValue() {
-        return Double.longBitsToDouble(ByteUtils.readLongLE(data, dataStart));
+        return Double.longBitsToDouble(ByteUtils.readLongLE(data, currentStart));
     }
 
     public String stringValue() {
-        int len = ByteUtils.readIntLE(data, dataStart);
-        return new String(data, dataStart + 4, len, StandardCharsets.UTF_8);
+        int len = ByteUtils.readIntLE(data, currentStart);
+        return new String(data, currentStart + 4, len, StandardCharsets.UTF_8);
     }
 
     /**
-     * Creates a child {@link EirfArray} reader over the current compound array element's payload.
+     * Creates a child {@link EirfArrayReader} reader over the current compound array element's payload.
      * The current element must be a UNION_ARRAY or FIXED_ARRAY.
      */
-    public EirfArray nestedArray() {
-        int len = ByteUtils.readIntLE(data, dataStart);
-        int off = dataStart + 4;
+    public EirfArrayReader nestedArray() {
+        int len = ByteUtils.readIntLE(data, currentStart);
+        int off = currentStart + 4;
         boolean isFixed = elemType == EirfType.FIXED_ARRAY;
-        return new EirfArray(data, off, len, isFixed);
+        return new EirfArrayReader(data, off, len, isFixed);
     }
 
     /**
-     * Creates a child {@link EirfKeyValue} reader over the current compound element's payload.
+     * Creates a child {@link EirfKeyValueReader} reader over the current compound element's payload.
      * The current element must be of type KEY_VALUE.
      */
-    public EirfKeyValue nestedKeyValue() {
-        int len = ByteUtils.readIntLE(data, dataStart);
-        int off = dataStart + 4;
-        return new EirfKeyValue(data, off, len);
+    public EirfKeyValueReader nestedKeyValue() {
+        int len = ByteUtils.readIntLE(data, currentStart);
+        int off = currentStart + 4;
+        return new EirfKeyValueReader(data, off, len);
     }
 }
