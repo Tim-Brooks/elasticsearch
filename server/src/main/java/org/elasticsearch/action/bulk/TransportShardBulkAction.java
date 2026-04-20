@@ -197,7 +197,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         if (ShardBatchIndexer.canUseBatchIndexing(request, batchIndexingEnabled)) {
             ShardBatchIndexer.performBatchIndexOnPrimary(
                 request.items(),
-                request.getEirfBatch(),
+                request.getBulkShardBatch().getEirfBatch(),
                 context,
                 listener.delegateFailure((delegate, ctx) -> {
                     if (context.hasMoreOperationsToExecute() == false) {
@@ -755,7 +755,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             if (ShardBatchIndexer.canUseBatchIndexing(request, batchIndexingEnabled)) {
                 ShardBatchIndexer.ReplicaBatchResult batchResult = ShardBatchIndexer.performBatchIndexOnReplica(
                     request.items(),
-                    request.getEirfBatch(),
+                    request.getBulkShardBatch().getEirfBatch(),
                     replica
                 );
                 if (batchResult.processedItems() < request.items().length) {

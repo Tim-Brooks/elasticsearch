@@ -101,7 +101,7 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
 
     private static BulkShardRequest requestWithBatch(BulkItemRequest[] items, EirfBatch batch) {
         BulkShardRequest request = new BulkShardRequest(SHARD_ID, RefreshPolicy.NONE, items);
-        request.setEirfBatch(batch);
+        request.setBulkShardBatch(new BulkShardBatch(batch));
         return request;
     }
 

@@ -490,6 +490,9 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             );
             releaseOnFinish.close();
         } else {
+            if (ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled()) {
+                convertToEirf(bulkShardRequest);
+            }
             client.executeLocally(TransportShardBulkAction.TYPE, bulkShardRequest, new ActionListener<>() {
 
                 // Lazily get the project metadata to avoid keeping it around longer than it is needed
@@ -554,6 +557,10 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                 }
             });
         }
+    }
+
+    private void convertToEirf(BulkShardRequest bulkShardRequest) {
+
     }
 
     private void handleShardFailure(BulkShardRequest bulkShardRequest, ProjectMetadata projectMetadata, Exception e) {

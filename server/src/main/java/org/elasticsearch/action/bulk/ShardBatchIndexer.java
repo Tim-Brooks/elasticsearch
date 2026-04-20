@@ -76,7 +76,7 @@ public final class ShardBatchIndexer {
         if (batchIndexingEnabled == false) {
             return false;
         }
-        if (request.getEirfBatch() == null) {
+        if (request.getBulkShardBatch() == null) {
             return false;
         }
         for (BulkItemRequest item : request.items()) {

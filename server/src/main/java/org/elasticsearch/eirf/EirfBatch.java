@@ -35,17 +35,14 @@ public final class EirfBatch implements Releasable, Accountable {
     public static final int MAGIC_LE = ('e' & 0xFF) | (('i' & 0xFF) << 8) | (('r' & 0xFF) << 16) | (('f' & 0xFF) << 24);
     public static final int VERSION = 1;
 
-    private final BytesReference data;
-    private final Releasable releasable;
     private final int docCount;
-    private final EirfSchema schema;
     private final int docIndexOffset;
     private final int dataOffset;
+    private final EirfSchema schema;
+    private final BytesReference data;
+    private final Releasable releasable;
 
     public EirfBatch(BytesReference data, Releasable releasable) {
-        this.data = data;
-        this.releasable = releasable;
-
         int magic = data.getIntLE(0);
         if (magic != MAGIC_LE) {
             throw new IllegalArgumentException(
@@ -67,6 +64,8 @@ public final class EirfBatch implements Releasable, Accountable {
         this.dataOffset = data.getIntLE(24);
 
         this.schema = parseSchema(data, schemaOffset);
+        this.data = data;
+        this.releasable = releasable;
     }
 
     private static EirfSchema parseSchema(BytesReference data, int offset) {
@@ -110,6 +109,10 @@ public final class EirfBatch implements Releasable, Accountable {
     // TODO: Move directly to bytes reference
     static int readU16LE(BytesReference data, int offset) {
         return (data.get(offset) & 0xFF) | ((data.get(offset + 1) & 0xFF) << 8);
+    }
+
+    public BytesReference data() {
+        return data;
     }
 
     public int docCount() {
