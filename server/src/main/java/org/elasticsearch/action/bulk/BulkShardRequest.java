@@ -127,6 +127,9 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
 
     public long totalSizeInBytes() {
         long totalSizeInBytes = 0;
+        if (bulkShardBatch != null) {
+            return bulkShardBatch.getEirfBatch().data().length();
+        }
         for (int i = 0; i < items.length; i++) {
             DocWriteRequest<?> request = items[i].request();
             if (request instanceof IndexRequest) {

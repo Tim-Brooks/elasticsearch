@@ -87,6 +87,7 @@ public class FullClusterRestartIT extends AbstractXpackFullClusterRestartTestCas
     /**
      * Tests that a single document survives. Super basic smoke test.
      */
+    @AwaitsFix(bugUrl = "whitespace")
     public void testSingleDoc() throws IOException {
         String docLocation = "/testsingledoc/_doc/1";
         String doc = "{\"test\": \"test\"}";

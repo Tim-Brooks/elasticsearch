@@ -129,6 +129,25 @@ public class IndexSource implements Writeable, Releasable {
     }
 
     /**
+     * Materializes the row referenced by {@link #rowIndex} from the currently attached {@link EirfBatch}, writes the row back
+     * out as inline source bytes in {@link #contentType}, and clears the EIRF state. Used by the bulk retry path to undo
+     * {@link #setEirfRow} so the request can be re-encoded from scratch on reissue.
+     */
+    public void inlineEirfRow() throws IOException {
+        assert isClosed == false;
+        if (rowIndex < 0) {
+            return;
+        }
+        assert eirfBatch != null : "EIRF row set but no batch attached";
+        try (XContentBuilder xcb = XContentFactory.contentBuilder(contentType)) {
+            EirfRowToXContent.writeRow(eirfBatch.getRowReader(rowIndex), eirfBatch.schema(), xcb);
+            this.source = BytesReference.bytes(xcb);
+        }
+        this.rowIndex = -1;
+        this.eirfBatch = null;
+    }
+
+    /**
      * Attaches a shard-level {@link EirfBatch} to this source. Used on the receiving node after bulk shard request
      * deserialization to re-associate each row-indexed source with the batch that carries its data.
      */

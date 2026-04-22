@@ -70,7 +70,9 @@ public final class EirfRowToXContent {
         throws IOException {
         switch (type) {
             case EirfType.INT -> builder.field(leafName, row.getIntValue(leafIdx));
-            case EirfType.FLOAT -> builder.field(leafName, row.getFloatValue(leafIdx));
+            // Emit as double so the textual form preserves enough precision for downstream double re-parsers
+            // (e.g. scaled_float); the value still round-trips bit-for-bit because (double)(float)val == val held at encode time.
+            case EirfType.FLOAT -> builder.field(leafName, (double) row.getFloatValue(leafIdx));
             case EirfType.LONG -> builder.field(leafName, row.getLongValue(leafIdx));
             case EirfType.DOUBLE -> builder.field(leafName, row.getDoubleValue(leafIdx));
             case EirfType.STRING -> {
@@ -107,7 +109,7 @@ public final class EirfRowToXContent {
     private static void writeElementValue(EirfArrayReader array, XContentBuilder builder) throws IOException {
         switch (array.type()) {
             case EirfType.INT -> builder.value(array.intValue());
-            case EirfType.FLOAT -> builder.value(array.floatValue());
+            case EirfType.FLOAT -> builder.value((double) array.floatValue());
             case EirfType.LONG -> builder.value(array.longValue());
             case EirfType.DOUBLE -> builder.value(array.doubleValue());
             case EirfType.STRING -> builder.value(array.stringValue());
@@ -132,7 +134,7 @@ public final class EirfRowToXContent {
     private static void writeKvValue(EirfKeyValueReader kv, XContentBuilder builder) throws IOException {
         switch (kv.type()) {
             case EirfType.INT -> builder.value(kv.intValue());
-            case EirfType.FLOAT -> builder.value(kv.floatValue());
+            case EirfType.FLOAT -> builder.value((double) kv.floatValue());
             case EirfType.LONG -> builder.value(kv.longValue());
             case EirfType.DOUBLE -> builder.value(kv.doubleValue());
             case EirfType.STRING -> builder.value(kv.stringValue());
