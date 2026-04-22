@@ -259,8 +259,7 @@ public class EirfRowToXContentTests extends ESTestCase {
             builder.setString("q.z", "z1");
             builder.endDocument();
 
-            BytesReference bytes = toBytes(builder, 1);
-            Map<String, Object> map = XContentHelper.convertToMap(bytes, false, XContentType.JSON).v2();
+            Map<String, Object> map = roundTrip(builder, 1);
             assertEquals(Map.of("a", "a1", "b", "b1"), map.get("p"));
             assertEquals(Map.of("z", "z1"), map.get("q"));
         }
@@ -275,12 +274,6 @@ public class EirfRowToXContentTests extends ESTestCase {
     private static Map<String, Object> rowAsMap(EirfBatch batch, int rowIndex) throws IOException {
         BytesReference bytes = writeRowToJson(batch, rowIndex);
         return XContentHelper.convertToMap(bytes, false, XContentType.JSON).v2();
-    }
-
-    private static BytesReference toBytes(EirfRowBuilder builder, int rowIndex) throws IOException {
-        try (EirfBatch batch = builder.build()) {
-            return writeRowToJson(batch, rowIndex);
-        }
     }
 
     private static BytesReference writeRowToJson(EirfBatch batch, int rowIndex) throws IOException {
