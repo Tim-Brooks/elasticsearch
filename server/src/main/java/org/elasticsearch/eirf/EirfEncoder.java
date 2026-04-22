@@ -382,6 +382,13 @@ public class EirfEncoder implements Releasable {
                         break;
                     }
                 }
+                // FIXED_ARRAY is byte-length-terminated with no element count, so a zero-data-size shared
+                // type (NULL/TRUE/FALSE) would be indistinguishable from an empty array. Force UNION in
+                // that case so each element contributes its type byte and the reader can iterate.
+                // TODO: consider serializing element count.
+                if (useFixed && EirfType.elemDataSize(sharedType) == 0) {
+                    useFixed = false;
+                }
             }
 
             byte[] packed;
