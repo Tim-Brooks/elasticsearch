@@ -181,10 +181,15 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
             // Inferencing metadata should have been consumed as part of the ShardBulkInferenceActionFilter processing
             throw new IllegalStateException("Inference metadata should have been consumed before writing to the stream");
         }
+        boolean supportsBatch = out.getTransportVersion().supports(BULK_SHARD_BATCH);
+        if (supportsBatch == false && bulkShardBatch != null) {
+            BulkShardBatch.inlineSources(bulkShardBatch.getEirfBatch(), items);
+            bulkShardBatch = null;
+        }
         super.writeTo(out);
         out.writeArray((o, item) -> o.writeOptional(BulkItemRequest.THIN_WRITER, item), items);
         out.writeBoolean(isSimulated);
-        if (out.getTransportVersion().supports(BULK_SHARD_BATCH)) {
+        if (supportsBatch) {
             out.writeOptionalWriteable(bulkShardBatch);
         }
     }

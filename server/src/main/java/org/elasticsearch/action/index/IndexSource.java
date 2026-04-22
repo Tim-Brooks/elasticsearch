@@ -44,7 +44,7 @@ public class IndexSource implements Writeable, Releasable {
 
     public IndexSource(XContentType contentType, BytesReference source) {
         this.contentType = contentType;
-        this.source = ReleasableBytesReference.wrap(source);
+        this.source = source;
     }
 
     public IndexSource(StreamInput in) throws IOException {
@@ -54,10 +54,9 @@ public class IndexSource implements Writeable, Releasable {
         } else {
             contentType = null;
         }
-        source = ReleasableBytesReference.wrap(in.readBytesReference());
+        source = in.readBytesReference();
         if (in.getTransportVersion().supports(BULK_SHARD_BATCH)) {
-            // 0 means no row; N+1 encodes row index N.
-            rowIndex = in.readInt() - 1;
+            rowIndex = in.readInt();
         }
     }
 
@@ -72,7 +71,9 @@ public class IndexSource implements Writeable, Releasable {
         }
         out.writeBytesReference(source);
         if (out.getTransportVersion().supports(BULK_SHARD_BATCH)) {
-            out.writeInt(rowIndex + 1);
+            out.writeInt(rowIndex);
+        } else {
+            assert rowIndex == -1 : "rowIndex must be -1 if transport version is < " + BULK_SHARD_BATCH;
         }
     }
 
@@ -278,5 +279,6 @@ public class IndexSource implements Writeable, Releasable {
         assert isClosed == false;
         this.source = source;
         this.contentType = contentType;
+        this.rowIndex = -1;
     }
 }

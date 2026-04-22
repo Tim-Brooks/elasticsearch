@@ -49,8 +49,6 @@ import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.TimeValue;
-import org.elasticsearch.eirf.EirfBatch;
-import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.IndexSettings;
@@ -492,8 +490,13 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             );
             releaseOnFinish.close();
         } else {
-            if (shouldConvertToEirf(bulkShardRequest)) {
-                convertToEirf(bulkShardRequest);
+            if (shouldConvertToShardBatch(bulkShardRequest)) {
+                try {
+                    BulkShardBatch shardBatch = BulkShardBatch.createShardBatch(bulkShardRequest);
+                    bulkShardRequest.setBulkShardBatch(shardBatch);
+                } catch (Exception e) {
+                    logger.debug("skipping BulkShardBatch conversion for shard bulk request", e);
+                }
             }
             client.executeLocally(TransportShardBulkAction.TYPE, bulkShardRequest, new ActionListener<>() {
 
@@ -561,7 +564,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         }
     }
 
-    private static boolean shouldConvertToEirf(BulkShardRequest bulkShardRequest) {
+    private static boolean shouldConvertToShardBatch(BulkShardRequest bulkShardRequest) {
         if (ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled() == false || bulkShardRequest.isSimulated()) {
             return false;
         }
@@ -580,28 +583,6 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             }
         }
         return true;
-    }
-
-    private void convertToEirf(BulkShardRequest bulkShardRequest) {
-        BulkItemRequest[] items = bulkShardRequest.items();
-
-        EirfBatch batch;
-        try (EirfEncoder encoder = new EirfEncoder()) {
-            for (BulkItemRequest item : items) {
-                IndexRequest indexRequest = (IndexRequest) item.request();
-                encoder.addDocument(indexRequest.indexSource().bytes(), indexRequest.getContentType());
-            }
-            batch = encoder.build();
-        } catch (Exception e) {
-            logger.debug("skipping EIRF conversion for shard bulk request", e);
-            return;
-        }
-
-        for (int i = 0; i < items.length; i++) {
-            IndexRequest indexRequest = (IndexRequest) items[i].request();
-            indexRequest.indexSource().setEirfRow(i);
-        }
-        bulkShardRequest.setBulkShardBatch(new BulkShardBatch(batch));
     }
 
     private void handleShardFailure(BulkShardRequest bulkShardRequest, ProjectMetadata projectMetadata, Exception e) {

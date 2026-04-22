@@ -89,49 +89,49 @@ public final class EirfRowBuilder implements Releasable {
     }
 
     public void setString(String path, String value) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         setStringAt(colIdx, value);
     }
 
     public void setString(String path, byte[] utf8, int offset, int length) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         setStringAt(colIdx, utf8, offset, length);
     }
 
     public void setInt(String path, int value) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         setIntAt(colIdx, value);
     }
 
     public void setLong(String path, long value) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         setLongAt(colIdx, value);
     }
 
     public void setFloat(String path, float value) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         setFloatAt(colIdx, value);
     }
 
     public void setDouble(String path, double value) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         setDoubleAt(colIdx, value);
     }
 
     public void setBoolean(String path, boolean value) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = value ? EirfType.TRUE : EirfType.FALSE;
     }
 
     public void setNull(String path) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.NULL;
     }
 
     public void setBinary(String path, BytesReference bytes) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.BINARY;
         scratch.varData[colIdx] = bytes;
@@ -140,7 +140,7 @@ public final class EirfRowBuilder implements Releasable {
     }
 
     public void setUnionArray(String path, byte[] packed) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.UNION_ARRAY;
         scratch.varData[colIdx] = new BytesArray(packed);
@@ -149,7 +149,7 @@ public final class EirfRowBuilder implements Releasable {
     }
 
     public void setFixedArray(String path, byte[] packed) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.FIXED_ARRAY;
         scratch.varData[colIdx] = new BytesArray(packed);
@@ -158,7 +158,7 @@ public final class EirfRowBuilder implements Releasable {
     }
 
     public void setKeyValue(String path, byte[] bytes) {
-        int colIdx = resolveColumn(path);
+        int colIdx = expandDotsAndResolveColumn(path);
         checkNotSet(colIdx);
         scratch.typeBytes[colIdx] = EirfType.KEY_VALUE;
         scratch.varData[colIdx] = new BytesArray(bytes);
@@ -241,7 +241,7 @@ public final class EirfRowBuilder implements Releasable {
      * Resolves a dot-separated path into a leaf column index, creating
      * intermediate non-leaf fields as needed.
      */
-    private int resolveColumn(String path) {
+    private int expandDotsAndResolveColumn(String path) {
         if (inDocument == false) {
             throw new IllegalStateException("Not in a document");
         }
