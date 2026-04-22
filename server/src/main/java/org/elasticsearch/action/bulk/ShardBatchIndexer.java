@@ -167,7 +167,7 @@ public final class ShardBatchIndexer {
                         primary.getRelativeTimeInNanos()
                     );
                 } catch (Exception e) {
-                    logger.debug("batch indexing on primary failed to prepare index for item [{}], falling back", i, e);
+                    logger.warn("batch indexing on primary failed to prepare index for item [{}], falling back", i, e);
                     return;
                 }
                 if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
@@ -256,7 +256,7 @@ public final class ShardBatchIndexer {
                         replica.getRelativeTimeInNanos()
                     );
                 } catch (Exception e) {
-                    logger.debug("batch indexing on replica failed to prepare index for item [{}], falling back", i, e);
+                    logger.warn("batch indexing on replica failed to prepare index for item [{}], falling back", i, e);
                     break;
                 }
                 if (operation.parsedDoc().dynamicMappingsUpdate() != null) {
@@ -293,7 +293,7 @@ public final class ShardBatchIndexer {
         return new ReplicaBatchResult(processedItems, location);
     }
 
-    private static BytesReference rowToSource(EirfRowReader row, EirfSchema schema, XContentType xContentType) throws IOException {
+    static BytesReference rowToSource(EirfRowReader row, EirfSchema schema, XContentType xContentType) throws IOException {
         try (XContentBuilder builder = XContentBuilder.builder(xContentType.xContent())) {
             EirfRowToXContent.writeRow(row, schema, builder);
             return BytesReference.bytes(builder);

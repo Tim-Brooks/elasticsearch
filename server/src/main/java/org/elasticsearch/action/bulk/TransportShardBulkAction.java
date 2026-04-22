@@ -44,6 +44,7 @@ import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Strings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.core.Tuple;
+import org.elasticsearch.eirf.EirfBatch;
 import org.elasticsearch.index.IndexingPressure;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.engine.VersionConflictEngineException;
@@ -71,7 +72,6 @@ import org.elasticsearch.xcontent.XContentType;
 import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.Executor;
-import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.function.ObjLongConsumer;
 
@@ -94,7 +94,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
 
     private final UpdateHelper updateHelper;
     private final MappingUpdatedAction mappingUpdatedAction;
-    private final Consumer<Runnable> postWriteAction;
     private final boolean batchIndexingEnabled;
 
     private final DocumentParsingProvider documentParsingProvider;
@@ -135,7 +134,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         );
         this.updateHelper = updateHelper;
         this.mappingUpdatedAction = mappingUpdatedAction;
-        this.postWriteAction = WriteAckDelay.create(settings, threadPool);
         this.batchIndexingEnabled = ShardBatchIndexer.BATCH_INDEXING.get(settings);
         this.documentParsingProvider = documentParsingProvider;
     }
@@ -209,8 +207,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                                 context.getLocationToSync(),
                                 primary,
                                 logger,
-                                postWriteRefresh,
-                                postWriteAction
+                                postWriteRefresh
                             )
                         );
                     } else {
@@ -260,7 +257,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             var index = primary.shardId().getIndex();
             var indexMetadata = clusterState.metadata().lookupProject(index).map(p -> p.index(index)).orElse(null);
             return indexMetadata == null || (indexMetadata.mapping() != null && indexMetadata.getMappingVersion() != initialMappingVersion);
-        }), listener, executor(primary), postWriteRefresh, postWriteAction, documentParsingProvider, batchContext, startBatchTime);
+        }), listener, executor(primary), postWriteRefresh, documentParsingProvider, batchContext, startBatchTime);
     }
 
     @Override
@@ -303,7 +300,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             listener,
             executor,
             null,
-            null,
             DocumentParsingProvider.EMPTY_INSTANCE
         );
     }
@@ -318,7 +314,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         ActionListener<PrimaryResult<BulkShardRequest, BulkShardResponse>> listener,
         Executor executor,
         @Nullable PostWriteRefresh postWriteRefresh,
-        @Nullable Consumer<Runnable> postWriteAction,
         DocumentParsingProvider documentParsingProvider
     ) {
         performOnPrimary(
@@ -331,7 +326,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             listener,
             executor,
             postWriteRefresh,
-            postWriteAction,
             documentParsingProvider,
             new BulkPrimaryExecutionContext(request, primary),
             System.nanoTime()
@@ -348,7 +342,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         ActionListener<PrimaryResult<BulkShardRequest, BulkShardResponse>> listener,
         Executor executor,
         @Nullable PostWriteRefresh postWriteRefresh,
-        @Nullable Consumer<Runnable> postWriteAction,
         DocumentParsingProvider documentParsingProvider,
         BulkPrimaryExecutionContext context,
         long startBulkTime
@@ -423,8 +416,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                         context.getLocationToSync(),
                         context.getPrimary(),
                         logger,
-                        postWriteRefresh,
-                        postWriteAction
+                        postWriteRefresh
                     )
                 );
             }
@@ -499,9 +491,10 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             final IndexRequest request = context.getRequestToExecute();
 
             XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(request);
+            final BytesReference source = materializeSource(request, context.getBulkShardRequest());
             final SourceToParse sourceToParse = new SourceToParse(
                 request.id(),
-                request.source(),
+                source,
                 request.getContentType(),
                 request.routing(),
                 request.getDynamicTemplates(),
@@ -767,7 +760,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                 location = performOnReplica(request, replica);
             }
             replica.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBulkTime);
-            return new WriteReplicaResult<>(request, location, null, replica, logger, postWriteAction);
+            return new WriteReplicaResult<>(request, location, null, replica, logger);
         });
     }
 
@@ -822,7 +815,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                     continue; // ignore replication as it's a noop
                 }
                 assert response.getResponse().getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO;
-                operationResult = performOpOnReplica(response.getResponse(), item.request(), replica);
+                operationResult = performOpOnReplica(response.getResponse(), item.request(), replica, request);
             }
             assert operationResult != null : "operation result must never be null when primary response has no failure";
             location = syncOperationResultOrThrow(operationResult, location);
@@ -833,13 +826,14 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     private static Engine.Result performOpOnReplica(
         DocWriteResponse primaryResponse,
         DocWriteRequest<?> docWriteRequest,
-        IndexShard replica
+        IndexShard replica,
+        BulkShardRequest shardRequest
     ) throws Exception {
         final Engine.Result result;
         switch (docWriteRequest.opType()) {
             case CREATE, INDEX -> {
                 final IndexRequest indexRequest = (IndexRequest) docWriteRequest;
-                final SourceToParse sourceToParse = replicaSourceToParse(indexRequest);
+                final SourceToParse sourceToParse = replicaSourceToParse(indexRequest, shardRequest);
                 result = replica.applyIndexOperationOnReplica(
                     primaryResponse.getSeqNo(),
                     primaryResponse.getPrimaryTerm(),
@@ -880,10 +874,11 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         return result;
     }
 
-    static SourceToParse replicaSourceToParse(IndexRequest indexRequest) {
+    static SourceToParse replicaSourceToParse(IndexRequest indexRequest, BulkShardRequest shardRequest) throws IOException {
+        final BytesReference source = materializeSource(indexRequest, shardRequest);
         return new SourceToParse(
             indexRequest.id(),
-            indexRequest.source(),
+            source,
             indexRequest.getContentType(),
             indexRequest.routing(),
             Map.of(),
@@ -892,5 +887,20 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             XContentMeteringParserDecorator.NOOP,
             indexRequest.tsid()
         );
+    }
+
+    /**
+     * Returns source bytes for the request. When the coordinator has externalized the source into the shard-level EIRF batch,
+     * reconstitutes the original document bytes from the corresponding row.
+     */
+    private static BytesReference materializeSource(IndexRequest request, BulkShardRequest shardRequest) throws IOException {
+        if (request.indexSource().hasEirfRow() == false) {
+            return request.source();
+        }
+        final BulkShardBatch bulkShardBatch = shardRequest.getBulkShardBatch();
+        assert bulkShardBatch != null : "IndexRequest has EIRF row index but BulkShardRequest has no batch";
+        final EirfBatch batch = bulkShardBatch.getEirfBatch();
+        final int rowIdx = request.indexSource().rowIndex();
+        return ShardBatchIndexer.rowToSource(batch.getRowReader(rowIdx), batch.schema(), request.getContentType());
     }
 }

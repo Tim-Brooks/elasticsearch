@@ -49,6 +49,8 @@ import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.eirf.EirfBatch;
+import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.IndexSettings;
@@ -560,7 +562,41 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     }
 
     private void convertToEirf(BulkShardRequest bulkShardRequest) {
+        if (bulkShardRequest.isSimulated()) {
+            return;
+        }
+        final BulkItemRequest[] items = bulkShardRequest.items();
+        if (items.length == 0) {
+            return;
+        }
+        for (BulkItemRequest item : items) {
+            final DocWriteRequest<?> request = item.request();
+            if (request instanceof IndexRequest indexRequest) {
+                if (indexRequest.indexSource().hasSource() == false || indexRequest.getContentType() == null) {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
 
+        EirfBatch batch = null;
+        try (EirfEncoder encoder = new EirfEncoder()) {
+            for (BulkItemRequest item : items) {
+                IndexRequest indexRequest = (IndexRequest) item.request();
+                encoder.addDocument(indexRequest.indexSource().bytes(), indexRequest.getContentType());
+            }
+            batch = encoder.build();
+        } catch (Exception e) {
+            logger.debug("skipping EIRF conversion for shard bulk request", e);
+            return;
+        }
+
+        for (int i = 0; i < items.length; i++) {
+            IndexRequest indexRequest = (IndexRequest) items[i].request();
+            indexRequest.indexSource().setEirfRow(i);
+        }
+        bulkShardRequest.setBulkShardBatch(new BulkShardBatch(batch));
     }
 
     private void handleShardFailure(BulkShardRequest bulkShardRequest, ProjectMetadata projectMetadata, Exception e) {

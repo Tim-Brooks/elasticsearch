@@ -24,6 +24,16 @@ import org.elasticsearch.xcontent.XContentString;
  */
 public final class EirfRowReader {
 
+    private static final int ROW_FLAGS_OFFSET = 0;
+    private static final int ROW_COLUMN_COUNT_OFFSET = ROW_FLAGS_OFFSET + 1;
+    // The offset to read the var_offset
+    private static final int ROW_VAR_SECTION_OFFSET_OFFSET = ROW_COLUMN_COUNT_OFFSET + 2;
+
+    // Var section offset is u16 so + 2
+    private static final int SMALL_ROW_TYPE_BYTES_OFFSET = ROW_VAR_SECTION_OFFSET_OFFSET + 2;
+    // Var section offset is i32 so + 4
+    private static final int ROW_TYPE_BYTES_OFFSET = ROW_VAR_SECTION_OFFSET_OFFSET + 4;
+
     private final EirfSchema schema;
     private final BytesReference rowData;
     private final boolean smallRow;
@@ -33,25 +43,22 @@ public final class EirfRowReader {
     private final int varSectionOffset;
 
     // TODO: This class currently does a scan to read every value. We will eventually want to optimize this for sequentially reading over a
-    // row.
+    // row with some type of cursor.
     public EirfRowReader(BytesReference rowData, EirfSchema schema) {
         this.rowData = rowData;
         this.schema = schema;
 
-        // Parse row_flags (u8 at offset 0)
-        byte rowFlags = rowData.get(0);
+        // TODO: Could consider packing all these reads into one and unpacking the values.
+        byte rowFlags = rowData.get(ROW_FLAGS_OFFSET);
         this.smallRow = (rowFlags & 0x01) != 0;
+        this.rowColumnCount = EirfBatch.readU16LE(rowData, ROW_COLUMN_COUNT_OFFSET);
 
-        // Parse column_count (u16 LE at offset 1)
-        this.rowColumnCount = EirfBatch.readU16LE(rowData, 1);
-
-        // Parse var_offset (u16 LE or i32 LE at offset 3)
         if (smallRow) {
-            this.varSectionOffset = EirfBatch.readU16LE(rowData, 3);
-            this.typeBytesOffset = 5; // 1 + 2 + 2
+            this.varSectionOffset = EirfBatch.readU16LE(rowData, ROW_VAR_SECTION_OFFSET_OFFSET);
+            this.typeBytesOffset = SMALL_ROW_TYPE_BYTES_OFFSET;
         } else {
-            this.varSectionOffset = rowData.getIntLE(3);
-            this.typeBytesOffset = 7; // 1 + 2 + 4
+            this.varSectionOffset = rowData.getIntLE(ROW_VAR_SECTION_OFFSET_OFFSET);
+            this.typeBytesOffset = ROW_TYPE_BYTES_OFFSET;
         }
         this.fixedSectionOffset = typeBytesOffset + rowColumnCount;
     }
@@ -115,15 +122,15 @@ public final class EirfRowReader {
         return getVarBytesRef(col);
     }
 
-    public EirfKeyValue getKeyValue(int col) {
+    public EirfKeyValueReader getKeyValue(int col) {
         BytesRef ref = getVarBytesRef(col);
-        return new EirfKeyValue(ref.bytes, ref.offset, ref.length);
+        return new EirfKeyValueReader(ref.bytes, ref.offset, ref.length);
     }
 
-    public EirfArray getArrayValue(int col) {
+    public EirfArrayReader getArrayValue(int col) {
         boolean fixed = getTypeByte(col) == EirfType.FIXED_ARRAY;
         BytesRef ref = getVarBytesRef(col);
-        return new EirfArray(ref.bytes, ref.offset, ref.length, fixed);
+        return new EirfArrayReader(ref.bytes, ref.offset, ref.length, fixed);
     }
 
     private BytesRef getVarBytesRef(int col) {

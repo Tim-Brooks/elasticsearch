@@ -10,6 +10,7 @@
 package org.elasticsearch.action.index;
 
 import org.elasticsearch.ElasticsearchGenerationException;
+import org.elasticsearch.TransportVersion;
 import org.elasticsearch.client.internal.Requests;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
@@ -32,8 +33,11 @@ import java.util.Map;
  */
 public class IndexSource implements Writeable, Releasable {
 
+    private static final TransportVersion BULK_SHARD_BATCH = TransportVersion.fromName("bulk_shard_batch");
+
     private XContentType contentType;
     private BytesReference source;
+    private int rowIndex = -1;
     private boolean isClosed = false;
 
     public IndexSource() {}
@@ -51,6 +55,10 @@ public class IndexSource implements Writeable, Releasable {
             contentType = null;
         }
         source = ReleasableBytesReference.wrap(in.readBytesReference());
+        if (in.getTransportVersion().supports(BULK_SHARD_BATCH)) {
+            // 0 means no row; N+1 encodes row index N.
+            rowIndex = in.readVInt() - 1;
+        }
     }
 
     @Override
@@ -63,6 +71,9 @@ public class IndexSource implements Writeable, Releasable {
             out.writeBoolean(false);
         }
         out.writeBytesReference(source);
+        if (out.getTransportVersion().supports(BULK_SHARD_BATCH)) {
+            out.writeVInt(rowIndex + 1);
+        }
     }
 
     public XContentType contentType() {
@@ -77,12 +88,33 @@ public class IndexSource implements Writeable, Releasable {
 
     public boolean hasSource() {
         assert isClosed == false;
-        return source != null;
+        return source != null || rowIndex >= 0;
     }
 
     public int byteLength() {
         assert isClosed == false;
         return source == null ? 0 : source.length();
+    }
+
+    public int rowIndex() {
+        assert isClosed == false;
+        return rowIndex;
+    }
+
+    public boolean hasEirfRow() {
+        assert isClosed == false;
+        return rowIndex >= 0;
+    }
+
+    /**
+     * Replaces the inline source bytes with an empty reference and records the row index into the shard-level EIRF batch.
+     * The {@link XContentType} is preserved so downstream code can still identify the original content type.
+     */
+    public void setEirfRow(int rowIndex) {
+        assert isClosed == false;
+        assert rowIndex >= 0;
+        this.source = BytesArray.EMPTY;
+        this.rowIndex = rowIndex;
     }
 
     public boolean isClosed() {
