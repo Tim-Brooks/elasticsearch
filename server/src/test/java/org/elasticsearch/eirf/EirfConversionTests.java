@@ -87,7 +87,7 @@ public class EirfConversionTests extends ESTestCase {
         batch.close();
     }
 
-    public void testRowToXContentSkipsNullFields() throws IOException {
+    public void testRowToXContentSkipsAbsentFields() throws IOException {
         EirfBatch batch = EirfEncoder.encode(
             List.of(new BytesArray("{\"name\":\"alice\",\"age\":30}"), new BytesArray("{\"age\":25}")),
             XContentType.JSON
@@ -100,6 +100,67 @@ public class EirfConversionTests extends ESTestCase {
         Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
         assertFalse(result.containsKey("name"));
         assertEquals(25, result.get("age"));
+
+        batch.close();
+    }
+
+    public void testRowToXContentEmitsExplicitNull() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"name\":\"alice\",\"age\":null}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        assertEquals("alice", result.get("name"));
+        assertTrue("age column should round-trip as explicit null", result.containsKey("age"));
+        assertNull(result.get("age"));
+
+        batch.close();
+    }
+
+    public void testRowToXContentAbsentVsExplicitNullAcrossDocsInBatch() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(
+            List.of(new BytesArray("{\"name\":\"alice\",\"age\":null}"), new BytesArray("{\"name\":\"bob\"}")),
+            XContentType.JSON
+        );
+
+        // Explicit null round-trips back as null so mappers (e.g. null_value substitution) can act on it.
+        XContentBuilder explicit = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), explicit);
+        explicit.close();
+        Map<String, Object> explicitResult = XContentHelper.convertToMap(BytesReference.bytes(explicit), false, XContentType.JSON).v2();
+        assertEquals("alice", explicitResult.get("name"));
+        assertTrue(explicitResult.containsKey("age"));
+        assertNull(explicitResult.get("age"));
+
+        // The second doc never mentioned "age" — it stays absent rather than materializing as null.
+        XContentBuilder absent = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(1), batch.schema(), absent);
+        absent.close();
+        Map<String, Object> absentResult = XContentHelper.convertToMap(BytesReference.bytes(absent), false, XContentType.JSON).v2();
+        assertEquals("bob", absentResult.get("name"));
+        assertFalse(absentResult.containsKey("age"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentPreservesExplicitNullInNestedObject() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(
+            List.of(new BytesArray("{\"agent\":{\"id\":\"a\",\"optional_version\":null}}")),
+            XContentType.JSON
+        );
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        Map<String, Object> agent = (Map<String, Object>) result.get("agent");
+        assertEquals("a", agent.get("id"));
+        assertTrue(agent.containsKey("optional_version"));
+        assertNull(agent.get("optional_version"));
 
         batch.close();
     }
