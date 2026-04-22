@@ -43,7 +43,7 @@ public final class EirfRowToXContent {
                     continue;
                 }
                 writeLeafValue(row, leafIdx, row.getTypeByte(leafIdx), child.name(), builder);
-            } else if (hasAnyValue(child, row)) {
+            } else if (isNotEmpty(child, row)) {
                 builder.field(child.name());
                 builder.startObject();
                 writeChildren(child, row, builder);
@@ -52,14 +52,14 @@ public final class EirfRowToXContent {
         }
     }
 
-    private static boolean hasAnyValue(EirfRowXContentParser.SchemaNode node, EirfRowReader row) {
+    private static boolean isNotEmpty(EirfRowXContentParser.SchemaNode node, EirfRowReader row) {
         for (EirfRowXContentParser.SchemaNode child : node.children()) {
             if (child.isLeaf()) {
                 int leafIdx = child.leafColumnIndex();
                 if (leafIdx < row.columnCount() && row.isAbsent(leafIdx) == false) {
                     return true;
                 }
-            } else if (hasAnyValue(child, row)) {
+            } else if (isNotEmpty(child, row)) {
                 return true;
             }
         }
