@@ -253,18 +253,6 @@ tests:
 - class: org.elasticsearch.backwards.MixedClusterClientYamlTestSuiteIT
   method: test {p0=mget/60_realtime_refresh/Realtime Refresh}
   issue: https://github.com/elastic/elasticsearch/issues/146410
-- class: org.elasticsearch.xpack.esql.optimizer.rules.physical.local.SubstituteRoundToTests
-  method: testBlockLoaderFallbackForDate {default}
-  issue: https://github.com/elastic/elasticsearch/issues/146459
-- class: org.elasticsearch.xpack.esql.optimizer.rules.physical.local.SubstituteRoundToTests
-  method: testBlockLoaderFallbackForLong {default}
-  issue: https://github.com/elastic/elasticsearch/issues/146460
-- class: org.elasticsearch.xpack.esql.optimizer.rules.physical.local.SubstituteRoundToTests
-  method: testBlockLoaderFallbackForDateNanos {default}
-  issue: https://github.com/elastic/elasticsearch/issues/146461
-- class: org.elasticsearch.xpack.esql.optimizer.rules.physical.local.SubstituteRoundToTests
-  method: testDateTruncNotTransformToQueryAndTags {default}
-  issue: https://github.com/elastic/elasticsearch/issues/146462
 - class: org.elasticsearch.reindex.ReindexBasicTests
   method: testReindexFailsWhenSourceIndexIsClosed
   issue: https://github.com/elastic/elasticsearch/issues/146466
@@ -277,12 +265,6 @@ tests:
 - class: org.elasticsearch.multiproject.test.CoreWithMultipleProjectsClientYamlTestSuiteIT
   method: test {yaml=reindex/10_basic/Response format for updated}
   issue: https://github.com/elastic/elasticsearch/issues/146607
-- class: org.elasticsearch.xpack.esql.qa.single_node.PushExpressionToLoadIT
-  method: testRoundToLong
-  issue: https://github.com/elastic/elasticsearch/issues/146614
-- class: org.elasticsearch.xpack.esql.qa.single_node.PushExpressionToLoadIT
-  method: testRoundToLongExactMatch
-  issue: https://github.com/elastic/elasticsearch/issues/146615
 - class: org.elasticsearch.index.reindex.ReindexRelocationOnShutdownIT
   method: testReindexFailsWhenPitRelocationFails
   issue: https://github.com/elastic/elasticsearch/issues/146650
@@ -487,6 +469,15 @@ tests:
 - class: org.elasticsearch.xpack.esql.tree.EsqlNodeSubclassTests
   method: testReplaceChildren {class org.elasticsearch.xpack.esql.plan.physical.ExchangeSinkExec}
   issue: https://github.com/elastic/elasticsearch/issues/147164
+- class: org.elasticsearch.xpack.inference.action.filter.ShardBulkInferenceActionFilterIT
+  method: testBulkOperations {useLegacyFormat=true useSyntheticSource=true}
+  issue: https://github.com/elastic/elasticsearch/issues/147169
+- class: org.elasticsearch.xpack.prometheus.PrometheusMetadataRestIT
+  method: testMultipleEntriesForSameMetricAcrossStreams
+  issue: https://github.com/elastic/elasticsearch/issues/147170
+- class: org.elasticsearch.xpack.security.operator.OperatorPrivilegesIT
+  method: testNonOperatorUserCanCallAnalyzeRepositoryAPI
+  issue: https://github.com/elastic/elasticsearch/issues/147171
 
 # Examples:
 #
