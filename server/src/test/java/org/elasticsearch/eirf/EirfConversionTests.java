@@ -136,6 +136,43 @@ public class EirfConversionTests extends ESTestCase {
         batch.close();
     }
 
+    public void testRowToXContentFloatEmitsWithDoublePrecision() throws IOException {
+        // 0.10000000149011612 is the exact double representation of 0.1f. The encoder stores it as FLOAT
+        // (because (double)(float)val == val), and we want the rehydrated JSON to keep enough precision for
+        // downstream double parsers rather than collapsing to "0.1".
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"x\":0.10000000149011612}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        String json = BytesReference.bytes(builder).utf8ToString();
+        assertTrue("expected double-precision textual form of 0.1f, got: " + json, json.contains("0.10000000149011612"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentFloatArrayElementsDeserializeAsDouble() throws IOException {
+        // 0.5 and 0.25 are FLOAT-exact, so they pack as a FIXED_ARRAY of FLOAT. After the cast-to-double
+        // fix, array elements round-trip through the double branch of XContentParser.
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"xs\":[0.5,0.25]}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        List<Object> xs = (List<Object>) result.get("xs");
+        assertEquals(2, xs.size());
+        assertTrue("expected double elements, got: " + xs.get(0).getClass(), xs.get(0) instanceof Double);
+        assertTrue("expected double elements, got: " + xs.get(1).getClass(), xs.get(1) instanceof Double);
+        assertEquals(0.5, (Double) xs.get(0), 0.0);
+        assertEquals(0.25, (Double) xs.get(1), 0.0);
+
+        batch.close();
+    }
+
     @SuppressWarnings("unchecked")
     public void testRowToXContentMultipleNestedSiblings() throws IOException {
         String json = "{\"user\":{\"name\":\"alice\"},\"meta\":{\"version\":1}}";
