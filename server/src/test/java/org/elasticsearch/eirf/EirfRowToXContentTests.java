@@ -218,23 +218,28 @@ public class EirfRowToXContentTests extends ESTestCase {
 
     public void testRoundTripMultipleHeterogeneousDocs() throws IOException {
         // End-to-end JSON → EIRF → JSON round-trip should preserve each doc's content despite
-        // the shared schema carrying supersets of fields.
+        // the shared schema carrying supersets of fields. Exercises leaf/parent overlap on "b"
+        // (string leaf in doc0, object in doc1) and mixed scalar types across docs
+        // ("a" is a number in doc0 but a string in doc1; "nested.y" is a string in doc0 but a
+        // number in doc1; plus booleans that appear in only one doc each).
         BytesReference src0 = new BytesArray("""
-            {"a": 1, "nested": {"x": "x0"}, "b": "v"}""");
+            {"a": 1, "nested": {"x": "x0", "y": "y0"}, "b": "abc", "flag": true}""");
         BytesReference src1 = new BytesArray("""
-            {"a": 2, "nested": {"x": "x1", "y": "y1"}, "c": true}""");
+            {"a": "two", "nested": {"x": "x1", "y": 42}, "b": {"a": 1}, "c": false}""");
         try (EirfBatch batch = EirfEncoder.encode(List.of(src0, src1), XContentType.JSON)) {
             Map<String, Object> d0 = rowAsMap(batch, 0);
             assertEquals(1, d0.get("a"));
-            assertEquals("v", d0.get("b"));
-            assertEquals(Map.of("x", "x0"), d0.get("nested"));
+            assertEquals("abc", d0.get("b"));
+            assertEquals(Map.of("x", "x0", "y", "y0"), d0.get("nested"));
+            assertEquals(Boolean.TRUE, d0.get("flag"));
             assertFalse(d0.containsKey("c"));
 
             Map<String, Object> d1 = rowAsMap(batch, 1);
-            assertEquals(2, d1.get("a"));
-            assertEquals(Boolean.TRUE, d1.get("c"));
-            assertEquals(Map.of("x", "x1", "y", "y1"), d1.get("nested"));
-            assertFalse(d1.containsKey("b"));
+            assertEquals("two", d1.get("a"));
+            assertEquals(Map.of("a", 1), d1.get("b"));
+            assertEquals(Map.of("x", "x1", "y", 42), d1.get("nested"));
+            assertEquals(Boolean.FALSE, d1.get("c"));
+            assertFalse(d1.containsKey("flag"));
         }
     }
 
