@@ -237,6 +237,56 @@ public class EirfConversionTests extends ESTestCase {
     }
 
     @SuppressWarnings("unchecked")
+    public void testRowToXContentFixedArrayOfNulls() throws IOException {
+        // FIXED_ARRAY of NULL has zero-byte elements; without forcing UNION the array would read back empty.
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"xs\":[null,null,null]}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        List<Object> xs = (List<Object>) result.get("xs");
+        assertEquals(3, xs.size());
+        for (Object x : xs) {
+            assertNull(x);
+        }
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentFixedArrayOfBooleans() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"xs\":[true,true,true],\"ys\":[false,false]}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        assertEquals(List.of(true, true, true), result.get("xs"));
+        assertEquals(List.of(false, false), result.get("ys"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentMixedBooleans() throws IOException {
+        // Mixed shared types fall to UNION naturally; guards that the existing UNION path still works
+        // post-fix when element types differ.
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"xs\":[true,false,true]}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        assertEquals(List.of(true, false, true), result.get("xs"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
     public void testJsonRoundTrip() throws IOException {
         String json = "{\"user\":{\"name\":\"alice\",\"age\":30},\"status\":\"active\",\"score\":3.14}";
         EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray(json)), XContentType.JSON);
