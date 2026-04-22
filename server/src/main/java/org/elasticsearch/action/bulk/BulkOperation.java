@@ -492,7 +492,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             );
             releaseOnFinish.close();
         } else {
-            if (ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled()) {
+            if (shouldConvertToEirf(bulkShardRequest)) {
                 convertToEirf(bulkShardRequest);
             }
             client.executeLocally(TransportShardBulkAction.TYPE, bulkShardRequest, new ActionListener<>() {
@@ -561,26 +561,31 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         }
     }
 
-    private void convertToEirf(BulkShardRequest bulkShardRequest) {
-        if (bulkShardRequest.isSimulated()) {
-            return;
+    private static boolean shouldConvertToEirf(BulkShardRequest bulkShardRequest) {
+        if (ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled() == false || bulkShardRequest.isSimulated()) {
+            return false;
         }
         final BulkItemRequest[] items = bulkShardRequest.items();
         if (items.length == 0) {
-            return;
+            return false;
         }
         for (BulkItemRequest item : items) {
             final DocWriteRequest<?> request = item.request();
             if (request instanceof IndexRequest indexRequest) {
                 if (indexRequest.indexSource().hasSource() == false || indexRequest.getContentType() == null) {
-                    return;
+                    return false;
                 }
             } else {
-                return;
+                return false;
             }
         }
+        return true;
+    }
 
-        EirfBatch batch = null;
+    private void convertToEirf(BulkShardRequest bulkShardRequest) {
+        BulkItemRequest[] items = bulkShardRequest.items();
+
+        EirfBatch batch;
         try (EirfEncoder encoder = new EirfEncoder()) {
             for (BulkItemRequest item : items) {
                 IndexRequest indexRequest = (IndexRequest) item.request();
