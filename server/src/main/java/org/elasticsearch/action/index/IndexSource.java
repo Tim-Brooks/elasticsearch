@@ -57,7 +57,7 @@ public class IndexSource implements Writeable, Releasable {
         source = ReleasableBytesReference.wrap(in.readBytesReference());
         if (in.getTransportVersion().supports(BULK_SHARD_BATCH)) {
             // 0 means no row; N+1 encodes row index N.
-            rowIndex = in.readVInt() - 1;
+            rowIndex = in.readInt() - 1;
         }
     }
 
@@ -72,7 +72,7 @@ public class IndexSource implements Writeable, Releasable {
         }
         out.writeBytesReference(source);
         if (out.getTransportVersion().supports(BULK_SHARD_BATCH)) {
-            out.writeVInt(rowIndex + 1);
+            out.writeInt(rowIndex + 1);
         }
     }
 
