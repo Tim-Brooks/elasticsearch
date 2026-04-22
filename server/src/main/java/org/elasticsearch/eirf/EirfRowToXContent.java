@@ -43,7 +43,7 @@ public final class EirfRowToXContent {
                     continue;
                 }
                 writeLeafValue(row, leafIdx, row.getTypeByte(leafIdx), child.name(), builder);
-            } else if (isNotEmpty(child, row) == false) {
+            } else if (isNotEmpty(child, row)) {
                 builder.field(child.name());
                 builder.startObject();
                 writeChildren(child, row, builder);
