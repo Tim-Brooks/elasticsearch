@@ -165,6 +165,63 @@ public class EirfConversionTests extends ESTestCase {
         batch.close();
     }
 
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentPreservesEmptyObject() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"labels\":{},\"application_data\":{}}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        assertTrue("labels should round-trip as an empty object", result.containsKey("labels"));
+        assertEquals(Map.of(), result.get("labels"));
+        assertTrue("application_data should round-trip as an empty object", result.containsKey("application_data"));
+        assertEquals(Map.of(), result.get("application_data"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentPreservesNestedEmptyObject() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"a\":{\"b\":{}}}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        Map<String, Object> a = (Map<String, Object>) result.get("a");
+        assertTrue(a.containsKey("b"));
+        assertEquals(Map.of(), a.get("b"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentEmptyVsPopulatedObjectAcrossDocsInBatch() throws IOException {
+        // Doc A has labels:{} (empty), doc B has labels:{"x":1} (populated). They must round-trip independently —
+        // a populated labels in one doc must not bleed into a sibling doc that only had an empty object.
+        EirfBatch batch = EirfEncoder.encode(
+            List.of(new BytesArray("{\"labels\":{}}"), new BytesArray("{\"labels\":{\"x\":1}}")),
+            XContentType.JSON
+        );
+
+        XContentBuilder builderA = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builderA);
+        builderA.close();
+        Map<String, Object> resultA = XContentHelper.convertToMap(BytesReference.bytes(builderA), false, XContentType.JSON).v2();
+        assertEquals(Map.of(), resultA.get("labels"));
+
+        XContentBuilder builderB = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(1), batch.schema(), builderB);
+        builderB.close();
+        Map<String, Object> resultB = XContentHelper.convertToMap(BytesReference.bytes(builderB), false, XContentType.JSON).v2();
+        assertEquals(Map.of("x", 1), resultB.get("labels"));
+
+        batch.close();
+    }
+
     public void testRowToXContentWithBooleans() throws IOException {
         EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"active\":true,\"deleted\":false}")), XContentType.JSON);
 
