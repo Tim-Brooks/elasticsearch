@@ -87,7 +87,7 @@ public class EirfConversionTests extends ESTestCase {
         batch.close();
     }
 
-    public void testRowToXContentSkipsNullFields() throws IOException {
+    public void testRowToXContentSkipsAbsentFields() throws IOException {
         EirfBatch batch = EirfEncoder.encode(
             List.of(new BytesArray("{\"name\":\"alice\",\"age\":30}"), new BytesArray("{\"age\":25}")),
             XContentType.JSON
@@ -100,6 +100,111 @@ public class EirfConversionTests extends ESTestCase {
         Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
         assertFalse(result.containsKey("name"));
         assertEquals(25, result.get("age"));
+
+        batch.close();
+    }
+
+    public void testRowToXContentPreservesExplicitNullFields() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(
+            List.of(new BytesArray("{\"name\":\"alice\",\"age\":null}"), new BytesArray("{\"name\":\"bob\"}")),
+            XContentType.JSON
+        );
+
+        // Explicit null round-trips back as null so mappers (e.g. flattened with null_value) can substitute.
+        XContentBuilder explicit = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), explicit);
+        explicit.close();
+
+        Map<String, Object> explicitResult = XContentHelper.convertToMap(BytesReference.bytes(explicit), false, XContentType.JSON).v2();
+        assertEquals("alice", explicitResult.get("name"));
+        assertTrue("age column should round-trip as explicit null", explicitResult.containsKey("age"));
+        assertNull(explicitResult.get("age"));
+
+        // The second doc never mentioned "age" — it stays absent rather than materializing as null.
+        XContentBuilder absent = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(1), batch.schema(), absent);
+        absent.close();
+
+        Map<String, Object> absentResult = XContentHelper.convertToMap(BytesReference.bytes(absent), false, XContentType.JSON).v2();
+        assertEquals("bob", absentResult.get("name"));
+        assertFalse(absentResult.containsKey("age"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentPreservesEmptyObject() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"labels\":{},\"application_data\":{}}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        assertTrue("labels should round-trip as an empty object", result.containsKey("labels"));
+        assertEquals(Map.of(), result.get("labels"));
+        assertTrue("application_data should round-trip as an empty object", result.containsKey("application_data"));
+        assertEquals(Map.of(), result.get("application_data"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentEmptyVsPopulatedObjectAcrossDocsInBatch() throws IOException {
+        // Doc A has labels:{} (empty), doc B has labels:{"x":1} (populated). They must round-trip independently —
+        // a populated labels in one doc must not bleed into a sibling doc that only had an empty object.
+        EirfBatch batch = EirfEncoder.encode(
+            List.of(new BytesArray("{\"labels\":{}}"), new BytesArray("{\"labels\":{\"x\":1}}")),
+            XContentType.JSON
+        );
+
+        XContentBuilder builderA = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builderA);
+        builderA.close();
+        Map<String, Object> resultA = XContentHelper.convertToMap(BytesReference.bytes(builderA), false, XContentType.JSON).v2();
+        assertEquals(Map.of(), resultA.get("labels"));
+
+        XContentBuilder builderB = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(1), batch.schema(), builderB);
+        builderB.close();
+        Map<String, Object> resultB = XContentHelper.convertToMap(BytesReference.bytes(builderB), false, XContentType.JSON).v2();
+        assertEquals(Map.of("x", 1), resultB.get("labels"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentPreservesNestedEmptyObject() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(List.of(new BytesArray("{\"a\":{\"b\":{}}}")), XContentType.JSON);
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        Map<String, Object> a = (Map<String, Object>) result.get("a");
+        assertTrue(a.containsKey("b"));
+        assertEquals(Map.of(), a.get("b"));
+
+        batch.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testRowToXContentPreservesExplicitNullInNestedObject() throws IOException {
+        EirfBatch batch = EirfEncoder.encode(
+            List.of(new BytesArray("{\"agent\":{\"id\":\"a\",\"optional_version\":null}}")),
+            XContentType.JSON
+        );
+
+        XContentBuilder builder = XContentFactory.jsonBuilder();
+        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        builder.close();
+
+        Map<String, Object> result = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
+        Map<String, Object> agent = (Map<String, Object>) result.get("agent");
+        assertEquals("a", agent.get("id"));
+        assertTrue(agent.containsKey("optional_version"));
+        assertNull(agent.get("optional_version"));
 
         batch.close();
     }

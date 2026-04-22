@@ -39,7 +39,7 @@ public final class EirfRowToXContent {
         for (EirfRowXContentParser.SchemaNode child : node.children()) {
             if (child.isLeaf()) {
                 int leafIdx = child.leafColumnIndex();
-                if (leafIdx >= row.columnCount() || row.isNull(leafIdx)) {
+                if (leafIdx >= row.columnCount() || row.isAbsent(leafIdx)) {
                     continue;
                 }
                 writeLeafValue(row, leafIdx, row.getTypeByte(leafIdx), child.name(), builder);
@@ -56,7 +56,7 @@ public final class EirfRowToXContent {
         for (EirfRowXContentParser.SchemaNode child : node.children()) {
             if (child.isLeaf()) {
                 int leafIdx = child.leafColumnIndex();
-                if (leafIdx < row.columnCount() && row.isNull(leafIdx) == false) {
+                if (leafIdx < row.columnCount() && row.isAbsent(leafIdx) == false) {
                     return true;
                 }
             } else if (hasAnyValue(child, row)) {
@@ -77,6 +77,7 @@ public final class EirfRowToXContent {
                 builder.field(leafName);
                 row.getStringValue(leafIdx).toXContent(builder, null);
             }
+            case EirfType.NULL -> builder.nullField(leafName);
             case EirfType.TRUE -> builder.field(leafName, true);
             case EirfType.FALSE -> builder.field(leafName, false);
             case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> {
