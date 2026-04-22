@@ -50,7 +50,7 @@ public class BulkShardBatch implements Writeable {
 
     /**
      * Encodes the items of the given {@link BulkShardRequest} into an EIRF batch, replaces each item's inline source with a row
-     * reference via {@link IndexSource#setEirfRow(int)}, and attaches the batch to the request.
+     * reference via {@link IndexSource#setEirfRow(EirfBatch, int)}, and attaches the batch to the request.
      */
     public static BulkShardBatch createShardBatch(BulkShardRequest bulkShardRequest) throws IOException {
         BulkItemRequest[] items = bulkShardRequest.items();
@@ -65,9 +65,25 @@ public class BulkShardBatch implements Writeable {
         }
         for (int i = 0; i < items.length; i++) {
             IndexRequest indexRequest = (IndexRequest) items[i].request();
-            indexRequest.indexSource().setEirfRow(i);
+            indexRequest.indexSource().setEirfRow(batch, i);
         }
         return new BulkShardBatch(batch);
+    }
+
+    /**
+     * Wires the given batch into every item's {@link IndexSource} that has a pending EIRF row index. This is called on the
+     * receiving node after a {@link BulkShardRequest} (and its embedded batch) have been deserialized, so that
+     * {@link IndexSource#sourceAsMap()} and other per-item accessors can materialize row data.
+     */
+    public static void attachBatchToItems(EirfBatch batch, BulkItemRequest[] items) {
+        for (BulkItemRequest item : items) {
+            if (item.request() instanceof IndexRequest indexRequest) {
+                IndexSource indexSource = indexRequest.indexSource();
+                if (indexSource.hasEirfRow()) {
+                    indexSource.attachEirfBatch(batch);
+                }
+            }
+        }
     }
 
     /**

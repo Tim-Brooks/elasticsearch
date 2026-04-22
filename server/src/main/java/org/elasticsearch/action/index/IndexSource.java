@@ -20,8 +20,13 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.eirf.EirfBatch;
+import org.elasticsearch.eirf.EirfRowToXContent;
+import org.elasticsearch.eirf.EirfRowXContentParser;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentFactory;
+import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
@@ -38,6 +43,9 @@ public class IndexSource implements Writeable, Releasable {
     private XContentType contentType;
     private BytesReference source;
     private int rowIndex = -1;
+    // Borrowed reference to the shard-level EIRF batch when rowIndex >= 0. Not serialized — the batch is transported
+    // separately on BulkShardBatch and re-attached on the receiving node.
+    private EirfBatch eirfBatch;
     private boolean isClosed = false;
 
     public IndexSource() {}
@@ -111,11 +119,24 @@ public class IndexSource implements Writeable, Releasable {
      * Replaces the inline source bytes with an empty reference and records the row index into the shard-level EIRF batch.
      * The {@link XContentType} is preserved so downstream code can still identify the original content type.
      */
-    public void setEirfRow(int rowIndex) {
+    public void setEirfRow(EirfBatch batch, int rowIndex) {
         assert isClosed == false;
         assert rowIndex >= 0;
+        assert batch != null;
         this.source = BytesArray.EMPTY;
         this.rowIndex = rowIndex;
+        this.eirfBatch = batch;
+    }
+
+    /**
+     * Attaches a shard-level {@link EirfBatch} to this source. Used on the receiving node after bulk shard request
+     * deserialization to re-associate each row-indexed source with the batch that carries its data.
+     */
+    public void attachEirfBatch(EirfBatch batch) {
+        assert isClosed == false;
+        assert rowIndex >= 0 : "attachEirfBatch requires an EIRF row index";
+        assert batch != null;
+        this.eirfBatch = batch;
     }
 
     public boolean isClosed() {
@@ -128,10 +149,33 @@ public class IndexSource implements Writeable, Releasable {
         isClosed = true;
         source = null;
         contentType = null;
+        eirfBatch = null;
+    }
+
+    /**
+     * Opens an {@link XContentParser} over the document's source. When the source has been externalized to an EIRF row,
+     * returns a parser that walks the row directly; otherwise parses the inline bytes. Callers must close the parser.
+     */
+    public XContentParser createParser() throws IOException {
+        assert isClosed == false;
+        if (rowIndex >= 0) {
+            assert eirfBatch != null : "EIRF row set but no batch attached";
+            return new EirfRowXContentParser(EirfRowXContentParser.buildSchemaTree(eirfBatch.schema()), eirfBatch.getRowReader(rowIndex));
+        }
+        return XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, contentType);
     }
 
     public Map<String, Object> sourceAsMap() {
         assert isClosed == false;
+        if (rowIndex >= 0) {
+            assert eirfBatch != null : "EIRF row set but no batch attached";
+            try (XContentBuilder builder = XContentFactory.contentBuilder(contentType)) {
+                EirfRowToXContent.writeRow(eirfBatch.getRowReader(rowIndex), eirfBatch.schema(), builder);
+                return XContentHelper.convertToMap(BytesReference.bytes(builder), false, contentType).v2();
+            } catch (IOException e) {
+                throw new ElasticsearchGenerationException("Failed to materialize EIRF row [" + rowIndex + "]", e);
+            }
+        }
         return XContentHelper.convertToMap(source, false, contentType).v2();
     }
 
@@ -280,5 +324,6 @@ public class IndexSource implements Writeable, Releasable {
         this.source = source;
         this.contentType = contentType;
         this.rowIndex = -1;
+        this.eirfBatch = null;
     }
 }

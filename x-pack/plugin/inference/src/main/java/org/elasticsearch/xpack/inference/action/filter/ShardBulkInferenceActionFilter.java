@@ -60,7 +60,6 @@ import org.elasticsearch.xcontent.XContent;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
-import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.core.inference.chunking.ChunkingSettingsBuilder;
 import org.elasticsearch.xpack.core.inference.results.ChunkedInferenceError;
 import org.elasticsearch.xpack.inference.InferenceException;
@@ -759,8 +758,11 @@ public class ShardBulkInferenceActionFilter implements MappedActionFilter {
                 }
                 indexSource.source(newDocMap, indexSource.contentType());
             } else {
-                try (XContentBuilder builder = XContentBuilder.builder(indexSource.contentType().xContent())) {
-                    appendSourceAndInferenceMetadata(builder, indexSource.bytes(), indexSource.contentType(), inferenceFieldsMap);
+                try (
+                    XContentBuilder builder = XContentBuilder.builder(indexSource.contentType().xContent());
+                    XContentParser parser = indexSource.createParser()
+                ) {
+                    appendSourceAndInferenceMetadata(builder, parser, inferenceFieldsMap);
                     indexSource.source(builder);
                 }
             }
@@ -787,24 +789,22 @@ public class ShardBulkInferenceActionFilter implements MappedActionFilter {
     }
 
     /**
-     * Appends the original source and the new inference metadata field directly to the provided
-     * {@link XContentBuilder}, avoiding the need to materialize the original source as a {@link Map}.
+     * Appends the original source (read from the provided parser) and the new inference metadata field directly to the provided
+     * {@link XContentBuilder}, avoiding the need to materialize the original source as a {@link Map}. The parser may be over
+     * inline bytes or over an EIRF row — the caller owns its lifecycle.
      */
     private static void appendSourceAndInferenceMetadata(
         XContentBuilder builder,
-        BytesReference source,
-        XContentType xContentType,
+        XContentParser sourceParser,
         Map<String, Object> inferenceFieldsMap
     ) throws IOException {
         builder.startObject();
 
         // append the original source
-        try (XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)) {
-            // skip start object
-            parser.nextToken();
-            while (parser.nextToken() != XContentParser.Token.END_OBJECT) {
-                builder.copyCurrentStructure(parser);
-            }
+        // skip start object
+        sourceParser.nextToken();
+        while (sourceParser.nextToken() != XContentParser.Token.END_OBJECT) {
+            builder.copyCurrentStructure(sourceParser);
         }
 
         // add the inference metadata field
