@@ -9,8 +9,8 @@
 
 package org.elasticsearch.index.engine;
 
-import org.apache.lucene.document.Column;
 import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.document.column.Column;
 import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.ReleasableBytesReference;
@@ -128,18 +128,20 @@ public final class ColumnBatchBuilder implements Releasable {
 
         // Add _id column (must be first for processRowColumns in Lucene)
         if (idColumn != null) {
-            columns.add(new BytesRefBinaryColumn(idColumn.name, idColumn.fieldType, idColumn.data, idColumn.entryCount));
+            columns.add(
+                new BytesRefBinaryColumn(idColumn.name, idColumn.fieldType, Column.Density.DENSE, idColumn.data, idColumn.entryCount)
+            );
             resources.add(idColumn.data);
         }
 
         // Add user field columns
         for (ColumnInfo info : userColumns) {
             if (info.isDense) {
-                columns.add(new BytesRefDenseBinaryColumn(info.name, info.fieldType, info.data));
+                columns.add(new BytesRefDenseLongColumn(info.name, info.fieldType, info.data));
             } else if (info.isLong) {
                 columns.add(new BytesRefLongColumn(info.name, info.fieldType, info.data, info.entryCount));
             } else {
-                columns.add(new BytesRefBinaryColumn(info.name, info.fieldType, info.data, info.entryCount));
+                columns.add(new BytesRefBinaryColumn(info.name, info.fieldType, Column.Density.SPARSE, info.data, info.entryCount));
             }
             resources.add(info.data);
         }
@@ -147,19 +149,19 @@ public final class ColumnBatchBuilder implements Releasable {
         // Finish and add metadata columns (dense format — every doc has metadata)
         if (seqNoWriter != null) {
             ReleasableBytesReference data = seqNoWriter.finish();
-            columns.add(new BytesRefDenseBinaryColumn(seqNoWriter.fieldName(), seqNoWriter.fieldType(), data));
+            columns.add(new BytesRefDenseLongColumn(seqNoWriter.fieldName(), seqNoWriter.fieldType(), data));
             resources.add(data);
             seqNoWriter = null;
         }
         if (primaryTermWriter != null) {
             ReleasableBytesReference data = primaryTermWriter.finish();
-            columns.add(new BytesRefDenseBinaryColumn(primaryTermWriter.fieldName(), primaryTermWriter.fieldType(), data));
+            columns.add(new BytesRefDenseLongColumn(primaryTermWriter.fieldName(), primaryTermWriter.fieldType(), data));
             resources.add(data);
             primaryTermWriter = null;
         }
         if (versionWriter != null) {
             ReleasableBytesReference data = versionWriter.finish();
-            columns.add(new BytesRefDenseBinaryColumn(versionWriter.fieldName(), versionWriter.fieldType(), data));
+            columns.add(new BytesRefDenseLongColumn(versionWriter.fieldName(), versionWriter.fieldType(), data));
             resources.add(data);
             versionWriter = null;
         }

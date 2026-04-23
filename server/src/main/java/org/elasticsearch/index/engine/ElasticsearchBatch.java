@@ -9,18 +9,18 @@
 
 package org.elasticsearch.index.engine;
 
-import org.apache.lucene.document.Batch;
-import org.apache.lucene.document.Column;
+import org.apache.lucene.document.column.Column;
+import org.apache.lucene.document.column.ColumnBatch;
 import org.elasticsearch.core.Releasable;
 
 import java.util.List;
 
 /**
- * An Elasticsearch implementation of the Lucene {@link Batch} that wraps a set of
+ * An Elasticsearch implementation of the Lucene {@link ColumnBatch} that wraps a set of
  * {@link Column}s backed by pooled byte pages. Implements {@link Releasable} to
  * release the underlying byte pages after {@code IndexWriter.addBatch()} returns.
  */
-public final class ElasticsearchBatch extends Batch implements Releasable {
+public final class ElasticsearchBatch extends ColumnBatch implements Releasable {
 
     private final int numDocs;
     private final List<Column> columns;

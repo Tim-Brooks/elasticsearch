@@ -9,7 +9,7 @@
 
 package org.elasticsearch.index.engine;
 
-import org.apache.lucene.document.Batch;
+import org.apache.lucene.document.column.ColumnBatch;
 import org.apache.lucene.index.IndexWriter;
 import org.elasticsearch.index.mapper.LuceneDocument;
 
@@ -32,7 +32,7 @@ public class BatchIndexWriter {
         // indexWriter.addDocuments(docs);
     }
 
-    public void addBatch(Batch batch) throws IOException {
+    public void addBatch(ColumnBatch batch) throws IOException {
         indexWriter.addBatch(batch);
     }
 }

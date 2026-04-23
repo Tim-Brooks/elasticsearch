@@ -9,8 +9,10 @@
 
 package org.elasticsearch.index.engine;
 
-import org.apache.lucene.document.LongColumn;
+import org.apache.lucene.document.column.LongColumn;
+import org.apache.lucene.document.column.LongTupleCursor;
 import org.apache.lucene.index.IndexableFieldType;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.util.ByteUtils;
@@ -19,94 +21,31 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 
 /**
- * A {@link LongColumn} that reads from a {@link BytesReference} containing entries
- * in the format: 4-byte LE int (doc-id) + 8-byte LE long (value).
+ * A sparse {@link LongColumn} backed by a {@link BytesReference} whose entries are laid out
+ * as 4-byte LE int (doc-id) + 8-byte LE long (value) = 12 bytes per entry.
  * <p>
- * Reading is allocation-free in the common case where an entry fits within a single
- * 16KB page. A small scratch buffer handles the rare page-boundary crossing case.
+ * Reading is allocation-free in the common case where an entry fits within a single page;
+ * a small scratch buffer handles the rare page-boundary crossing case.
  */
 public final class BytesRefLongColumn extends LongColumn {
 
-    private static final int ENTRY_SIZE = 12; // 4 (docId) + 8 (long)
+    static final int ENTRY_SIZE = 12; // 4 (docId) + 8 (long)
 
     private final BytesRef[] pages;
     private final int entryCount;
 
-    private int pageIndex;
-    private byte[] currentPage;
-    private int currentOffset;
-    private int currentRemaining;
-
-    private int entriesRead;
-    private int currentDocId;
-    private long currentValue;
-
-    private final byte[] scratch = new byte[ENTRY_SIZE];
-
     public BytesRefLongColumn(String name, IndexableFieldType fieldType, BytesReference data, int entryCount) {
-        super(name, fieldType);
+        super(name, fieldType, Density.SPARSE);
         this.entryCount = entryCount;
-
-        // Materialize page array from the BytesReference iterator
         this.pages = toPageArray(data);
-        if (pages.length > 0) {
-            BytesRef first = pages[0];
-            this.currentPage = first.bytes;
-            this.currentOffset = first.offset;
-            this.currentRemaining = first.length;
-        }
     }
 
     @Override
-    public int nextDoc() {
-        if (entriesRead >= entryCount) {
-            return NO_MORE_DOCS;
-        }
-        if (currentRemaining >= ENTRY_SIZE) {
-            // Fast path: entry fits within current page
-            currentDocId = (int) ByteUtils.LITTLE_ENDIAN_INT.get(currentPage, currentOffset);
-            currentValue = (long) ByteUtils.LITTLE_ENDIAN_LONG.get(currentPage, currentOffset + 4);
-            currentOffset += ENTRY_SIZE;
-            currentRemaining -= ENTRY_SIZE;
-        } else {
-            // Slow path: entry straddles page boundary
-            readIntoScratch();
-            currentDocId = (int) ByteUtils.LITTLE_ENDIAN_INT.get(scratch, 0);
-            currentValue = (long) ByteUtils.LITTLE_ENDIAN_LONG.get(scratch, 4);
-        }
-        entriesRead++;
-        return currentDocId;
-    }
-
-    @Override
-    public long longValue() {
-        return currentValue;
-    }
-
-    private void readIntoScratch() {
-        int written = 0;
-        while (written < BytesRefLongColumn.ENTRY_SIZE) {
-            if (currentRemaining == 0) {
-                advancePage();
-            }
-            int toCopy = Math.min(BytesRefLongColumn.ENTRY_SIZE - written, currentRemaining);
-            System.arraycopy(currentPage, currentOffset, scratch, written, toCopy);
-            currentOffset += toCopy;
-            currentRemaining -= toCopy;
-            written += toCopy;
-        }
-    }
-
-    private void advancePage() {
-        pageIndex++;
-        BytesRef page = pages[pageIndex];
-        currentPage = page.bytes;
-        currentOffset = page.offset;
-        currentRemaining = page.length;
+    public LongTupleCursor tuples() {
+        return new SparseLongCursor(pages, entryCount);
     }
 
     static BytesRef[] toPageArray(BytesReference data) {
-        // Count pages first via iterator
         int count = 0;
         try {
             var iter = data.iterator();
@@ -131,15 +70,77 @@ public final class BytesRefLongColumn extends LongColumn {
         return pages;
     }
 
-    @Override
-    public void reset() {
-        pageIndex = 0;
-        entriesRead = 0;
-        if (pages.length > 0) {
-            BytesRef first = pages[0];
-            currentPage = first.bytes;
-            currentOffset = first.offset;
-            currentRemaining = first.length;
+    private static final class SparseLongCursor extends LongTupleCursor {
+
+        private final BytesRef[] pages;
+        private final int entryCount;
+
+        private int pageIndex;
+        private byte[] currentPage;
+        private int currentOffset;
+        private int currentRemaining;
+
+        private int entriesRead;
+        private int currentDocId;
+        private long currentValue;
+
+        private final byte[] scratch = new byte[ENTRY_SIZE];
+
+        SparseLongCursor(BytesRef[] pages, int entryCount) {
+            this.pages = pages;
+            this.entryCount = entryCount;
+            if (pages.length > 0) {
+                BytesRef first = pages[0];
+                this.currentPage = first.bytes;
+                this.currentOffset = first.offset;
+                this.currentRemaining = first.length;
+            }
+        }
+
+        @Override
+        public int nextDoc() {
+            if (entriesRead >= entryCount) {
+                return DocIdSetIterator.NO_MORE_DOCS;
+            }
+            if (currentRemaining >= ENTRY_SIZE) {
+                currentDocId = (int) ByteUtils.LITTLE_ENDIAN_INT.get(currentPage, currentOffset);
+                currentValue = (long) ByteUtils.LITTLE_ENDIAN_LONG.get(currentPage, currentOffset + 4);
+                currentOffset += ENTRY_SIZE;
+                currentRemaining -= ENTRY_SIZE;
+            } else {
+                readIntoScratch();
+                currentDocId = (int) ByteUtils.LITTLE_ENDIAN_INT.get(scratch, 0);
+                currentValue = (long) ByteUtils.LITTLE_ENDIAN_LONG.get(scratch, 4);
+            }
+            entriesRead++;
+            return currentDocId;
+        }
+
+        @Override
+        public long longValue() {
+            return currentValue;
+        }
+
+        private void readIntoScratch() {
+            int written = 0;
+            while (written < ENTRY_SIZE) {
+                if (currentRemaining == 0) {
+                    advancePage();
+                }
+                int toCopy = Math.min(ENTRY_SIZE - written, currentRemaining);
+                System.arraycopy(currentPage, currentOffset, scratch, written, toCopy);
+                currentOffset += toCopy;
+                currentRemaining -= toCopy;
+                written += toCopy;
+            }
+        }
+
+        private void advancePage() {
+            pageIndex++;
+            BytesRef page = pages[pageIndex];
+            currentPage = page.bytes;
+            currentOffset = page.offset;
+            currentRemaining = page.length;
         }
     }
 }
