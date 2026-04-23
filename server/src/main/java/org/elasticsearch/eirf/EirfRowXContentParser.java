@@ -221,8 +221,6 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
                 SchemaNode child = node.children[childIdx];
                 childIdxStack[stackDepth - 1]++;
 
-                // Skip leaves whose column is absent in this row. Explicit JSON nulls (EirfType.NULL) must fall
-                // through so emitLeafValue surfaces them as VALUE_NULL tokens for the document parser.
                 if (child.isLeaf()) {
                     int colIdx = child.leafColumnIndex;
                     if (colIdx >= row.columnCount() || row.isAbsent(colIdx)) {
