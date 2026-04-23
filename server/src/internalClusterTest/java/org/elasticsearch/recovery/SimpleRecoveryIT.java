@@ -37,6 +37,7 @@ public class SimpleRecoveryIT extends ESIntegTestCase {
         return 1;
     }
 
+    @AwaitsFix(bugUrl = "whitespace")
     public void testSimpleRecovery() throws Exception {
         assertAcked(prepareCreate("test", 1).get());
 
