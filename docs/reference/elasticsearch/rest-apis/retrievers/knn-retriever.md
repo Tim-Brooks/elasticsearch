@@ -18,9 +18,13 @@ A kNN retriever returns top documents from a [k-nearest neighbor search (kNN)](d
 
 
 `query_vector`
-:   (Required if `query_vector_builder` is not defined, array of `float`)
+:   (Required if `query_vector_builder` is not defined, array of `float` or string)
 
-    Query vector. Must have the same number of dimensions as the vector field you are searching against. Must be either an array of floats or a hex-encoded byte vector.
+    Query vector. Must have the same number of dimensions as the vector field you are searching against.
+    Must be one of:
+      - An array of floats
+      - A hex-encoded byte vector (one byte per dimension; for `bit`, one byte per 8 dimensions). {applies_to}`stack: ga 9.0-9.3`
+      - A base64-encoded vector string. Base64 supports `float` and `bfloat16` (big-endian), `byte`, and `bit` encodings depending on the target field type. {applies_to}`stack: ga 9.4` {applies_to}`serverless: ga`
 
 
 `query_vector_builder`
@@ -66,7 +70,7 @@ A kNN retriever returns top documents from a [k-nearest neighbor search (kNN)](d
     Read more here: [knn similarity search](docs-content://solutions/search/vector/knn.md#knn-similarity-search)
 
 
-`rescore_vector` {applies_to}`stack: preview 9.0, ga 9.1`
+`rescore_vector` {applies_to}`stack: preview =9.0, ga 9.1+`
 :   (Optional, object) Apply oversampling and rescoring to quantized vectors.
 
 ::::{note}
@@ -109,6 +113,7 @@ PUT /restaurants
     }
   }
 }
+
 POST /restaurants/_bulk?refresh
 {"index":{}}
 {"region": "Austria", "year": "2019", "vector": [10, 22, 77]}
@@ -118,7 +123,9 @@ POST /restaurants/_bulk?refresh
 {"region": "Austria", "year": "2020", "vector": [10, 22, 79]}
 {"index":{}}
 {"region": "France", "year": "2020", "vector": [10, 22, 80]}
+
 PUT /movies
+
 PUT /books
 {
   "mappings": {
@@ -140,6 +147,7 @@ PUT /books
     }
   }
 }
+
 PUT _query_rules/my-ruleset
 {
     "rules": [
@@ -163,6 +171,7 @@ PUT _query_rules/my-ruleset
 }
 ```
 % TESTSETUP
+
 ```console
 DELETE /restaurants
 DELETE /movies
