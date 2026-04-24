@@ -71,7 +71,8 @@ public final class EirfRowToXContent {
         switch (type) {
             case EirfType.INT -> builder.field(leafName, row.getIntValue(leafIdx));
             // Emit as double so the textual form preserves enough precision for downstream double re-parsers
-            // (e.g. scaled_float); the value still round-trips bit-for-bit because (double)(float)val == val held at encode time.
+            // (e.g. scaled_float); the value still round-trips bit-for-bit because (double)(float)val == val
+            // holds for any value stored as FLOAT.
             case EirfType.FLOAT -> builder.field(leafName, (double) row.getFloatValue(leafIdx));
             case EirfType.LONG -> builder.field(leafName, row.getLongValue(leafIdx));
             case EirfType.DOUBLE -> builder.field(leafName, row.getDoubleValue(leafIdx));

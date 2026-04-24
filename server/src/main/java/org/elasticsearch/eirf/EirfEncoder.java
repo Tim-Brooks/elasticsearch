@@ -192,9 +192,8 @@ public class EirfEncoder implements Releasable {
             token = parser.nextToken();
 
             if (token == XContentParser.Token.START_OBJECT) {
-                // Peek inside the object. An empty object is encoded as a zero-byte KEY_VALUE leaf so rehydration
-                // can emit `{}` — keeping it as a non-leaf with no children would be indistinguishable from an
-                // absent field. Non-empty objects take the normal non-leaf + recursive flatten path.
+                // Peek inside the object. An empty object is encoded as a zero-byte KEY_VALUE leaf
+                // Non-empty objects take the normal non-leaf + recursive flatten path.
                 XContentParser.Token inner = parser.nextToken();
                 if (inner == XContentParser.Token.END_OBJECT) {
                     int emptyColIdx = schema.appendLeaf(fieldName, parentNonLeafIdx);
@@ -205,11 +204,10 @@ public class EirfEncoder implements Releasable {
                     scratch.typeBytes[emptyColIdx] = EirfType.KEY_VALUE;
                     scratch.varData[emptyColIdx] = BytesArray.EMPTY;
                     scratch.varColumnCount++;
-                    token = parser.nextToken();
-                    continue;
+                } else {
+                    int nonLeafIdx = schema.appendNonLeaf(fieldName, parentNonLeafIdx);
+                    flattenObject(parser, nonLeafIdx, schema, scratch, inner);
                 }
-                int nonLeafIdx = schema.appendNonLeaf(fieldName, parentNonLeafIdx);
-                flattenObject(parser, nonLeafIdx, schema, scratch, inner);
                 token = parser.nextToken();
                 continue;
             }
@@ -385,7 +383,7 @@ public class EirfEncoder implements Releasable {
                 // FIXED_ARRAY is byte-length-terminated with no element count, so a zero-data-size shared
                 // type (NULL/TRUE/FALSE) would be indistinguishable from an empty array. Force UNION in
                 // that case so each element contributes its type byte and the reader can iterate.
-                // TODO: consider serializing element count.
+                // TODO: We will likely switch this to an element count of fixed_arrays for space. Tracked in meta issues
                 if (useFixed && EirfType.elemDataSize(sharedType) == 0) {
                     useFixed = false;
                 }
