@@ -35,7 +35,11 @@ public final class BytesRefLongColumn extends LongColumn {
     private final int entryCount;
 
     public BytesRefLongColumn(String name, IndexableFieldType fieldType, BytesReference data, int entryCount) {
-        super(name, fieldType, Density.SPARSE);
+        this(name, fieldType, NumericKind.LONG, data, entryCount);
+    }
+
+    public BytesRefLongColumn(String name, IndexableFieldType fieldType, NumericKind numericKind, BytesReference data, int entryCount) {
+        super(name, fieldType, Density.SPARSE, numericKind);
         this.entryCount = entryCount;
         this.pages = toPageArray(data);
     }

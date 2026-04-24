@@ -11,10 +11,14 @@ package org.elasticsearch.index.mapper;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StringField;
+import org.apache.lucene.document.column.LongColumn;
+import org.apache.lucene.index.DocValuesType;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.bulk.DocBatchRowIterator;
@@ -59,6 +63,41 @@ import java.util.Set;
 public final class RowBatchDocumentParser {
 
     private static final Logger logger = LogManager.getLogger(RowBatchDocumentParser.class);
+
+    private static final FieldType INT_INDEXED_DV_TYPE = makeIndexedNumericFieldType(Integer.BYTES, false);
+    private static final FieldType LONG_INDEXED_DV_TYPE = makeIndexedNumericFieldType(Long.BYTES, false);
+    private static final FieldType INT_INDEXED_DV_SKIP_TYPE = makeIndexedNumericFieldType(Integer.BYTES, true);
+    private static final FieldType LONG_INDEXED_DV_SKIP_TYPE = makeIndexedNumericFieldType(Long.BYTES, true);
+
+    private static final FieldType KEYWORD_INDEXED_DV_TYPE;
+    static {
+        FieldType ft = new FieldType();
+        ft.setOmitNorms(true);
+        ft.setIndexOptions(IndexOptions.DOCS);
+        ft.setDocValuesType(DocValuesType.SORTED_SET);
+        ft.freeze();
+        KEYWORD_INDEXED_DV_TYPE = ft;
+    }
+
+    private static FieldType makeIndexedNumericFieldType(int pointBytes, boolean dvSkipper) {
+        FieldType ft = new FieldType();
+        ft.setDimensions(1, pointBytes);
+        ft.setDocValuesType(DocValuesType.SORTED_NUMERIC);
+        if (dvSkipper) {
+            ft.setDocValuesSkipIndexType(org.apache.lucene.index.DocValuesSkipIndexType.RANGE);
+        }
+        ft.freeze();
+        return ft;
+    }
+
+    private static IndexableFieldType numericFieldType(boolean points, boolean dvSkipper, int pointBytes) {
+        if (points) {
+            return pointBytes == Integer.BYTES
+                ? (dvSkipper ? INT_INDEXED_DV_SKIP_TYPE : INT_INDEXED_DV_TYPE)
+                : (dvSkipper ? LONG_INDEXED_DV_SKIP_TYPE : LONG_INDEXED_DV_TYPE);
+        }
+        return dvSkipper ? SortedNumericDocValuesField.indexedField("", 0).fieldType() : SortedNumericDocValuesField.TYPE;
+    }
 
     private final XContentParserConfiguration parserConfiguration;
     private final MappingParserContext mappingParserContext;
@@ -991,6 +1030,7 @@ public final class RowBatchDocumentParser {
         final FieldMapper[] columnMappers = new FieldMapper[schema.columnCount()];
         final ColumnWriter[] columnWriters = new ColumnWriter[schema.columnCount()];
         final boolean[] denseColumns = new boolean[schema.columnCount()];
+        final LongColumn.NumericKind[] columnNumericKinds = new LongColumn.NumericKind[schema.columnCount()];
         // Track high-cardinality keyword count columns (fieldName.counts)
         final ColumnWriter[] countWriters = new ColumnWriter[schema.columnCount()];
 
@@ -1003,16 +1043,23 @@ public final class RowBatchDocumentParser {
                 if (mapper instanceof FieldMapper fm) {
                     columnMappers[col] = fm;
                     if (fm instanceof NumberFieldMapper nfm) {
-                        IndexableFieldType ft = nfm.fieldType().indexType.hasDocValuesSkipper()
-                            ? SortedNumericDocValuesField.indexedField("", 0).fieldType()
-                            : SortedNumericDocValuesField.TYPE;
+                        boolean isInt = nfm.type() != NumberFieldMapper.NumberType.LONG;
+                        IndexableFieldType ft = numericFieldType(
+                            nfm.fieldType().indexType().hasPoints(),
+                            nfm.fieldType().indexType().hasDocValuesSkipper(),
+                            isInt ? Integer.BYTES : Long.BYTES
+                        );
                         columnWriters[col] = new ColumnWriter(fieldName, ft, true, recycler);
+                        columnNumericKinds[col] = isInt ? LongColumn.NumericKind.INT : LongColumn.NumericKind.LONG;
                         denseColumns[col] = true;
                     } else if (fm instanceof DateFieldMapper dfm) {
-                        IndexableFieldType ft = dfm.fieldType().hasDocValuesSkipper()
-                            ? SortedNumericDocValuesField.indexedField("", 0).fieldType()
-                            : SortedNumericDocValuesField.TYPE;
+                        IndexableFieldType ft = numericFieldType(
+                            dfm.fieldType().indexType().hasPoints(),
+                            dfm.fieldType().hasDocValuesSkipper(),
+                            Long.BYTES
+                        );
                         columnWriters[col] = new ColumnWriter(fieldName, ft, true, recycler);
+                        columnNumericKinds[col] = LongColumn.NumericKind.LONG;
                         denseColumns[col] = true;
                     } else if (fm instanceof KeywordFieldMapper kfm) {
                         if (kfm.usesBinaryDocValues()) {
@@ -1026,7 +1073,9 @@ public final class RowBatchDocumentParser {
                                 recycler
                             );
                         } else {
-                            columnWriters[col] = new ColumnWriter(fieldName, SortedSetDocValuesField.TYPE, false, recycler);
+                            boolean indexed = kfm.fieldType().indexType().hasTerms();
+                            IndexableFieldType ft = indexed ? KEYWORD_INDEXED_DV_TYPE : SortedSetDocValuesField.TYPE;
+                            columnWriters[col] = new ColumnWriter(fieldName, ft, false, recycler);
                         }
                     }
                 }
@@ -1163,7 +1212,7 @@ public final class RowBatchDocumentParser {
                 if (columnWriters[col] != null && columnWriters[col].entryCount() > 0) {
                     ColumnWriter cw = columnWriters[col];
                     if (denseColumns[col]) {
-                        builder.addDenseUserColumn(cw.fieldName(), cw.fieldType(), cw.finish(), cw.entryCount());
+                        builder.addDenseUserColumn(cw.fieldName(), cw.fieldType(), columnNumericKinds[col], cw.finish(), cw.entryCount());
                     } else {
                         builder.addUserColumn(cw.fieldName(), cw.fieldType(), cw.isLong(), cw.finish(), cw.entryCount());
                     }

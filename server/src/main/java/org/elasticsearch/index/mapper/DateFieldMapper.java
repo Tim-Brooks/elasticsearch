@@ -1160,7 +1160,7 @@ public final class DateFieldMapper extends FieldMapper {
 
     @Override
     public boolean supportsColumnMode() {
-        return docValuesParameters.enabled() && indexed == false && store == false;
+        return docValuesParameters.enabled() && store == false;
     }
 
     @Override

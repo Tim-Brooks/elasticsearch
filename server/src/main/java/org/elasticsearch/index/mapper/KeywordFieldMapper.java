@@ -1350,7 +1350,8 @@ public final class KeywordFieldMapper extends FieldMapper {
     @Override
     public boolean supportsColumnMode() {
         return fieldType().hasDocValues()
-            && fieldType.indexOptions() == IndexOptions.NONE
+            && fieldType().isDimension() == false
+            && (fieldType.indexOptions() == IndexOptions.NONE || fieldType.indexOptions() == IndexOptions.DOCS)
             && fieldType.stored() == false
             && (normalizerName == null || "default".equals(normalizerName));
     }

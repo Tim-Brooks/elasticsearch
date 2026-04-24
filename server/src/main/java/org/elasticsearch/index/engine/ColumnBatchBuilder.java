@@ -11,6 +11,7 @@ package org.elasticsearch.index.engine;
 
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.column.Column;
+import org.apache.lucene.document.column.LongColumn;
 import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.ReleasableBytesReference;
@@ -68,7 +69,7 @@ public final class ColumnBatchBuilder implements Releasable {
      * Add a finished user field column (sparse format with doc-id prefixes).
      */
     public void addUserColumn(String name, IndexableFieldType fieldType, boolean isLong, ReleasableBytesReference data, int entryCount) {
-        userColumns.add(new ColumnInfo(name, fieldType, isLong, false, data, entryCount));
+        userColumns.add(new ColumnInfo(name, fieldType, isLong, false, LongColumn.NumericKind.LONG, data, entryCount));
     }
 
     /**
@@ -76,14 +77,29 @@ public final class ColumnBatchBuilder implements Releasable {
      * Every document in the batch must have exactly one value.
      */
     public void addDenseUserColumn(String name, IndexableFieldType fieldType, ReleasableBytesReference data, int entryCount) {
-        userColumns.add(new ColumnInfo(name, fieldType, true, true, data, entryCount));
+        addDenseUserColumn(name, fieldType, LongColumn.NumericKind.LONG, data, entryCount);
+    }
+
+    /**
+     * Add a finished dense long user field column with an explicit {@link LongColumn.NumericKind}.
+     * Use {@link LongColumn.NumericKind#INT} for short/int-backed fields so that {@code pointNumBytes=4}
+     * matches Lucene's column-schema validation when points are enabled.
+     */
+    public void addDenseUserColumn(
+        String name,
+        IndexableFieldType fieldType,
+        LongColumn.NumericKind numericKind,
+        ReleasableBytesReference data,
+        int entryCount
+    ) {
+        userColumns.add(new ColumnInfo(name, fieldType, true, true, numericKind, data, entryCount));
     }
 
     /**
      * Add the finished {@code _id} column data.
      */
     public void addIdData(String name, IndexableFieldType fieldType, ReleasableBytesReference data, int entryCount) {
-        idColumn = new ColumnInfo(name, fieldType, false, false, data, entryCount);
+        idColumn = new ColumnInfo(name, fieldType, false, false, LongColumn.NumericKind.LONG, data, entryCount);
     }
 
     /**
@@ -137,9 +153,9 @@ public final class ColumnBatchBuilder implements Releasable {
         // Add user field columns
         for (ColumnInfo info : userColumns) {
             if (info.isDense) {
-                columns.add(new BytesRefDenseLongColumn(info.name, info.fieldType, info.data));
+                columns.add(new BytesRefDenseLongColumn(info.name, info.fieldType, info.numericKind, info.data));
             } else if (info.isLong) {
-                columns.add(new BytesRefLongColumn(info.name, info.fieldType, info.data, info.entryCount));
+                columns.add(new BytesRefLongColumn(info.name, info.fieldType, info.numericKind, info.data, info.entryCount));
             } else {
                 columns.add(new BytesRefBinaryColumn(info.name, info.fieldType, Column.Density.SPARSE, info.data, info.entryCount));
             }
@@ -185,6 +201,7 @@ public final class ColumnBatchBuilder implements Releasable {
         IndexableFieldType fieldType,
         boolean isLong,
         boolean isDense,
+        LongColumn.NumericKind numericKind,
         ReleasableBytesReference data,
         int entryCount
     ) {}

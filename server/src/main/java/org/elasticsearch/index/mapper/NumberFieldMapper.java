@@ -2386,7 +2386,14 @@ public class NumberFieldMapper extends FieldMapper {
     @Override
     public boolean supportsColumnMode() {
         NumberFieldType ft = fieldType();
-        return ft.indexType.hasDocValues() && ft.indexType.hasPoints() == false && stored == false && dimension == false;
+        if (ft.indexType.hasDocValues() == false || stored || dimension) {
+            return false;
+        }
+        // Only BYTE/SHORT/INTEGER/LONG are currently routed through the columnar long column.
+        return switch (type) {
+            case BYTE, SHORT, INTEGER, LONG -> true;
+            default -> false;
+        };
     }
 
     @Override

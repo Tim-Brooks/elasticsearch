@@ -31,7 +31,11 @@ public final class BytesRefDenseLongColumn extends LongColumn {
     private final int valueCount;
 
     public BytesRefDenseLongColumn(String name, IndexableFieldType fieldType, BytesReference data) {
-        super(name, fieldType, Density.DENSE);
+        this(name, fieldType, NumericKind.LONG, data);
+    }
+
+    public BytesRefDenseLongColumn(String name, IndexableFieldType fieldType, NumericKind numericKind, BytesReference data) {
+        super(name, fieldType, Density.DENSE, numericKind);
         this.pages = toPageArray(data);
         this.valueCount = countValues(pages);
     }
