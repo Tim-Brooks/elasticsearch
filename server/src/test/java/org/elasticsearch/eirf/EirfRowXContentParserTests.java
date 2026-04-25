@@ -348,6 +348,52 @@ public class EirfRowXContentParserTests extends ESTestCase {
         }
     }
 
+    public void testPositionAtLeafValueScalars() throws IOException {
+        try (EirfRowBuilder builder = new EirfRowBuilder()) {
+            builder.startDocument();
+            builder.setLong("ts", 1_700_000_000_000L);
+            builder.setInt("n", 7);
+            builder.setDouble("score", 3.5);
+            builder.setString("host", "alpha");
+            builder.setBoolean("active", true);
+            builder.setNull("maybe");
+            builder.endDocument();
+
+            try (EirfBatch batch = builder.build()) {
+                EirfSchema schema = batch.schema();
+                EirfRowReader row = batch.getRowReader(0);
+                EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(schema);
+                try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
+                    // Look up each leaf by path, then position the parser at it.
+                    int tsLeaf = schema.findLeaf("ts", 0);
+                    assertEquals(Token.VALUE_NUMBER, parser.positionAtLeafValue(tsLeaf));
+                    assertEquals(1_700_000_000_000L, parser.longValue());
+                    assertEquals(XContentParser.NumberType.LONG, parser.numberType());
+
+                    int nLeaf = schema.findLeaf("n", 0);
+                    assertEquals(Token.VALUE_NUMBER, parser.positionAtLeafValue(nLeaf));
+                    assertEquals(7, parser.intValue());
+                    assertEquals(XContentParser.NumberType.INT, parser.numberType());
+
+                    int scoreLeaf = schema.findLeaf("score", 0);
+                    assertEquals(Token.VALUE_NUMBER, parser.positionAtLeafValue(scoreLeaf));
+                    assertEquals(3.5, parser.doubleValue(), 0.0);
+
+                    int hostLeaf = schema.findLeaf("host", 0);
+                    assertEquals(Token.VALUE_STRING, parser.positionAtLeafValue(hostLeaf));
+                    assertEquals("alpha", parser.text());
+
+                    int activeLeaf = schema.findLeaf("active", 0);
+                    assertEquals(Token.VALUE_BOOLEAN, parser.positionAtLeafValue(activeLeaf));
+                    assertTrue(parser.booleanValue());
+
+                    int maybeLeaf = schema.findLeaf("maybe", 0);
+                    assertEquals(Token.VALUE_NULL, parser.positionAtLeafValue(maybeLeaf));
+                }
+            }
+        }
+    }
+
     private static void assertToken(EirfRowXContentParser parser, Token expected) throws IOException {
         assertEquals(expected, parser.nextToken());
     }

@@ -177,6 +177,23 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
         this.row = row;
     }
 
+    /**
+     * Position the parser directly at a leaf column's value, as if the tree walk had just
+     * emitted the leaf's FIELD_NAME and the caller consumed it. After this call,
+     * {@link #currentToken()} is the leaf's VALUE_* token and the typed accessors
+     * ({@link #longValue()}, {@link #doubleValue()}, {@link #text()}, {@link #numberValue()},
+     * etc.) read from that leaf. Intended for the bulk batch-indexing fast path which
+     * iterates schema leaves directly instead of walking the tree.
+     */
+    public Token positionAtLeafValue(int leafColumnIndex) {
+        this.stackDepth = 0;
+        this.compoundDepth = 0;
+        this.pendingChild = null;
+        // mark as started so subsequent nextToken() calls don't emit a stray START_OBJECT
+        this.started = true;
+        return emitLeafValue(leafColumnIndex);
+    }
+
     @Override
     public Token nextToken() throws IOException {
         if (closed) {
