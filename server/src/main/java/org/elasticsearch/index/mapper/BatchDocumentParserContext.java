@@ -26,6 +26,7 @@ import java.util.Collections;
  */
 final class BatchDocumentParserContext extends DocumentParserContext {
 
+    // TODO: Will need to implement ContentPath for future mappers.
     private final ContentPath path = new ContentPath();
     private final LuceneDocument document = new LuceneDocument();
     private final BytesRef tsid;
