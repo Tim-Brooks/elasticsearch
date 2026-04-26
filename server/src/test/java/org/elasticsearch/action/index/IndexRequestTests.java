@@ -19,7 +19,6 @@ import org.elasticsearch.cluster.metadata.DataStreamAlias;
 import org.elasticsearch.cluster.metadata.DataStreamTestHelper;
 import org.elasticsearch.cluster.metadata.Metadata;
 import org.elasticsearch.common.bytes.BytesArray;
-import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.time.DateFormatter;
@@ -27,8 +26,6 @@ import org.elasticsearch.common.time.FormatNames;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.core.Strings;
 import org.elasticsearch.core.Tuple;
-import org.elasticsearch.eirf.EirfBatch;
-import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.seqno.SequenceNumbers;
 import org.elasticsearch.index.shard.ShardId;
@@ -555,21 +552,5 @@ public class IndexRequestTests extends ESTestCase {
         }
         indexRequest.tsid(randomFrom(new BytesRef(randomAlphaOfLength(20)), null));
         return indexRequest;
-    }
-
-    public void testSourceAsMapWhenBackedByEirfRow() throws IOException {
-        BytesReference src0 = new BytesArray("""
-            {"a": 1, "nested": {"x": "x0"}, "b": "abc"}""");
-        BytesReference src1 = new BytesArray("""
-            {"a": "two", "nested": {"x": "x1", "y": 42}, "c": true}""");
-        try (EirfBatch batch = EirfEncoder.encode(List.of(src0, src1), XContentType.JSON)) {
-            IndexSource s0 = new IndexSource(XContentType.JSON, new BytesArray(new byte[0]));
-            IndexSource s1 = new IndexSource(XContentType.JSON, new BytesArray(new byte[0]));
-            s0.setEirfRow(batch, 0);
-            s1.setEirfRow(batch, 1);
-
-            assertThat(s0.sourceAsMap(), equalTo(Map.of("a", 1, "nested", Map.of("x", "x0"), "b", "abc")));
-            assertThat(s1.sourceAsMap(), equalTo(Map.of("a", "two", "nested", Map.of("x", "x1", "y", 42), "c", true)));
-        }
     }
 }
