@@ -10,7 +10,6 @@
 package org.elasticsearch.action.index;
 
 import org.elasticsearch.ElasticsearchGenerationException;
-import org.elasticsearch.TransportVersion;
 import org.elasticsearch.client.internal.Requests;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
@@ -22,11 +21,8 @@ import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.eirf.EirfBatch;
 import org.elasticsearch.eirf.EirfRowToXContent;
-import org.elasticsearch.eirf.EirfRowXContentParser;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentFactory;
-import org.elasticsearch.xcontent.XContentParser;
-import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
@@ -38,10 +34,9 @@ import java.util.Map;
  */
 public class IndexSource implements Writeable, Releasable {
 
-    private static final TransportVersion BULK_SHARD_BATCH = TransportVersion.fromName("bulk_shard_batch");
-
     private XContentType contentType;
     private BytesReference source;
+    // Not serialized currently, set when deserializing the ShardBulkRequest.
     private int rowIndex = -1;
     // Borrowed reference to the shard-level EIRF batch when rowIndex >= 0. Not serialized — the batch is transported
     // separately on BulkShardBatch and re-attached on the receiving node.
@@ -63,9 +58,6 @@ public class IndexSource implements Writeable, Releasable {
             contentType = null;
         }
         source = in.readBytesReference();
-        if (in.getTransportVersion().supports(BULK_SHARD_BATCH)) {
-            rowIndex = in.readInt();
-        }
     }
 
     @Override
@@ -78,11 +70,6 @@ public class IndexSource implements Writeable, Releasable {
             out.writeBoolean(false);
         }
         out.writeBytesReference(source);
-        if (out.getTransportVersion().supports(BULK_SHARD_BATCH)) {
-            out.writeInt(rowIndex);
-        } else {
-            assert rowIndex == -1 : "rowIndex must be -1 if transport version is < " + BULK_SHARD_BATCH;
-        }
     }
 
     public XContentType contentType() {
@@ -130,10 +117,9 @@ public class IndexSource implements Writeable, Releasable {
 
     /**
      * Materializes the row referenced by {@link #rowIndex} from the currently attached {@link EirfBatch}, writes the row back
-     * out as inline source bytes in {@link #contentType}, and clears the EIRF state. Used by the bulk retry path to undo
-     * {@link #setEirfRow} so the request can be re-encoded from scratch on reissue.
+     * out as inline source bytes in {@link #contentType}, and clears the EIRF state.
      */
-    public void inlineEirfRow() throws IOException {
+    public void ensureInlineSource() throws IOException {
         assert isClosed == false;
         if (rowIndex < 0) {
             return;
@@ -147,17 +133,6 @@ public class IndexSource implements Writeable, Releasable {
         this.eirfBatch = null;
     }
 
-    /**
-     * Attaches a shard-level {@link EirfBatch} to this source. Used on the receiving node after bulk shard request
-     * deserialization to re-associate each row-indexed source with the batch that carries its data.
-     */
-    public void attachEirfBatch(EirfBatch batch) {
-        assert isClosed == false;
-        assert rowIndex >= 0 : "attachEirfBatch requires an EIRF row index";
-        assert batch != null;
-        this.eirfBatch = batch;
-    }
-
     public boolean isClosed() {
         return isClosed;
     }
@@ -168,33 +143,12 @@ public class IndexSource implements Writeable, Releasable {
         isClosed = true;
         source = null;
         contentType = null;
+        rowIndex = -1;
         eirfBatch = null;
-    }
-
-    /**
-     * Opens an {@link XContentParser} over the document's source. When the source has been externalized to an EIRF row,
-     * returns a parser that walks the row directly; otherwise parses the inline bytes. Callers must close the parser.
-     */
-    public XContentParser createParser() throws IOException {
-        assert isClosed == false;
-        if (rowIndex >= 0) {
-            assert eirfBatch != null : "EIRF row set but no batch attached";
-            return new EirfRowXContentParser(EirfRowXContentParser.buildSchemaTree(eirfBatch.schema()), eirfBatch.getRowReader(rowIndex));
-        }
-        return XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, contentType);
     }
 
     public Map<String, Object> sourceAsMap() {
         assert isClosed == false;
-        if (rowIndex >= 0) {
-            assert eirfBatch != null : "EIRF row set but no batch attached";
-            try (XContentBuilder builder = XContentFactory.contentBuilder(contentType)) {
-                EirfRowToXContent.writeRow(eirfBatch.getRowReader(rowIndex), eirfBatch.schema(), builder);
-                return XContentHelper.convertToMap(BytesReference.bytes(builder), false, contentType).v2();
-            } catch (IOException e) {
-                throw new ElasticsearchGenerationException("Failed to materialize EIRF row [" + rowIndex + "]", e);
-            }
-        }
         return XContentHelper.convertToMap(source, false, contentType).v2();
     }
 

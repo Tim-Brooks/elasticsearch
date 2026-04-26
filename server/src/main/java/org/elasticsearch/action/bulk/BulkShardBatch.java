@@ -72,18 +72,19 @@ public class BulkShardBatch implements Writeable {
 
     /**
      * Wires the given batch into every item's {@link IndexSource} that has a pending EIRF row index. This is called on the
-     * receiving node after a {@link BulkShardRequest} (and its embedded batch) have been deserialized, so that
-     * {@link IndexSource#sourceAsMap()} and other per-item accessors can materialize row data.
+     * receiving node after a {@link BulkShardRequest} (and its embedded batch) have been deserialized.
      */
     public static void attachBatchToItems(EirfBatch batch, BulkItemRequest[] items) {
+        int rowNumber = 0;
         for (BulkItemRequest item : items) {
-            if (item.request() instanceof IndexRequest indexRequest) {
-                IndexSource indexSource = indexRequest.indexSource();
-                if (indexSource.hasEirfRow()) {
-                    indexSource.attachEirfBatch(batch);
-                }
-            }
+            // Only use batch currently when 100% index requests
+            IndexRequest indexRequest = (IndexRequest) item.request();
+            IndexSource indexSource = indexRequest.indexSource();
+            // TODO: At the moment this is just implicit. However, we may need to eventually add the row serialized directly in the
+            // source.
+            indexSource.setEirfRow(batch, rowNumber++);
         }
+        assert rowNumber == batch.docCount();
     }
 
     /**

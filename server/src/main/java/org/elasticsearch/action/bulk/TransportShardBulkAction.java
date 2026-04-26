@@ -44,7 +44,6 @@ import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Strings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.core.Tuple;
-import org.elasticsearch.eirf.EirfBatch;
 import org.elasticsearch.index.IndexingPressure;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.engine.VersionConflictEngineException;
@@ -491,10 +490,10 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             final IndexRequest request = context.getRequestToExecute();
 
             XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(request);
-            final BytesReference source = materializeSource(request, context.getBulkShardRequest());
+            request.indexSource().ensureInlineSource();
             final SourceToParse sourceToParse = new SourceToParse(
                 request.id(),
-                source,
+                request.source(),
                 request.getContentType(),
                 request.routing(),
                 request.getDynamicTemplates(),
@@ -815,7 +814,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                     continue; // ignore replication as it's a noop
                 }
                 assert response.getResponse().getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO;
-                operationResult = performOpOnReplica(response.getResponse(), item.request(), replica, request);
+                operationResult = performOpOnReplica(response.getResponse(), item.request(), replica);
             }
             assert operationResult != null : "operation result must never be null when primary response has no failure";
             location = syncOperationResultOrThrow(operationResult, location);
@@ -826,14 +825,13 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     private static Engine.Result performOpOnReplica(
         DocWriteResponse primaryResponse,
         DocWriteRequest<?> docWriteRequest,
-        IndexShard replica,
-        BulkShardRequest shardRequest
+        IndexShard replica
     ) throws Exception {
         final Engine.Result result;
         switch (docWriteRequest.opType()) {
             case CREATE, INDEX -> {
                 final IndexRequest indexRequest = (IndexRequest) docWriteRequest;
-                final SourceToParse sourceToParse = replicaSourceToParse(indexRequest, shardRequest);
+                final SourceToParse sourceToParse = replicaSourceToParse(indexRequest);
                 result = replica.applyIndexOperationOnReplica(
                     primaryResponse.getSeqNo(),
                     primaryResponse.getPrimaryTerm(),
@@ -874,11 +872,11 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         return result;
     }
 
-    static SourceToParse replicaSourceToParse(IndexRequest indexRequest, BulkShardRequest shardRequest) throws IOException {
-        final BytesReference source = materializeSource(indexRequest, shardRequest);
+    static SourceToParse replicaSourceToParse(IndexRequest indexRequest) throws IOException {
+        indexRequest.indexSource().ensureInlineSource();
         return new SourceToParse(
             indexRequest.id(),
-            source,
+            indexRequest.source(),
             indexRequest.getContentType(),
             indexRequest.routing(),
             Map.of(),
@@ -887,20 +885,5 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             XContentMeteringParserDecorator.NOOP,
             indexRequest.tsid()
         );
-    }
-
-    /**
-     * Returns source bytes for the request. When the coordinator has externalized the source into the shard-level EIRF batch,
-     * reconstitutes the original document bytes from the corresponding row.
-     */
-    private static BytesReference materializeSource(IndexRequest request, BulkShardRequest shardRequest) throws IOException {
-        if (request.indexSource().hasEirfRow() == false) {
-            return request.source();
-        }
-        final BulkShardBatch bulkShardBatch = shardRequest.getBulkShardBatch();
-        assert bulkShardBatch != null : "IndexRequest has EIRF row index but BulkShardRequest has no batch";
-        final EirfBatch batch = bulkShardBatch.getEirfBatch();
-        final int rowIdx = request.indexSource().rowIndex();
-        return ShardBatchIndexer.rowToSource(batch.getRowReader(rowIdx), batch.schema(), request.getContentType());
     }
 }
