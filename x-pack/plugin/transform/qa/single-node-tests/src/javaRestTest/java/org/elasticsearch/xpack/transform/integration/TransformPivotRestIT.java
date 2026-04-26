@@ -863,7 +863,6 @@ public class TransformPivotRestIT extends TransformRestTestCase {
     }
 
     @SuppressWarnings("unchecked")
-    @AwaitsFix(bugUrl = "json_ordering")
     public void testPivotWithTermsAgg() throws Exception {
         String transformId = "simple_terms_agg_pivot";
         String transformIndex = "pivot_reviews_via_histogram_with_terms_agg";

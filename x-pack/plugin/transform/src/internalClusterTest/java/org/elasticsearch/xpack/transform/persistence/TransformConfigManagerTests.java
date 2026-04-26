@@ -226,7 +226,6 @@ public class TransformConfigManagerTests extends TransformSingleNodeTestCase {
         );
     }
 
-    @AwaitsFix(bugUrl = "json_ordering")
     public void testExpandIds() throws Exception {
         TransformConfig transformConfig1 = TransformConfigTests.randomTransformConfig("transform1_expand");
         TransformConfig transformConfig2 = TransformConfigTests.randomTransformConfig("transform2_expand");

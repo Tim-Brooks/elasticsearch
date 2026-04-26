@@ -908,7 +908,6 @@ public class FullClusterRestartIT extends ParameterizedFullClusterRestartTestCas
     /**
      * Tests that a single document survives. Super basic smoke test.
      */
-    @AwaitsFix(bugUrl = "whitespace")
     public void testSingleDoc() throws IOException {
         String docLocation = "/" + index + "/_doc/1";
         String doc = "{\"test\": \"test\"}";

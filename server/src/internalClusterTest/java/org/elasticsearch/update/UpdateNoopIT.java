@@ -148,7 +148,6 @@ public class UpdateNoopIT extends ESIntegTestCase {
         assertEquals(3, totalNoopUpdates());
     }
 
-    @AwaitsFix(bugUrl = "whitespace")
     public void testMapAndField() throws Exception {
         updateAndCheckSource(
             0,
