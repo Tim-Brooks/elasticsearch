@@ -105,6 +105,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     private final FailureStoreMetrics failureStoreMetrics;
     private final DataStreamFailureStoreSettings dataStreamFailureStoreSettings;
     private final boolean clusterHasFailureStoreFeature;
+    private final boolean useBatch;
 
     BulkOperation(
         Task task,
@@ -183,6 +184,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         this.failureStoreMetrics = failureStoreMetrics;
         this.dataStreamFailureStoreSettings = dataStreamFailureStoreSettings;
         this.clusterHasFailureStoreFeature = clusterHasFailureStoreFeature;
+        this.useBatch = ShardBatchIndexer.BATCH_INDEXING.get(clusterService.getSettings());
     }
 
     @Override
@@ -491,7 +493,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             );
             releaseOnFinish.close();
         } else {
-            if (shouldConvertToShardBatch(bulkShardRequest)) {
+            if (ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled() && useBatch && shouldConvertToShardBatch(bulkShardRequest)) {
                 try {
                     BulkShardBatch shardBatch = BulkShardBatch.createShardBatch(bulkShardRequest);
                     bulkShardRequest.setBulkShardBatch(shardBatch);
@@ -566,7 +568,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     }
 
     private static boolean shouldConvertToShardBatch(BulkShardRequest bulkShardRequest) {
-        if (ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled() == false || bulkShardRequest.isSimulated()) {
+        if (bulkShardRequest.isSimulated()) {
             return false;
         }
         final BulkItemRequest[] items = bulkShardRequest.items();
