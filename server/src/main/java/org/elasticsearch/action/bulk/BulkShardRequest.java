@@ -35,7 +35,7 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
         Accountable,
         RawIndexingDataTransportRequest {
 
-    private static final TransportVersion BULK_SHARD_BATCH = TransportVersion.fromName("bulk_shard_batch");
+    public static final TransportVersion BULK_SHARD_BATCH = TransportVersion.fromName("bulk_shard_batch");
 
     private static final long SHALLOW_SIZE = RamUsageEstimator.shallowSizeOfInstance(BulkShardRequest.class);
 
@@ -186,8 +186,7 @@ public final class BulkShardRequest extends ReplicatedWriteRequest<BulkShardRequ
         }
         boolean supportsBatch = out.getTransportVersion().supports(BULK_SHARD_BATCH);
         if (supportsBatch == false && bulkShardBatch != null) {
-            BulkShardBatch.inlineSources(bulkShardBatch.getEirfBatch(), items);
-            bulkShardBatch = null;
+            throw new IllegalStateException("BulkShardBatch should not be set when transport version does not support it");
         }
         super.writeTo(out);
         out.writeArray((o, item) -> o.writeOptional(BulkItemRequest.THIN_WRITER, item), items);

@@ -210,12 +210,24 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                             )
                         );
                     } else {
-                        // Fall through to serial path for remaining items
+                        // Fall through to serial path for remaining items. Inline sources.
+                        try {
+                            BulkShardBatch.ensureInlineSources(request);
+                        } catch (IOException e) {
+                            delegate.onFailure(e);
+                            return;
+                        }
                         performSequentialOnPrimary(request, delegate, context, startBatchTime);
                     }
                 })
             );
         } else {
+            try {
+                BulkShardBatch.ensureInlineSources(request);
+            } catch (IOException e) {
+                listener.onFailure(e);
+                return;
+            }
             performSequentialOnPrimary(request, listener, context, startBatchTime);
         }
     }
@@ -490,7 +502,6 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             final IndexRequest request = context.getRequestToExecute();
 
             XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(request);
-            request.indexSource().ensureInlineSource();
             final SourceToParse sourceToParse = new SourceToParse(
                 request.id(),
                 request.source(),
@@ -751,11 +762,14 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                     replica
                 );
                 if (batchResult.processedItems() < request.items().length) {
+                    // Fall through to serial path for remaining items. Inline sources.
+                    BulkShardBatch.ensureInlineSources(request);
                     location = performOnReplica(request, replica, batchResult.processedItems(), batchResult.location());
                 } else {
                     location = batchResult.location();
                 }
             } else {
+                BulkShardBatch.ensureInlineSources(request);
                 location = performOnReplica(request, replica);
             }
             replica.getBulkOperationListener().afterBulk(request.totalSizeInBytes(), System.nanoTime() - startBulkTime);
@@ -872,8 +886,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
         return result;
     }
 
-    static SourceToParse replicaSourceToParse(IndexRequest indexRequest) throws IOException {
-        indexRequest.indexSource().ensureInlineSource();
+    static SourceToParse replicaSourceToParse(IndexRequest indexRequest) {
         return new SourceToParse(
             indexRequest.id(),
             indexRequest.source(),

@@ -11,16 +11,11 @@ package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.index.IndexSource;
-import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.eirf.EirfBatch;
 import org.elasticsearch.eirf.EirfEncoder;
-import org.elasticsearch.eirf.EirfRowToXContent;
-import org.elasticsearch.xcontent.XContentBuilder;
-import org.elasticsearch.xcontent.XContentFactory;
-import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
 
@@ -80,6 +75,7 @@ public class BulkShardBatch implements Writeable {
             // Only use batch currently when 100% index requests
             IndexRequest indexRequest = (IndexRequest) item.request();
             IndexSource indexSource = indexRequest.indexSource();
+            assert indexSource.bytes().length() == 0 : indexSource.bytes().length();
             // TODO: At the moment this is just implicit. However, we may need to eventually add the row serialized directly in the
             // source.
             indexSource.setEirfRow(batch, rowNumber++);
@@ -89,21 +85,19 @@ public class BulkShardBatch implements Writeable {
 
     /**
      * Reverses {@link #createShardBatch(BulkShardRequest)}: for each item that was converted to an EIRF row, serializes that row back
-     * into its original content type and restores it as the inline source, then clears the batch from the request. This is used when
-     * the target node does not support the bulk shard batch transport version.
+     * into its original content type and restores it as the inline source, then detaches the batch from the request. No-op if no
+     * batch is attached.
      */
-    public static void inlineSources(EirfBatch batch, BulkItemRequest[] items) throws IOException {
-        for (BulkItemRequest item : items) {
+    public static void ensureInlineSources(BulkShardRequest request) throws IOException {
+        BulkShardBatch shardBatch = request.getBulkShardBatch();
+        if (shardBatch == null) {
+            return;
+        }
+        for (BulkItemRequest item : request.items()) {
             IndexRequest indexRequest = (IndexRequest) item.request();
             IndexSource indexSource = indexRequest.indexSource();
-            if (indexSource.hasEirfRow() == false) {
-                continue;
-            }
-            XContentType contentType = indexSource.contentType();
-            try (XContentBuilder xcb = XContentFactory.contentBuilder(contentType)) {
-                EirfRowToXContent.writeRow(batch.getRowReader(indexSource.rowIndex()), batch.schema(), xcb);
-                indexSource.source(BytesReference.bytes(xcb), contentType);
-            }
+            indexSource.ensureInlineSource();
         }
+        request.setBulkShardBatch(null);
     }
 }
