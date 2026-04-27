@@ -598,6 +598,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
     }
 
     private static void onComplete(Engine.Result r, BulkPrimaryExecutionContext context, UpdateHelper.Result updateResult) {
+
         context.markOperationAsExecuted(r);
         final DocWriteRequest<?> docWriteRequest = context.getCurrent();
         final DocWriteRequest.OpType opType = docWriteRequest.opType();
@@ -647,6 +648,7 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
             }
             response = executionResult;
         }
+
         context.markAsCompleted(response);
         assert context.isInitial();
     }
