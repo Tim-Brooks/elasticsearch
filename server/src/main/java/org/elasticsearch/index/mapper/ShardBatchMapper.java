@@ -193,7 +193,14 @@ public final class ShardBatchMapper {
 
             final ParsedDocument parsedDoc;
             try {
-                parsedDoc = parseRow(sourceToParse, mappingLookup, metadataMappers, rowParser, columnMappers, primary);
+                parsedDoc = parseRow(
+                    sourceToParse,
+                    mappingLookup,
+                    metadataMappers,
+                    rowParser,
+                    columnMappers,
+                    primary.mapperService().parserContext()
+                );
             } catch (Exception e) {
                 logger.warn("batch indexing on primary failed to parse row [{}], falling back", i, e);
                 return null;
@@ -230,13 +237,9 @@ public final class ShardBatchMapper {
         MetadataFieldMapper[] metadataMappers,
         EirfRowXContentParser rowParser,
         FieldMapper[] columnMappers,
-        IndexShard primary
+        MappingParserContext mappingParserContext
     ) throws IOException {
-        final BatchDocumentParserContext ctx = new BatchDocumentParserContext(
-            mappingLookup,
-            primary.mapperService().parserContext(),
-            sourceToParse
-        );
+        final BatchDocumentParserContext ctx = new BatchDocumentParserContext(mappingLookup, mappingParserContext, sourceToParse);
         ctx.setParser(rowParser);
 
         for (MetadataFieldMapper metadataMapper : metadataMappers) {

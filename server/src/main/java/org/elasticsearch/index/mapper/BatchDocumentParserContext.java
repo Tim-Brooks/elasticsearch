@@ -33,13 +33,14 @@ final class BatchDocumentParserContext extends DocumentParserContext {
     private XContentParser parser;
 
     BatchDocumentParserContext(MappingLookup mappingLookup, MappingParserContext mappingParserContext, SourceToParse sourceToParse) {
-        super(mappingLookup, mappingParserContext, sourceToParse, mappingLookup.getMapping().getRoot(), rootDynamic(mappingLookup));
+        super(
+            mappingLookup,
+            mappingParserContext,
+            sourceToParse,
+            mappingLookup.getMapping().getRoot(),
+            ObjectMapper.Dynamic.getRootDynamic(mappingLookup)
+        );
         this.tsid = sourceToParse.tsid();
-    }
-
-    private static ObjectMapper.Dynamic rootDynamic(MappingLookup mappingLookup) {
-        final ObjectMapper.Dynamic dynamic = mappingLookup.getMapping().getRoot().dynamic();
-        return dynamic == null ? ObjectMapper.Dynamic.TRUE : dynamic;
     }
 
     void setParser(XContentParser parser) {

@@ -182,8 +182,7 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
      * emitted the leaf's FIELD_NAME and the caller consumed it. After this call,
      * {@link #currentToken()} is the leaf's VALUE_* token and the typed accessors
      * ({@link #longValue()}, {@link #doubleValue()}, {@link #text()}, {@link #numberValue()},
-     * etc.) read from that leaf. Intended for the bulk batch-indexing fast path which
-     * iterates schema leaves directly instead of walking the tree.
+     * etc.) read from that leaf.
      */
     public Token positionAtLeafValue(int leafColumnIndex) {
         this.stackDepth = 0;
@@ -294,6 +293,10 @@ public final class EirfRowXContentParser extends AbstractXContentParser {
             case EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY -> {
                 pushCompound(row.getArrayValue(colIdx), COMPOUND_ARRAY);
                 currentToken = Token.START_ARRAY;
+            }
+            case EirfType.KEY_VALUE -> {
+                pushCompound(row.getKeyValue(colIdx), COMPOUND_KV);
+                currentToken = Token.START_OBJECT;
             }
             default -> currentToken = Token.VALUE_NULL;
         }
