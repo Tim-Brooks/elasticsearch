@@ -505,6 +505,9 @@ tests:
 - class: org.elasticsearch.cluster.routing.allocation.decider.WriteLoadConstraintDeciderIT
   method: testAllocationExplainRebalancingNotPreferred
   issue: https://github.com/elastic/elasticsearch/issues/147627
+- class: org.elasticsearch.search.runtime.GeoPointScriptFieldExistsQueryTests
+  method: testMatches
+  issue: https://github.com/elastic/elasticsearch/issues/147630
 
 # Examples:
 #
