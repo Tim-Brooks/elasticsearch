@@ -494,7 +494,9 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             );
             releaseOnFinish.close();
         } else {
-            if (ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled() && useBatch && shouldConvertToShardBatch(bulkShardRequest)) {
+            if (ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled()
+                && useBatch
+                && BulkShardBatch.shouldConvertToShardBatch(bulkShardRequest)) {
                 try {
                     BulkShardBatch shardBatch = BulkShardBatch.createShardBatch(bulkShardRequest);
                     bulkShardRequest.setBulkShardBatch(shardBatch);
@@ -566,27 +568,6 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                 }
             });
         }
-    }
-
-    private static boolean shouldConvertToShardBatch(BulkShardRequest bulkShardRequest) {
-        if (bulkShardRequest.isSimulated()) {
-            return false;
-        }
-        final BulkItemRequest[] items = bulkShardRequest.items();
-        if (items.length == 0) {
-            return false;
-        }
-        for (BulkItemRequest item : items) {
-            final DocWriteRequest<?> request = item.request();
-            if (request instanceof IndexRequest indexRequest) {
-                if (indexRequest.indexSource().hasSource() == false || indexRequest.getContentType() == null) {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-        return true;
     }
 
     private void handleShardFailure(BulkShardRequest bulkShardRequest, ProjectMetadata projectMetadata, Exception e) {

@@ -9,6 +9,7 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.index.IndexSource;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -41,6 +42,44 @@ public class BulkShardBatch implements Writeable {
 
     public EirfBatch getEirfBatch() {
         return eirfBatch;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        BulkShardBatch that = (BulkShardBatch) o;
+        return eirfBatch.data().equals(that.eirfBatch.data());
+    }
+
+    @Override
+    public int hashCode() {
+        return eirfBatch.data().hashCode();
+    }
+
+    /**
+     * Whether the given shard-level request is eligible for conversion to an EIRF batch. Requires every item to be an
+     * {@link IndexRequest} with inline source bytes and a known content type, and the request not to be a simulation.
+     */
+    public static boolean shouldConvertToShardBatch(BulkShardRequest bulkShardRequest) {
+        if (bulkShardRequest.isSimulated()) {
+            return false;
+        }
+        final BulkItemRequest[] items = bulkShardRequest.items();
+        if (items.length == 0) {
+            return false;
+        }
+        for (BulkItemRequest item : items) {
+            final DocWriteRequest<?> request = item.request();
+            if (request instanceof IndexRequest indexRequest) {
+                if (indexRequest.indexSource().hasSource() == false || indexRequest.getContentType() == null) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
