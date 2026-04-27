@@ -11,11 +11,9 @@ package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.DocWriteResponse;
-import org.elasticsearch.action.delete.DeleteRequest;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.action.support.WriteRequest.RefreshPolicy;
-import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.action.update.UpdateResponse;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.common.bytes.BytesReference;
@@ -104,8 +102,6 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
         return new IndexRequest("index").id(id).source(XContentType.JSON, "title", "hello", "count", 42, "tag", "bulk");
     }
 
-    private static final ShardId SHARD_ID = new ShardId("index", "_na_", 0);
-
     /** Builds an EirfBatch with the given number of docs, each with title/count/tag fields. */
     private static EirfBatch buildBatch(int numDocs) {
         EirfRowBuilder builder = new EirfRowBuilder();
@@ -117,77 +113,6 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
             builder.endDocument();
         }
         return builder.build();
-    }
-
-    private static BulkShardRequest requestWithBatch(BulkItemRequest[] items, EirfBatch batch) {
-        BulkShardRequest request = new BulkShardRequest(SHARD_ID, RefreshPolicy.NONE, items);
-        request.setBulkShardBatch(new BulkShardBatch(batch));
-        return request;
-    }
-
-    private static BulkShardRequest requestWithoutBatch(BulkItemRequest[] items) {
-        return new BulkShardRequest(SHARD_ID, RefreshPolicy.NONE, items);
-    }
-
-    // -- canUseBatchIndexing tests --
-
-    public void testCanUseBatchIndexingAllIndex() {
-        BulkItemRequest[] items = new BulkItemRequest[] {
-            new BulkItemRequest(0, indexRequest("1")),
-            new BulkItemRequest(1, indexRequest("2")) };
-        try (EirfBatch batch = buildBatch(2)) {
-            assertTrue(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true));
-        }
-    }
-
-    public void testCanUseBatchIndexingAllCreate() {
-        BulkItemRequest[] items = new BulkItemRequest[] {
-            new BulkItemRequest(0, indexRequest("1").create(true)),
-            new BulkItemRequest(1, indexRequest("2").create(true)) };
-        try (EirfBatch batch = buildBatch(2)) {
-            assertTrue(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true));
-        }
-    }
-
-    public void testCanUseBatchIndexingMixedIndexAndCreate() {
-        BulkItemRequest[] items = new BulkItemRequest[] {
-            new BulkItemRequest(0, indexRequest("1")),
-            new BulkItemRequest(1, indexRequest("2").create(true)) };
-        try (EirfBatch batch = buildBatch(2)) {
-            assertTrue(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true));
-        }
-    }
-
-    public void testCanUseBatchIndexingContainsDelete() {
-        BulkItemRequest[] items = new BulkItemRequest[] {
-            new BulkItemRequest(0, indexRequest("1")),
-            new BulkItemRequest(1, new DeleteRequest("index", "2")) };
-        try (EirfBatch batch = buildBatch(2)) {
-            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true));
-        }
-    }
-
-    public void testCanUseBatchIndexingContainsUpdate() {
-        BulkItemRequest[] items = new BulkItemRequest[] {
-            new BulkItemRequest(0, indexRequest("1")),
-            new BulkItemRequest(1, new UpdateRequest("index", "2")) };
-        try (EirfBatch batch = buildBatch(2)) {
-            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), true));
-        }
-    }
-
-    public void testCanUseBatchIndexingDisabled() {
-        BulkItemRequest[] items = new BulkItemRequest[] { new BulkItemRequest(0, indexRequest("1")) };
-        try (EirfBatch batch = buildBatch(1)) {
-            assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithBatch(items, batch), false));
-        }
-    }
-
-    public void testCanUseBatchIndexingRequiresEirfBatch() {
-        BulkItemRequest[] items = new BulkItemRequest[] {
-            new BulkItemRequest(0, indexRequest("1")),
-            new BulkItemRequest(1, indexRequest("2")) };
-        assertFalse(ShardBatchIndexer.canUseBatchIndexing(requestWithoutBatch(items), true));
     }
 
     public void testBatchIndexOnPrimarySingleDoc() throws Exception {
@@ -359,8 +284,6 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
         closeShards(shard);
     }
 
-    // -- performBatchIndexOnReplica tests --
-
     public void testBatchIndexOnReplicaSingleDoc() throws Exception {
         IndexShard shard = newMappedPrimaryShard();
 
@@ -447,8 +370,6 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
             closeShards(shard, replica);
         }
     }
-
-    // -- nested / dotted field tests --
 
     private static final String NESTED_MAPPING = """
         {
