@@ -58,6 +58,24 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
 
     private static final Settings STORED_SOURCE_SETTINGS = indexSettings(IndexVersion.current(), 1, 0).build();
 
+    private final List<IndexShard> trackedShards = new ArrayList<>();
+
+    @Override
+    public void tearDown() throws Exception {
+        try {
+            for (IndexShard shard : trackedShards) {
+                try {
+                    closeShardNoCheck(shard);
+                } catch (Exception e) {
+                    // Shard may already have been closed by the test body — swallow so we still clean up the rest.
+                }
+            }
+        } finally {
+            trackedShards.clear();
+            super.tearDown();
+        }
+    }
+
     private IndexShard newMappedPrimaryShard() throws IOException {
         return newMappedPrimaryShard(SYNTHETIC_SOURCE_SETTINGS);
     }
@@ -65,6 +83,7 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
     private IndexShard newMappedPrimaryShard(Settings settings) throws IOException {
         IndexMetadata metadata = IndexMetadata.builder("index").putMapping(MAPPING).settings(settings).primaryTerm(0, 1).build();
         IndexShard shard = newShard(new ShardId(metadata.getIndex(), 0), true, "n1", metadata, null);
+        trackedShards.add(shard);
         recoverShardFromStore(shard);
         return shard;
     }
@@ -76,6 +95,7 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
     private IndexShard newMappedReplicaShard(Settings settings) throws IOException {
         IndexMetadata metadata = IndexMetadata.builder("index").putMapping(MAPPING).settings(settings).primaryTerm(0, 1).build();
         IndexShard shard = newShard(new ShardId(metadata.getIndex(), 0), false, "n1", metadata, null);
+        trackedShards.add(shard);
         recoveryEmptyReplica(shard, true);
         return shard;
     }
@@ -475,6 +495,7 @@ public class ShardBatchIndexerTests extends IndexShardTestCase {
             .primaryTerm(0, 1)
             .build();
         IndexShard shard = newShard(new ShardId(metadata.getIndex(), 0), true, "n1", metadata, null);
+        trackedShards.add(shard);
         recoverShardFromStore(shard);
         return shard;
     }
