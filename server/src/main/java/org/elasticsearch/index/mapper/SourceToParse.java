@@ -22,7 +22,7 @@ import java.util.Objects;
 
 public class SourceToParse {
 
-    private final BytesReference source;
+    private BytesReference source;
 
     private final String id;
 
@@ -70,7 +70,7 @@ public class SourceToParse {
 
     public SourceToParse(
         @Nullable String id,
-        BytesReference source,
+        @Nullable BytesReference source,
         XContentType xContentType,
         @Nullable String routing,
         Map<String, String> dynamicTemplates,
@@ -80,10 +80,12 @@ public class SourceToParse {
         @Nullable BytesRef tsid,
         @Nullable XContentParser eirfParser
     ) {
+        // Source must be null if eirfParser is not null. And vise versa.
+        assert source == null || eirfParser == null;
         this.id = id;
         // we always convert back to byte array, since we store it and Field only supports bytes..
         // so, we might as well do it here, and improve the performance of working with direct byte arrays
-        this.source = source.hasArray() ? source : new BytesArray(source.toBytesRef());
+        this.source = source == null ? null : source.hasArray() ? source : new BytesArray(source.toBytesRef());
         this.xContentType = Objects.requireNonNull(xContentType);
         this.routing = routing;
         this.dynamicTemplates = Objects.requireNonNull(dynamicTemplates);
