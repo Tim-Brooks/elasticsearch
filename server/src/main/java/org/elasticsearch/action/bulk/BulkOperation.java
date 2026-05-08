@@ -194,7 +194,7 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         // per-shard fallback that would batch the all-IndexRequest shards in a mixed bulk.
         if (ShardBatchIndexer.BATCH_INDEXING.get(clusterService.getSettings())
             && clusterService.state().getMinTransportVersion().supports(BulkShardRequest.BULK_SHARD_BATCH)
-            && ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled()
+//            && ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled()
             && BulkBatchEncoders.isBulkBatchEligible(bulkRequest)) {
             batchEncoders = new BulkBatchEncoders();
         } else {
