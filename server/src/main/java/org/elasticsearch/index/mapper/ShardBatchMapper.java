@@ -178,6 +178,10 @@ public final class ShardBatchMapper {
             // TODO: Right now we materialize a source back to avoid breaking translog assertions. We should fix the translog assertions
             // and move to just materializing the original x-content source for stored source mapping
             final BytesReference source = rowToSource(row, schema, xContentType);
+            // rowToSource walks the schema tree, which can step the row's fixed-section cursor
+            // backward across siblings. Rewind it so the per-leaf parse pass below is purely
+            // forward-stepping and stays O(N).
+            row.resetCursor();
             // TODO: Metering and getIncludeSourceOnError currently do not work with EIRF parsing
             final SourceToParse sourceToParse = new SourceToParse(
                 indexRequest.id(),

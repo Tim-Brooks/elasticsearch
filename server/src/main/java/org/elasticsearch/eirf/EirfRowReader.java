@@ -11,6 +11,7 @@ package org.elasticsearch.eirf;
 
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentString;
 
@@ -35,21 +36,37 @@ public final class EirfRowReader {
     private static final int ROW_TYPE_BYTES_OFFSET = ROW_VAR_SECTION_OFFSET_OFFSET + 4;
 
     private final EirfSchema schema;
+    // The row's full bytes, kept for the slow path (non-array-backed BytesReference)
     private final BytesReference rowData;
+    // When rowData is array-backed (the common case — rows fit comfortably in a page)
+    private final byte[] rowBytes;
+    private final int rowArrayOffset;
     private final boolean smallRow;
     private final int rowColumnCount;
     private final int typeBytesOffset;
     private final int fixedSectionOffset;
     private final int varSectionOffset;
 
-    // TODO: This class currently does a scan to read every value. We will eventually want to optimize this for sequentially reading over a
-    // row with some type of cursor.
+    // Forward-biased cursor over the fixed section. cursorLeaf is the column index whose
+    // fixed-section slot starts at cursorOffset; cursorLeaf == -1 means "before column 0",
+    // in which case cursorOffset == fixedSectionOffset. Sequential access is O(1) per leaf;
+    // a backward seek transparently rewinds and re-walks forward.
+    private int cursorLeaf;
+    private int cursorOffset;
+
     public EirfRowReader(BytesReference rowData, EirfSchema schema) {
         this.rowData = rowData;
         this.schema = schema;
+        if (rowData.hasArray()) {
+            this.rowBytes = rowData.array();
+            this.rowArrayOffset = rowData.arrayOffset();
+        } else {
+            this.rowBytes = null;
+            this.rowArrayOffset = 0;
+        }
 
         // TODO: Could consider packing all these reads into one and unpacking the values.
-        byte rowFlags = rowData.get(ROW_FLAGS_OFFSET);
+        byte rowFlags = readByte(ROW_FLAGS_OFFSET);
         this.smallRow = (rowFlags & 0x01) != 0;
         this.rowColumnCount = EirfBatch.readU16LE(rowData, ROW_COLUMN_COUNT_OFFSET);
 
@@ -57,10 +74,34 @@ public final class EirfRowReader {
             this.varSectionOffset = EirfBatch.readU16LE(rowData, ROW_VAR_SECTION_OFFSET_OFFSET);
             this.typeBytesOffset = SMALL_ROW_TYPE_BYTES_OFFSET;
         } else {
-            this.varSectionOffset = rowData.getIntLE(ROW_VAR_SECTION_OFFSET_OFFSET);
+            this.varSectionOffset = readIntLE(ROW_VAR_SECTION_OFFSET_OFFSET);
             this.typeBytesOffset = ROW_TYPE_BYTES_OFFSET;
         }
         this.fixedSectionOffset = typeBytesOffset + rowColumnCount;
+        this.cursorLeaf = -1;
+        this.cursorOffset = fixedSectionOffset;
+    }
+
+    private byte readByte(int idx) {
+        return rowBytes != null ? rowBytes[rowArrayOffset + idx] : rowData.get(idx);
+    }
+
+    private int readIntLE(int idx) {
+        return rowBytes != null ? ByteUtils.readIntLE(rowBytes, rowArrayOffset + idx) : rowData.getIntLE(idx);
+    }
+
+    private long readLongLE(int idx) {
+        return rowBytes != null ? ByteUtils.readLongLE(rowBytes, rowArrayOffset + idx) : rowData.getLongLE(idx);
+    }
+
+    /**
+     * Rewinds the fixed-section cursor to before column 0. Call this between passes that read
+     * the row in column-index order (e.g. between {@code rowToSource} and per-row mapper parsing
+     * inside {@code ShardBatchMapper}) so the next sequential pass avoids the backward fallback.
+     */
+    public void resetCursor() {
+        this.cursorLeaf = -1;
+        this.cursorOffset = fixedSectionOffset;
     }
 
     public int columnCount() {
@@ -79,7 +120,7 @@ public final class EirfRowReader {
         if (col >= rowColumnCount) {
             return EirfType.ABSENT;
         }
-        return rowData.get(typeBytesOffset + col);
+        return readByte(typeBytesOffset + col);
     }
 
     public boolean isAbsent(int col) {
@@ -98,23 +139,23 @@ public final class EirfRowReader {
     }
 
     public int getIntValue(int col) {
-        int offset = computeFixedOffset(col);
-        return rowData.getIntLE(offset);
+        int offset = seekFixedOffset(col);
+        return readIntLE(offset);
     }
 
     public float getFloatValue(int col) {
-        int offset = computeFixedOffset(col);
-        return Float.intBitsToFloat(rowData.getIntLE(offset));
+        int offset = seekFixedOffset(col);
+        return Float.intBitsToFloat(readIntLE(offset));
     }
 
     public long getLongValue(int col) {
-        int offset = computeFixedOffset(col);
-        return rowData.getLongLE(offset);
+        int offset = seekFixedOffset(col);
+        return readLongLE(offset);
     }
 
     public double getDoubleValue(int col) {
-        int offset = computeFixedOffset(col);
-        return Double.longBitsToDouble(rowData.getLongLE(offset));
+        int offset = seekFixedOffset(col);
+        return Double.longBitsToDouble(readLongLE(offset));
     }
 
     public Text getStringValue(int col) {
@@ -141,6 +182,9 @@ public final class EirfRowReader {
         long packed = readVarRef(col);
         int varOffset = varRefOffset(packed);
         int varLength = varRefLength(packed);
+        if (rowBytes != null) {
+            return new BytesRef(rowBytes, rowArrayOffset + varSectionOffset + varOffset, varLength);
+        }
         return rowData.slice(varSectionOffset + varOffset, varLength).toBytesRef();
     }
 
@@ -151,14 +195,14 @@ public final class EirfRowReader {
      * Returns a packed long: offset in lower 32 bits, length in upper 32 bits.
      */
     private long readVarRef(int col) {
-        int offset = computeFixedOffset(col);
+        int offset = seekFixedOffset(col);
         if (smallRow) {
             // Two u16 LE = one i32 LE: low 16 bits = var offset, high 16 bits = var length
-            int packed = rowData.getIntLE(offset);
+            int packed = readIntLE(offset);
             return (long) (packed & 0xFFFF) | ((long) (packed >>> 16) << 32);
         } else {
             // Two i32 LE = one i64 LE: low 32 bits = var offset, high 32 bits = var length
-            return rowData.getLongLE(offset);
+            return readLongLE(offset);
         }
     }
 
@@ -170,11 +214,31 @@ public final class EirfRowReader {
         return (int) (packed >>> 32);
     }
 
-    private int computeFixedOffset(int col) {
-        int offset = fixedSectionOffset;
-        for (int i = 0; i < col; i++) {
-            offset += EirfType.fixedSize(rowData.get(typeBytesOffset + i), smallRow);
+    /**
+     * Returns the absolute offset into {@code rowData} of column {@code col}'s fixed-section
+     * slot, advancing or rewinding the cursor as needed.
+     *
+     * <p>Forward sequential access (each leaf visited once, in 0..N order) costs one type-byte
+     * read and one add per leaf. Re-reading the same column is free. A backward seek rewinds
+     * the cursor to the start of the fixed section and re-walks forward — this preserves
+     * random-access correctness for callers that don't iterate monotonically.
+     *
+     * <p>State invariant: when {@code cursorLeaf >= 0}, {@code cursorOffset} is the start of
+     * column {@code cursorLeaf}'s fixed-section slot. When {@code cursorLeaf == -1} (the
+     * initial / reset state), {@code cursorOffset == fixedSectionOffset}, which is also
+     * column 0's offset.
+     */
+    private int seekFixedOffset(int col) {
+        if (col < cursorLeaf) {
+            cursorLeaf = -1;
+            cursorOffset = fixedSectionOffset;
         }
-        return offset;
+        while (cursorLeaf < col) {
+            if (cursorLeaf >= 0) {
+                cursorOffset += EirfType.fixedSize(readByte(typeBytesOffset + cursorLeaf), smallRow);
+            }
+            cursorLeaf++;
+        }
+        return cursorOffset;
     }
 }
