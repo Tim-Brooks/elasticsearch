@@ -48,7 +48,7 @@ public final class TSDBOrdinalFieldWriter implements OrdinalFieldWriter {
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
         long maxOrd,
-        final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
+        final OffsetsAccumulatorBase offsetsAccumulator,
         final SortedFieldObserver sortedFieldObserver,
         final SkipIndexBuilder skipIndexBuilder
     ) throws IOException {
@@ -59,7 +59,7 @@ public final class TSDBOrdinalFieldWriter implements OrdinalFieldWriter {
             field,
             valuesSource,
             maxOrd,
-            docValueCountConsumer,
+            offsetsAccumulator,
             sortedFieldObserver,
             (buffer, data) -> encoder().encodeOrdinals(buffer, data, bitsPerOrd),
             null,

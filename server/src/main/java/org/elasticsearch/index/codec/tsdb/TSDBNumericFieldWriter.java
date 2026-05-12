@@ -40,7 +40,7 @@ public final class TSDBNumericFieldWriter implements NumericFieldWriter {
     public DocValueFieldCountStats writeFieldEntry(
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
-        final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
+        final OffsetsAccumulatorBase offsetsAccumulator,
         final SortedFieldObserver sortedFieldObserver,
         final SkipIndexBuilder skipIndexBuilder,
         final boolean deferStats
@@ -51,7 +51,7 @@ public final class TSDBNumericFieldWriter implements NumericFieldWriter {
             field,
             valuesSource,
             AbstractTSDBDocValuesConsumer.NO_MAX_ORD,
-            docValueCountConsumer,
+            offsetsAccumulator,
             sortedFieldObserver,
             (buffer, data) -> encoder.encodeBlock(buffer, blockSize, data),
             null,

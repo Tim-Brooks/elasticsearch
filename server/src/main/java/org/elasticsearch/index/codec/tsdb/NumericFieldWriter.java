@@ -28,7 +28,7 @@ public interface NumericFieldWriter {
      *
      * @param field                 field being written
      * @param valuesSource          source of doc values for this field
-     * @param docValueCountConsumer receives the per-doc value count for sorted-numeric offset
+     * @param offsetsAccumulator    receives the per-doc value count for sorted-numeric offset
      *                              tracking, or {@code null} when offsets are not needed
      * @param sortedFieldObserver   receives {@code (docId, value)} pairs during the doc pass,
      *                              or {@code null} when no observer is attached
@@ -45,7 +45,7 @@ public interface NumericFieldWriter {
     DocValueFieldCountStats writeFieldEntry(
         FieldInfo field,
         TsdbDocValuesProducer valuesSource,
-        AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
+        OffsetsAccumulatorBase offsetsAccumulator,
         SortedFieldObserver sortedFieldObserver,
         SkipIndexBuilder skipIndexBuilder,
         boolean deferStats

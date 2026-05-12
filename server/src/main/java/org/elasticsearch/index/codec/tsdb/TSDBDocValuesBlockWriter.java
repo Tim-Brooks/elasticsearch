@@ -57,8 +57,8 @@ public final class TSDBDocValuesBlockWriter {
      * @param valuesSource        source of doc values for this field
      * @param maxOrd              maximum ordinal for ordinal fields, or
      *                            {@link AbstractTSDBDocValuesConsumer#NO_MAX_ORD} for numeric fields
-     * @param docValueCountConsumer receives the per-doc value count for offset tracking,
-     *                              or {@code null} when offsets are not needed
+     * @param offsetsAccumulator  receives the per-doc value count for offset tracking,
+     *                            or {@code null} when offsets are not needed
      * @param sortedFieldObserver receives {@code (docId, value)} pairs during the doc pass,
      *                            or {@code null} when no observer is attached
      * @param blockEncoder        codec-specific encoder for each value block
@@ -83,7 +83,7 @@ public final class TSDBDocValuesBlockWriter {
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
         long maxOrd,
-        final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
+        final OffsetsAccumulatorBase offsetsAccumulator,
         final SortedFieldObserver sortedFieldObserver,
         final BlockEncoder blockEncoder,
         final FieldMetaWriter fieldMetaWriter,
@@ -97,7 +97,7 @@ public final class TSDBDocValuesBlockWriter {
                 ctx,
                 field,
                 valuesSource,
-                docValueCountConsumer,
+                offsetsAccumulator,
                 blockEncoder,
                 fieldMetaWriter,
                 skipIndexBuilder,
@@ -109,7 +109,7 @@ public final class TSDBDocValuesBlockWriter {
             field,
             valuesSource,
             maxOrd,
-            docValueCountConsumer,
+            offsetsAccumulator,
             sortedFieldObserver,
             blockEncoder,
             fieldMetaWriter,
@@ -123,7 +123,7 @@ public final class TSDBDocValuesBlockWriter {
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
         long maxOrd,
-        final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
+        final OffsetsAccumulatorBase offsetsAccumulator,
         final SortedFieldObserver sortedFieldObserver,
         final BlockEncoder blockEncoder,
         final FieldMetaWriter fieldMetaWriter,
@@ -172,7 +172,7 @@ public final class TSDBDocValuesBlockWriter {
                         sortedFieldObserver.onDoc(0, 0);
                     }
                 } else if (shouldEncodeOrdinalRange(ctx, field, maxOrd, numDocsWithValue, numValues)) {
-                    assert docValueCountConsumer == null;
+                    assert offsetsAccumulator == null;
                     meta.writeInt(AbstractTSDBDocValuesConsumer.INDEX_ORDINAL_RANGE);
                     meta.writeVInt(Math.toIntExact(maxOrd));
                     meta.writeByte((byte) formatConfig.ordinalRangeBlockShift());
@@ -233,8 +233,8 @@ public final class TSDBDocValuesBlockWriter {
                             disiAccumulator.addDocId(doc);
                         }
                         final int count = values.docValueCount();
-                        if (docValueCountConsumer != null) {
-                            docValueCountConsumer.accept(count);
+                        if (offsetsAccumulator != null) {
+                            offsetsAccumulator.addDoc(count);
                         }
                         for (int i = 0; i < count; ++i) {
                             final long v = values.nextValue();
@@ -300,7 +300,7 @@ public final class TSDBDocValuesBlockWriter {
         final NumericWriteContext ctx,
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
-        final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
+        final OffsetsAccumulatorBase offsetsAccumulator,
         final BlockEncoder blockEncoder,
         final FieldMetaWriter fieldMetaWriter,
         final SkipIndexBuilder skipIndexBuilder,
@@ -333,8 +333,8 @@ public final class TSDBDocValuesBlockWriter {
             final int count = values.docValueCount();
             numDocsWithValue++;
             numValues += count;
-            if (docValueCountConsumer != null) {
-                docValueCountConsumer.accept(count);
+            if (offsetsAccumulator != null) {
+                offsetsAccumulator.addDoc(count);
             }
             for (int i = 0; i < count; ++i) {
                 final long v = values.nextValue();

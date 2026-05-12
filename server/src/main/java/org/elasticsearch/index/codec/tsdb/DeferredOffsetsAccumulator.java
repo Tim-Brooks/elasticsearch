@@ -13,7 +13,6 @@ import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.util.packed.DirectMonotonicWriter;
 
-import java.io.Closeable;
 import java.io.IOException;
 
 /**
@@ -26,7 +25,7 @@ import java.io.IOException;
  * 1 byte per single-valued doc, 1-2 bytes per typical multi-valued doc), so memory usage
  * stays compact.
  */
-final class DeferredOffsetsAccumulator implements Closeable {
+final class DeferredOffsetsAccumulator extends OffsetsAccumulatorBase {
 
     private final ByteBuffersDataOutput countBuffer = new ByteBuffersDataOutput();
     private int numDocs = 0;
@@ -35,7 +34,8 @@ final class DeferredOffsetsAccumulator implements Closeable {
      * Buffers one document's value count. Must be called once per document with at least one
      * value, in doc order.
      */
-    void addDoc(int docValueCount) throws IOException {
+    @Override
+    public void addDoc(int docValueCount) throws IOException {
         countBuffer.writeVInt(docValueCount);
         numDocs++;
     }
