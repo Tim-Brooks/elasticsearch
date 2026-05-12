@@ -14,6 +14,7 @@ import org.elasticsearch.index.codec.tsdb.AbstractTSDBDocValuesConsumer;
 import org.elasticsearch.index.codec.tsdb.DocValueFieldCountStats;
 import org.elasticsearch.index.codec.tsdb.NumericFieldWriter;
 import org.elasticsearch.index.codec.tsdb.NumericWriteContext;
+import org.elasticsearch.index.codec.tsdb.SkipIndexBuilder;
 import org.elasticsearch.index.codec.tsdb.SortedFieldObserver;
 import org.elasticsearch.index.codec.tsdb.TSDBDocValuesBlockWriter;
 import org.elasticsearch.index.codec.tsdb.TsdbDocValuesProducer;
@@ -64,7 +65,9 @@ final class ES95NumericFieldWriter implements NumericFieldWriter {
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
         final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
-        final SortedFieldObserver sortedFieldObserver
+        final SortedFieldObserver sortedFieldObserver,
+        final SkipIndexBuilder skipIndexBuilder,
+        final boolean deferStats
     ) throws IOException {
         final EncodingPipeline state = createPipeline();
         return BLOCK_WRITER.writeFieldEntry(
@@ -75,7 +78,9 @@ final class ES95NumericFieldWriter implements NumericFieldWriter {
             docValueCountConsumer,
             sortedFieldObserver,
             (buffer, data) -> state.blockEncoder.encode(buffer, buffer.length, data),
-            () -> FieldDescriptor.write(ctx.meta(), state.descriptor)
+            () -> FieldDescriptor.write(ctx.meta(), state.descriptor),
+            skipIndexBuilder,
+            deferStats
         );
     }
 

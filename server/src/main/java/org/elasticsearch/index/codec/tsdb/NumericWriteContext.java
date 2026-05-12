@@ -35,4 +35,13 @@ public record NumericWriteContext(
     int blockSize,
     int primarySortFieldNumber,
     TSDBDocValuesFormatConfig formatConfig
-) {}
+) {
+    /**
+     * Returns a copy of this context with {@code meta} replaced. Used to redirect a single
+     * field's metadata writes into a per-field buffer so that the consumer can prepend
+     * skip-index meta (built inline during the field write) before the field's own meta.
+     */
+    public NumericWriteContext withMeta(IndexOutput newMeta) {
+        return new NumericWriteContext(newMeta, data, dir, ioContext, maxDoc, blockSize, primarySortFieldNumber, formatConfig);
+    }
+}

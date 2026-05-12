@@ -47,7 +47,6 @@ import org.elasticsearch.core.IOUtils;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.List;
 
 import static org.elasticsearch.index.codec.tsdb.DocValuesConsumerUtil.compatibleWithOptimizedMerge;
@@ -114,7 +113,6 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
 
     private final String metaCodecName;
     protected final TSDBDocValuesFormatConfig formatConfig;
-    final long[] skipIndexJumpLengthPerLevel;
     private final DocOffsetsCodec.Encoder docOffsetsEncoder;
     private final SortedFieldObserverFactory sortedFieldObserverFactory;
     private final NumericBlockCodec numericCodec;
@@ -164,7 +162,6 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         this.numericBlockSize = 1 << formatConfig.numericBlockShift();
         this.metaCodecName = metaCodec;
         this.formatConfig = formatConfig;
-        this.skipIndexJumpLengthPerLevel = skipIndexJumpLengths(formatConfig.skipIndexLevelShift(), formatConfig.skipIndexMaxLevel());
 
         boolean success = false;
         try {
@@ -260,36 +257,100 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
                 return DocValues.singleton(valuesProducer.getNumeric(f));
             }
         };
-        if (field.docValuesSkipIndexType() != DocValuesSkipIndexType.NONE) {
-            writeSkipIndex(field, producer);
-        }
-        writeNumericField(field, producer, null);
+        final boolean deferStats = producer.mergeStats.supported() == false;
+        writeFieldWithSkipIndex(
+            field,
+            producer,
+            deferStats,
+            (ctx, skipBuilder, defer) -> writeNumericField(ctx, field, producer, null, skipBuilder, defer)
+        );
     }
 
     private DocValueFieldCountStats writeNumericField(
+        final NumericWriteContext ctx,
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
-        final OffsetsAccumulator offsetsAccumulator
+        final DocValueCountConsumer countConsumer,
+        final SkipIndexBuilder skipIndexBuilder,
+        final boolean deferStats
     ) throws IOException {
-        return numericCodec.createWriter(writeContext)
-            .writeFieldEntry(field, valuesSource, offsetsAccumulator != null ? offsetsAccumulator::addDoc : null, null);
+        return numericCodec.createWriter(ctx).writeFieldEntry(field, valuesSource, countConsumer, null, skipIndexBuilder, deferStats);
     }
 
     private DocValueFieldCountStats writeOrdinalField(
+        final NumericWriteContext ctx,
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
         long maxOrd,
-        final OffsetsAccumulator offsetsAccumulator,
-        final SortedFieldObserver sortedFieldObserver
+        final DocValueCountConsumer countConsumer,
+        final SortedFieldObserver sortedFieldObserver,
+        final SkipIndexBuilder skipIndexBuilder
     ) throws IOException {
-        return ordinalCodec.createWriter(writeContext)
-            .writeFieldEntry(
-                field,
-                valuesSource,
-                maxOrd,
-                offsetsAccumulator != null ? offsetsAccumulator::addDoc : null,
-                sortedFieldObserver
-            );
+        return ordinalCodec.createWriter(ctx)
+            .writeFieldEntry(field, valuesSource, maxOrd, countConsumer, sortedFieldObserver, skipIndexBuilder);
+    }
+
+    /**
+     * Runs one field's write operation, optionally buffering its meta so the skip-index
+     * meta header (built inline during the write) can be prepended and stats (computed
+     * inline during the write) can be written in their on-disk position before the rest
+     * of the field meta.
+     *
+     * <p>When the field has no skip index and stats are already known (merge stats supported),
+     * the fast path writes directly to {@code this.meta} with no buffering.
+     *
+     * @param field      the field being written
+     * @param producer   the doc values source (used for the {@code buildFromValues}
+     *                   fallback when the field write path doesn't iterate per-value,
+     *                   e.g. single-ordinal)
+     * @param deferStats {@code true} when {@code mergeStats.supported() == false} for a
+     *                   numeric/sorted-numeric field; causes stats to be computed inline
+     *                   instead of via a separate pre-counting pass
+     * @param op         the field write callback; receives a possibly-buffered context, a
+     *                   nullable skip-index builder, and the effective {@code deferStats}
+     *                   flag
+     */
+    private void writeFieldWithSkipIndex(
+        final FieldInfo field,
+        final TsdbDocValuesProducer producer,
+        final boolean deferStats,
+        final FieldWriteOp op
+    ) throws IOException {
+        final boolean hasSkipIndex = field.docValuesSkipIndexType() != DocValuesSkipIndexType.NONE;
+        if (hasSkipIndex == false && deferStats == false) {
+            op.run(writeContext, null, false);
+            return;
+        }
+        final SkipIndexBuilder skipBuilder = hasSkipIndex ? new SkipIndexBuilder(formatConfig) : null;
+        final ByteBuffersDataOutput metaBuf = new ByteBuffersDataOutput();
+        try (ByteBuffersIndexOutput bufferedMeta = new ByteBuffersIndexOutput(metaBuf, "tsdb-field-meta", "tsdb-field-meta")) {
+            final NumericWriteContext fieldCtx = writeContext.withMeta(bufferedMeta);
+            final DocValueFieldCountStats stats = op.run(fieldCtx, skipBuilder, deferStats);
+            if (skipBuilder != null && skipBuilder.isEmpty()) {
+                // Field-write path didn't iterate per-value (e.g. maxOrd == 1). Drive the
+                // builder directly over the values to keep the skip index byte-identical
+                // to the legacy single-pass implementation.
+                skipBuilder.buildFromValues(producer.getSortedNumeric(field));
+            }
+            if (skipBuilder != null) {
+                skipBuilder.writeSkipIndex(skip, meta);
+            }
+            if (deferStats) {
+                meta.writeLong(stats.numValues());
+                meta.writeInt(stats.numDocsWithField());
+            }
+            metaBuf.copyTo(meta);
+        }
+    }
+
+    /**
+     * Callback for {@link #writeFieldWithSkipIndex}. The implementation invokes the field
+     * writer with the provided context and threads the skip-index builder + deferred-stats
+     * flag through to the block writer.
+     */
+    @FunctionalInterface
+    private interface FieldWriteOp {
+        DocValueFieldCountStats run(NumericWriteContext ctx, SkipIndexBuilder skipBuilder, boolean deferStats) throws IOException;
     }
 
     @Override
@@ -664,25 +725,27 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
                 return DocValues.singleton(sortedOrds);
             }
         };
-        if (field.docValuesSkipIndexType() != DocValuesSkipIndexType.NONE) {
-            writeSkipIndex(field, producer);
-        }
-        if (addTypeByte) {
-            meta.writeByte((byte) 0); // multiValued (0 = singleValued)
-        }
-        final SortedFieldObserver observer = sortedFieldObserverFactory.create(field);
-        final SortedDocValues sorted = valuesProducer.getSorted(field);
-        final int maxOrd = sorted.getValueCount();
-        addTermsDict(DocValues.singleton(sorted), observer);
-        observer.prepareForDocs();
-        writeOrdinalField(field, producer, maxOrd, null, observer);
-        if (primarySortFieldNumber == field.number) {
-            meta.writeByte(observer != SortedFieldObserver.NOOP ? (byte) 1 : (byte) 0);
-        }
-        observer.flush(data, meta);
+        writeFieldWithSkipIndex(field, producer, false, (ctx, skipBuilder, defer) -> {
+            final IndexOutput fieldMeta = ctx.meta();
+            if (addTypeByte) {
+                fieldMeta.writeByte((byte) 0); // multiValued (0 = singleValued)
+            }
+            final SortedFieldObserver observer = sortedFieldObserverFactory.create(field);
+            final SortedDocValues sorted = valuesProducer.getSorted(field);
+            final int maxOrd = sorted.getValueCount();
+            addTermsDict(DocValues.singleton(sorted), observer, fieldMeta);
+            observer.prepareForDocs();
+            DocValueFieldCountStats stats = writeOrdinalField(ctx, field, producer, maxOrd, null, observer, skipBuilder);
+            if (primarySortFieldNumber == field.number) {
+                fieldMeta.writeByte(observer != SortedFieldObserver.NOOP ? (byte) 1 : (byte) 0);
+            }
+            observer.flush(data, fieldMeta);
+            return stats;
+        });
     }
 
-    private void addTermsDict(final SortedSetDocValues values, final SortedFieldObserver observer) throws IOException {
+    private void addTermsDict(final SortedSetDocValues values, final SortedFieldObserver observer, final IndexOutput meta)
+        throws IOException {
         final long size = values.getValueCount();
         meta.writeVLong(size);
 
@@ -757,7 +820,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         meta.writeLong(start);
         meta.writeLong(data.getFilePointer() - start);
 
-        writeTermsIndex(values);
+        writeTermsIndex(values, meta);
     }
 
     private int compressAndGetTermsDictBlockLength(
@@ -780,7 +843,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         return bufferedOutput;
     }
 
-    private void writeTermsIndex(final SortedSetDocValues values) throws IOException {
+    private void writeTermsIndex(final SortedSetDocValues values, final IndexOutput meta) throws IOException {
         final long size = values.getValueCount();
         meta.writeInt(formatConfig.termsReverseIndexShift());
         long start = data.getFilePointer();
@@ -829,87 +892,96 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
     }
 
     private void writeSortedNumericField(final FieldInfo field, final TsdbDocValuesProducer valuesSource) throws IOException {
-        if (field.docValuesSkipIndexType() != DocValuesSkipIndexType.NONE) {
-            writeSkipIndex(field, valuesSource);
-        }
-        writeEntry(field, valuesSource, accumulator -> writeNumericField(field, valuesSource, accumulator));
+        final boolean deferStats = valuesSource.mergeStats.supported() == false;
+        writeFieldWithSkipIndex(
+            field,
+            valuesSource,
+            deferStats,
+            (ctx, skipBuilder, defer) -> writeEntryBuffered(
+                ctx,
+                field,
+                valuesSource,
+                skipBuilder,
+                defer,
+                (accumulator, c) -> writeNumericField(c, field, valuesSource, accumulator, skipBuilder, defer)
+            )
+        );
     }
 
     private void writeSortedSetMultiValueField(final FieldInfo field, final TsdbDocValuesProducer valuesSource, long maxOrd)
         throws IOException {
-        if (field.docValuesSkipIndexType() != DocValuesSkipIndexType.NONE) {
-            writeSkipIndex(field, valuesSource);
-        }
-        meta.writeByte((byte) 1); // multiValued (1 = multiValued)
-        writeEntry(field, valuesSource, accumulator -> writeOrdinalField(field, valuesSource, maxOrd, accumulator, null));
+        // Ordinal fields always know maxOrd up front; deferred stats does not apply here.
+        writeFieldWithSkipIndex(field, valuesSource, false, (ctx, skipBuilder, defer) -> {
+            ctx.meta().writeByte((byte) 1); // multiValued (1 = multiValued)
+            return writeEntryBuffered(
+                ctx,
+                field,
+                valuesSource,
+                skipBuilder,
+                false,
+                (accumulator, c) -> writeOrdinalField(c, field, valuesSource, maxOrd, accumulator, null, skipBuilder)
+            );
+        });
     }
 
     /**
-     * Writes one field's doc values and returns its {@link DocValueFieldCountStats}.
+     * Writes one field's body (value blocks + per-doc address table when needed) returning its
+     * {@link DocValueFieldCountStats}.
      *
      * <p>Multi-valued fields need a per-doc address table so the reader can locate each
      * document's values. Building this table requires knowing the value count per document.
      * During merges, re-iterating the merge-sorted values to collect these counts is
      * expensive, so an {@link OffsetsAccumulator} is passed to collect them in a single
-     * pass. This callback isolates the part that differs between numeric and ordinal
-     * writing, while {@link #writeEntry} owns the shared logic: deciding whether an
-     * accumulator is needed and building the address table.
+     * pass. On the flush path (merge stats unavailable), a {@link DeferredOffsetsAccumulator}
+     * collects the per-doc counts inline during the encoding loop and replays them after.
      *
-     * <p>{@link #writeEntry} calls {@link #write} with a non-null accumulator during
-     * optimized merges when the field is multi-valued, or {@code null} otherwise.
+     * <p>The {@code writer} callback writes one field's value blocks and returns the stats. It
+     * receives the optional {@link DocValueCountConsumer} that should be invoked once per doc
+     * with that doc's value count.
      */
     @FunctionalInterface
     private interface DocValueWriter {
-        DocValueFieldCountStats write(OffsetsAccumulator accumulator) throws IOException;
+        DocValueFieldCountStats write(DocValueCountConsumer countConsumer, NumericWriteContext ctx) throws IOException;
     }
 
-    private void writeEntry(final FieldInfo field, final TsdbDocValuesProducer valuesSource, final DocValueWriter docValueWriter)
-        throws IOException {
+    private DocValueFieldCountStats writeEntryBuffered(
+        final NumericWriteContext ctx,
+        final FieldInfo field,
+        final TsdbDocValuesProducer valuesSource,
+        final SkipIndexBuilder skipIndexBuilder,
+        final boolean deferStats,
+        final DocValueWriter writer
+    ) throws IOException {
         if (valuesSource.mergeStats.supported()) {
             int numDocsWithField = valuesSource.mergeStats.sumNumDocsWithField();
             long numValues = valuesSource.mergeStats.sumNumValues();
             if (numDocsWithField == numValues) {
-                docValueWriter.write(null);
-            } else {
-                assert numValues > numDocsWithField;
-                try (
-                    OffsetsAccumulator accumulator = new OffsetsAccumulator(
-                        dir,
-                        context,
-                        data,
-                        numDocsWithField,
-                        formatConfig.directMonotonicBlockShift()
-                    )
-                ) {
-                    docValueWriter.write(accumulator);
-                    accumulator.build(meta, data);
-                }
+                return writer.write(null, ctx);
             }
-        } else {
-            DocValueFieldCountStats stats = docValueWriter.write(null);
-            assert stats.numValues() >= stats.numDocsWithField();
-
-            if (stats.numValues() > stats.numDocsWithField()) {
-                long start = data.getFilePointer();
-                meta.writeLong(start);
-                meta.writeVInt(formatConfig.directMonotonicBlockShift());
-
-                final DirectMonotonicWriter addressesWriter = DirectMonotonicWriter.getInstance(
-                    meta,
+            assert numValues > numDocsWithField;
+            try (
+                OffsetsAccumulator accumulator = new OffsetsAccumulator(
+                    dir,
+                    context,
                     data,
-                    stats.numDocsWithField() + 1L,
+                    numDocsWithField,
                     formatConfig.directMonotonicBlockShift()
-                );
-                long addr = 0;
-                addressesWriter.add(addr);
-                SortedNumericDocValues values = valuesSource.getSortedNumeric(field);
-                for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
-                    addr += values.docValueCount();
-                    addressesWriter.add(addr);
-                }
-                addressesWriter.finish();
-                meta.writeLong(data.getFilePointer() - start);
+                )
+            ) {
+                DocValueFieldCountStats stats = writer.write(accumulator::addDoc, ctx);
+                accumulator.build(ctx.meta(), data);
+                return stats;
             }
+        }
+        // Flush path: collect per-doc counts inline so we don't have to re-iterate values
+        // after the field write to build the address table.
+        try (DeferredOffsetsAccumulator deferred = new DeferredOffsetsAccumulator()) {
+            DocValueFieldCountStats stats = writer.write(deferred::addDoc, ctx);
+            assert stats.numValues() >= stats.numDocsWithField();
+            if (stats.numValues() > stats.numDocsWithField()) {
+                deferred.build(ctx.meta(), data, stats.numDocsWithField(), formatConfig.directMonotonicBlockShift());
+            }
+            return stats;
         }
     }
 
@@ -1028,7 +1100,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
             }
         }, maxOrd);
 
-        addTermsDict(valuesProducer.getSortedSet(field), SortedFieldObserver.NOOP);
+        addTermsDict(valuesProducer.getSortedSet(field), SortedFieldObserver.NOOP, meta);
     }
 
     @Override
@@ -1056,146 +1128,4 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         }
     }
 
-    private static class SkipAccumulator {
-        int minDocID;
-        int maxDocID;
-        int docCount;
-        long minValue;
-        long maxValue;
-
-        SkipAccumulator(int docID) {
-            minDocID = docID;
-            minValue = Long.MAX_VALUE;
-            maxValue = Long.MIN_VALUE;
-            docCount = 0;
-        }
-
-        boolean isDone(int skipIndexIntervalSize, int valueCount, long nextValue, int nextDoc) {
-            if (docCount < skipIndexIntervalSize) {
-                return false;
-            }
-            return valueCount > 1 || minValue != maxValue || minValue != nextValue || docCount != nextDoc - minDocID;
-        }
-
-        void accumulate(long value) {
-            minValue = Math.min(minValue, value);
-            maxValue = Math.max(maxValue, value);
-        }
-
-        void accumulate(final SkipAccumulator other) {
-            assert minDocID <= other.minDocID && maxDocID < other.maxDocID;
-            maxDocID = other.maxDocID;
-            minValue = Math.min(minValue, other.minValue);
-            maxValue = Math.max(maxValue, other.maxValue);
-            docCount += other.docCount;
-        }
-
-        void nextDoc(int docID) {
-            maxDocID = docID;
-            ++docCount;
-        }
-
-        public static SkipAccumulator merge(final List<SkipAccumulator> list, int index, int length) {
-            SkipAccumulator acc = new SkipAccumulator(list.get(index).minDocID);
-            for (int i = 0; i < length; i++) {
-                acc.accumulate(list.get(index + i));
-            }
-            return acc;
-        }
-    }
-
-    private void writeSkipIndex(final FieldInfo field, final DocValuesProducer valuesProducer) throws IOException {
-        assert field.docValuesSkipIndexType() != DocValuesSkipIndexType.NONE;
-        final long start = skip.getFilePointer();
-        final SortedNumericDocValues values = valuesProducer.getSortedNumeric(field);
-        long globalMaxValue = Long.MIN_VALUE;
-        long globalMinValue = Long.MAX_VALUE;
-        int globalDocCount = 0;
-        int maxDocId = -1;
-        final List<SkipAccumulator> accumulators = new ArrayList<>();
-        SkipAccumulator accumulator = null;
-        final int maxAccumulators = 1 << (formatConfig.skipIndexLevelShift() * (formatConfig.skipIndexMaxLevel() - 1));
-        for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
-            final long firstValue = values.nextValue();
-            if (accumulator != null && accumulator.isDone(formatConfig.skipIndexIntervalSize(), values.docValueCount(), firstValue, doc)) {
-                globalMaxValue = Math.max(globalMaxValue, accumulator.maxValue);
-                globalMinValue = Math.min(globalMinValue, accumulator.minValue);
-                globalDocCount += accumulator.docCount;
-                maxDocId = accumulator.maxDocID;
-                accumulator = null;
-                if (accumulators.size() == maxAccumulators) {
-                    writeLevels(accumulators);
-                    accumulators.clear();
-                }
-            }
-            if (accumulator == null) {
-                accumulator = new SkipAccumulator(doc);
-                accumulators.add(accumulator);
-            }
-            accumulator.nextDoc(doc);
-            accumulator.accumulate(firstValue);
-            for (int i = 1, end = values.docValueCount(); i < end; ++i) {
-                accumulator.accumulate(values.nextValue());
-            }
-        }
-
-        if (accumulators.isEmpty() == false) {
-            globalMaxValue = Math.max(globalMaxValue, accumulator.maxValue);
-            globalMinValue = Math.min(globalMinValue, accumulator.minValue);
-            globalDocCount += accumulator.docCount;
-            maxDocId = accumulator.maxDocID;
-            writeLevels(accumulators);
-        }
-        meta.writeLong(start); // record the start in meta
-        meta.writeLong(skip.getFilePointer() - start); // record the length
-        assert globalDocCount == 0 || globalMaxValue >= globalMinValue;
-        meta.writeLong(globalMaxValue);
-        meta.writeLong(globalMinValue);
-        assert globalDocCount <= maxDocId + 1;
-        meta.writeInt(globalDocCount);
-        meta.writeInt(maxDocId);
-    }
-
-    private void writeLevels(final List<SkipAccumulator> accumulators) throws IOException {
-        final List<List<SkipAccumulator>> accumulatorsLevels = new ArrayList<>(formatConfig.skipIndexMaxLevel());
-        accumulatorsLevels.add(accumulators);
-        for (int i = 0; i < formatConfig.skipIndexMaxLevel() - 1; i++) {
-            accumulatorsLevels.add(buildLevel(accumulatorsLevels.get(i)));
-        }
-        int totalAccumulators = accumulators.size();
-        for (int index = 0; index < totalAccumulators; index++) {
-            final int levels = getLevels(index, totalAccumulators);
-            skip.writeByte((byte) levels);
-            for (int level = levels - 1; level >= 0; level--) {
-                final SkipAccumulator acc = accumulatorsLevels.get(level).get(index >> (formatConfig.skipIndexLevelShift() * level));
-                skip.writeInt(acc.maxDocID);
-                skip.writeInt(acc.minDocID);
-                skip.writeLong(acc.maxValue);
-                skip.writeLong(acc.minValue);
-                skip.writeInt(acc.docCount);
-            }
-        }
-    }
-
-    private List<SkipAccumulator> buildLevel(final List<SkipAccumulator> accumulators) {
-        final int levelSize = 1 << formatConfig.skipIndexLevelShift();
-        final List<SkipAccumulator> collector = new ArrayList<>();
-        for (int i = 0; i < accumulators.size() - levelSize + 1; i += levelSize) {
-            collector.add(SkipAccumulator.merge(accumulators, i, levelSize));
-        }
-        return collector;
-    }
-
-    private int getLevels(int index, int size) {
-        if (Integer.numberOfTrailingZeros(index) >= formatConfig.skipIndexLevelShift()) {
-            final int left = size - index;
-            for (int level = formatConfig.skipIndexMaxLevel() - 1; level > 0; level--) {
-                final int numberIntervals = 1 << (formatConfig.skipIndexLevelShift() * level);
-                if (left >= numberIntervals && index % numberIntervals == 0) {
-                    return level + 1;
-                }
-            }
-        }
-        return 1;
-    }
 }
