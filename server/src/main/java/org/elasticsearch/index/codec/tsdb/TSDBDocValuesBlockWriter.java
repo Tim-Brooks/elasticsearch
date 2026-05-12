@@ -16,6 +16,7 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.store.ByteBuffersIndexOutput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.packed.DirectMonotonicWriter;
 import org.elasticsearch.core.IOUtils;
 
@@ -61,41 +62,16 @@ public final class TSDBDocValuesBlockWriter {
      * @param sortedFieldObserver receives {@code (docId, value)} pairs during the doc pass,
      *                            or {@code null} when no observer is attached
      * @param blockEncoder        codec-specific encoder for each value block
-     * @param blockSize           number of values per block for this field; must be a
-     *                            positive power of two. ES95 passes the resolved
-     *                            {@code PipelineConfig.blockSize()}, while ES819 numeric
-     *                            and ordinal writers pass {@code ctx.blockSize()}
-     * @return the field's doc value count statistics
-     */
-    public DocValueFieldCountStats writeFieldEntry(
-        final NumericWriteContext ctx,
-        final FieldInfo field,
-        final TsdbDocValuesProducer valuesSource,
-        long maxOrd,
-        final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
-        final SortedFieldObserver sortedFieldObserver,
-        final BlockEncoder blockEncoder,
-        int blockSize
-    ) throws IOException {
-        return writeFieldEntry(ctx, field, valuesSource, maxOrd, docValueCountConsumer, sortedFieldObserver, blockEncoder, null, blockSize);
-    }
-
-    /**
-     * Writes one field's value blocks, block index, and DISI metadata with an optional
-     * metadata header hook.
-     *
-     * @param ctx                 segment-scoped write state
-     * @param field               field being written
-     * @param valuesSource        source of doc values for this field
-     * @param maxOrd              maximum ordinal for ordinal fields, or
-     *                            {@link AbstractTSDBDocValuesConsumer#NO_MAX_ORD} for numeric fields
-     * @param docValueCountConsumer receives the per-doc value count for offset tracking,
-     *                              or {@code null} when offsets are not needed
-     * @param sortedFieldObserver receives {@code (docId, value)} pairs during the doc pass,
-     *                            or {@code null} when no observer is attached
-     * @param blockEncoder        codec-specific encoder for each value block
      * @param fieldMetaWriter    optional callback invoked after the block-shift marker to write
      *                            additional per-field metadata, or {@code null}
+     * @param skipIndexBuilder   optional skip-index builder; when non-null the per-value loop
+     *                            feeds {@code onNewDoc}/{@code accumulate} so the skip index can
+     *                            be built without a separate iteration over the field's doc values
+     * @param deferStats         when {@code true} and merge stats are unavailable, the pre-counting
+     *                            iteration is skipped and stats are computed inline. Stats are
+     *                            <b>not</b> written to {@code ctx.meta()} — the caller writes them
+     *                            to the real meta stream after this method returns. Only valid for
+     *                            numeric fields ({@code maxOrd < 0})
      * @param blockSize           number of values per block for this field; must be a
      *                            positive power of two. ES95 passes the resolved
      *                            {@code PipelineConfig.blockSize()}, while ES819 numeric
@@ -111,6 +87,47 @@ public final class TSDBDocValuesBlockWriter {
         final SortedFieldObserver sortedFieldObserver,
         final BlockEncoder blockEncoder,
         final FieldMetaWriter fieldMetaWriter,
+        final SkipIndexBuilder skipIndexBuilder,
+        final boolean deferStats,
+        int blockSize
+    ) throws IOException {
+        assert deferStats == false || maxOrd < 0 : "deferStats is only valid for numeric fields";
+        if (deferStats && valuesSource.mergeStats.supported() == false) {
+            return writeFieldEntryDeferredStats(
+                ctx,
+                field,
+                valuesSource,
+                docValueCountConsumer,
+                blockEncoder,
+                fieldMetaWriter,
+                skipIndexBuilder,
+                blockSize
+            );
+        }
+        return writeFieldEntryKnownStats(
+            ctx,
+            field,
+            valuesSource,
+            maxOrd,
+            docValueCountConsumer,
+            sortedFieldObserver,
+            blockEncoder,
+            fieldMetaWriter,
+            skipIndexBuilder,
+            blockSize
+        );
+    }
+
+    private DocValueFieldCountStats writeFieldEntryKnownStats(
+        final NumericWriteContext ctx,
+        final FieldInfo field,
+        final TsdbDocValuesProducer valuesSource,
+        long maxOrd,
+        final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
+        final SortedFieldObserver sortedFieldObserver,
+        final BlockEncoder blockEncoder,
+        final FieldMetaWriter fieldMetaWriter,
+        final SkipIndexBuilder skipIndexBuilder,
         int blockSize
     ) throws IOException {
         assert blockSize > 0 && (blockSize & (blockSize - 1)) == 0 : "blockSize must be a positive power of two, got " + blockSize;
@@ -179,6 +196,11 @@ public final class TSDBDocValuesBlockWriter {
                             disiAccumulator.addDocId(doc);
                         }
                         final long nextOrd = values.nextValue();
+                        if (skipIndexBuilder != null) {
+                            // Ordinal range only fires for single-valued fields; one value per doc.
+                            skipIndexBuilder.onNewDoc(doc, 1, nextOrd);
+                            skipIndexBuilder.accumulate(nextOrd);
+                        }
                         if (nextOrd != lastOrd) {
                             lastOrd = nextOrd;
                             startDocs.add(doc);
@@ -216,6 +238,12 @@ public final class TSDBDocValuesBlockWriter {
                         }
                         for (int i = 0; i < count; ++i) {
                             final long v = values.nextValue();
+                            if (skipIndexBuilder != null) {
+                                if (i == 0) {
+                                    skipIndexBuilder.onNewDoc(doc, count, v);
+                                }
+                                skipIndexBuilder.accumulate(v);
+                            }
                             if (sortedFieldObserver != null) {
                                 sortedFieldObserver.onDoc(doc, v);
                             }
@@ -251,6 +279,115 @@ public final class TSDBDocValuesBlockWriter {
         } finally {
             IOUtils.close(disiAccumulator);
         }
+
+        return new DocValueFieldCountStats(numDocsWithValue, numValues);
+    }
+
+    /**
+     * Flush-path variant for numeric / sorted-numeric fields when merge stats are unavailable.
+     * Computes {@code numDocsWithValue} and {@code numValues} inline during the encoding loop
+     * instead of doing a pre-counting pass. Stats are returned to the caller, not written here,
+     * because the caller needs to prepend them to the real meta stream while {@code ctx.meta()}
+     * is a per-field buffer.
+     *
+     * <p>Block-index entries are buffered in a small array during the loop and replayed through
+     * the {@link DirectMonotonicWriter} once {@code numValues} is known.
+     *
+     * <p>Only the block-layout encoding strategy applies here: {@code maxOrd == 1} and the
+     * ordinal-range strategy are ordinal-only and never reach this path.
+     */
+    private DocValueFieldCountStats writeFieldEntryDeferredStats(
+        final NumericWriteContext ctx,
+        final FieldInfo field,
+        final TsdbDocValuesProducer valuesSource,
+        final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
+        final BlockEncoder blockEncoder,
+        final FieldMetaWriter fieldMetaWriter,
+        final SkipIndexBuilder skipIndexBuilder,
+        int blockSize
+    ) throws IOException {
+        final IndexOutput meta = ctx.meta();
+        final IndexOutput data = ctx.data();
+        final int blockShift = Integer.numberOfTrailingZeros(blockSize);
+        final TSDBDocValuesFormatConfig formatConfig = ctx.formatConfig();
+        final int directMonotonicBlockShift = formatConfig.directMonotonicBlockShift();
+
+        int numDocsWithValue = 0;
+        long numValues = 0;
+
+        final long[] buffer = new long[blockSize];
+        int bufferSize = 0;
+
+        long[] blockOffsets = new long[64];
+        int numBlocks = 0;
+
+        // Encode value blocks to data and remember each block's offset. Stats (numDocsWithValue,
+        // numValues) and per-doc counts are accumulated inline so callers on the flush path don't
+        // need a separate pre-counting iteration or a post-write iteration to build the address
+        // table. The block-index monotonic writer is constructed after the loop, once numValues
+        // is known. fieldMetaWriter (e.g. ES95's pipeline descriptor) is invoked after the
+        // block-shift marker in the same logical position as the known-stats path.
+        final SortedNumericDocValues values = valuesSource.getSortedNumeric(field);
+        final long valuesDataOffset = data.getFilePointer();
+        for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
+            final int count = values.docValueCount();
+            numDocsWithValue++;
+            numValues += count;
+            if (docValueCountConsumer != null) {
+                docValueCountConsumer.accept(count);
+            }
+            for (int i = 0; i < count; ++i) {
+                final long v = values.nextValue();
+                if (skipIndexBuilder != null) {
+                    if (i == 0) {
+                        skipIndexBuilder.onNewDoc(doc, count, v);
+                    }
+                    skipIndexBuilder.accumulate(v);
+                }
+                buffer[bufferSize++] = v;
+                if (bufferSize == blockSize) {
+                    blockOffsets = ArrayUtil.grow(blockOffsets, numBlocks + 1);
+                    blockOffsets[numBlocks++] = data.getFilePointer() - valuesDataOffset;
+                    blockEncoder.encode(buffer, data);
+                    bufferSize = 0;
+                }
+            }
+        }
+        if (bufferSize > 0) {
+            blockOffsets = ArrayUtil.grow(blockOffsets, numBlocks + 1);
+            blockOffsets[numBlocks++] = data.getFilePointer() - valuesDataOffset;
+            Arrays.fill(buffer, bufferSize, blockSize, 0L);
+            blockEncoder.encode(buffer, data);
+        }
+
+        if (numValues > 0) {
+            final long valuesDataLength = data.getFilePointer() - valuesDataOffset;
+            final ByteBuffersDataOutput indexOut = new ByteBuffersDataOutput();
+            meta.writeInt(directMonotonicBlockShift);
+            if (fieldMetaWriter != null) {
+                fieldMetaWriter.write();
+            }
+            final DirectMonotonicWriter indexWriter = DirectMonotonicWriter.getInstance(
+                meta,
+                new ByteBuffersIndexOutput(indexOut, "temp-dv-index", "temp-dv-index"),
+                1L + ((numValues - 1) >>> blockShift),
+                directMonotonicBlockShift
+            );
+            for (int i = 0; i < numBlocks; i++) {
+                indexWriter.add(blockOffsets[i]);
+            }
+            indexWriter.finish();
+            final long indexDataOffset = data.getFilePointer();
+            data.copyBytes(indexOut.toDataInput(), indexOut.size());
+            meta.writeLong(indexDataOffset);
+            meta.writeLong(data.getFilePointer() - indexDataOffset);
+            meta.writeLong(valuesDataOffset);
+            meta.writeLong(valuesDataLength);
+        }
+
+        // disiAccumulator is null on the flush path (mergeStats not supported), so writeDISI
+        // re-opens the values source to write the bitset directly. This is unchanged behavior.
+        writeDISI(meta, data, ctx, valuesSource, field, AbstractTSDBDocValuesConsumer.NO_MAX_ORD, numDocsWithValue, null);
 
         return new DocValueFieldCountStats(numDocsWithValue, numValues);
     }

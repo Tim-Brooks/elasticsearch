@@ -27,13 +27,17 @@ public interface OrdinalFieldWriter {
     /**
      * Writes one ordinal field and returns its statistics.
      *
-     * @param field               field being written
-     * @param valuesSource        source of doc values for this field
-     * @param maxOrd              maximum ordinal value for this field
+     * @param field                 field being written
+     * @param valuesSource          source of doc values for this field
+     * @param maxOrd                maximum ordinal value for this field
      * @param docValueCountConsumer receives the per-doc value count for sorted-set offset
      *                              tracking, or {@code null} when offsets are not needed
-     * @param sortedFieldObserver receives {@code (docId, ord)} pairs during the doc pass,
-     *                            or {@code null} when no observer is attached
+     * @param sortedFieldObserver   receives {@code (docId, ord)} pairs during the doc pass,
+     *                              or {@code null} when no observer is attached
+     * @param skipIndexBuilder      optional skip-index builder; when non-null the per-value loop
+     *                              feeds {@code onNewDoc}/{@code accumulate} so the skip index
+     *                              can be built without a separate iteration over the field's
+     *                              doc values
      * @return the field's doc value count statistics
      */
     DocValueFieldCountStats writeFieldEntry(
@@ -41,7 +45,8 @@ public interface OrdinalFieldWriter {
         TsdbDocValuesProducer valuesSource,
         long maxOrd,
         AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
-        SortedFieldObserver sortedFieldObserver
+        SortedFieldObserver sortedFieldObserver,
+        SkipIndexBuilder skipIndexBuilder
     ) throws IOException;
 
     /**

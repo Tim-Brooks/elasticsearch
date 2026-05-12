@@ -26,19 +26,29 @@ public interface NumericFieldWriter {
     /**
      * Writes one numeric field and returns its statistics.
      *
-     * @param field               field being written
-     * @param valuesSource        source of doc values for this field
+     * @param field                 field being written
+     * @param valuesSource          source of doc values for this field
      * @param docValueCountConsumer receives the per-doc value count for sorted-numeric offset
      *                              tracking, or {@code null} when offsets are not needed
-     * @param sortedFieldObserver receives {@code (docId, value)} pairs during the doc pass,
-     *                            or {@code null} when no observer is attached
+     * @param sortedFieldObserver   receives {@code (docId, value)} pairs during the doc pass,
+     *                              or {@code null} when no observer is attached
+     * @param skipIndexBuilder      optional skip-index builder; when non-null the per-value loop
+     *                              feeds {@code onNewDoc}/{@code accumulate} so the skip index
+     *                              can be built without a separate iteration over the field's
+     *                              doc values
+     * @param deferStats            when {@code true} and merge stats are unavailable, skip the
+     *                              pre-counting pass and compute stats inline. Stats are
+     *                              <b>not</b> written to the meta stream by this method; the
+     *                              caller must prepend them to real meta after the call
      * @return the field's doc value count statistics
      */
     DocValueFieldCountStats writeFieldEntry(
         FieldInfo field,
         TsdbDocValuesProducer valuesSource,
         AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
-        SortedFieldObserver sortedFieldObserver
+        SortedFieldObserver sortedFieldObserver,
+        SkipIndexBuilder skipIndexBuilder,
+        boolean deferStats
     ) throws IOException;
 
     /**

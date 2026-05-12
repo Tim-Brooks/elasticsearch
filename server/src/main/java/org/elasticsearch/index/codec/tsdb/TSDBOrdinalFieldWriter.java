@@ -49,7 +49,8 @@ public final class TSDBOrdinalFieldWriter implements OrdinalFieldWriter {
         final TsdbDocValuesProducer valuesSource,
         long maxOrd,
         final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
-        final SortedFieldObserver sortedFieldObserver
+        final SortedFieldObserver sortedFieldObserver,
+        final SkipIndexBuilder skipIndexBuilder
     ) throws IOException {
         final int bitsPerOrd = PackedInts.bitsRequired(Math.max(maxOrd - 1, 0));
         final int blockSize = ctx.blockSize();
@@ -61,6 +62,9 @@ public final class TSDBOrdinalFieldWriter implements OrdinalFieldWriter {
             docValueCountConsumer,
             sortedFieldObserver,
             (buffer, data) -> encoder().encodeOrdinals(buffer, data, bitsPerOrd),
+            null,
+            skipIndexBuilder,
+            false,
             blockSize
         );
     }
