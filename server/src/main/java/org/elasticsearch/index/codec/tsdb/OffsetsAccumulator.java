@@ -18,14 +18,13 @@ import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.packed.DirectMonotonicWriter;
 import org.elasticsearch.core.SuppressForbidden;
 
-import java.io.Closeable;
 import java.io.IOException;
 
 /**
  * Builds the doc values address offset table iteratively, one document at a time. Useful to avoid a separate docvalues iteration
  * to build the address offset table.
  */
-public final class OffsetsAccumulator implements Closeable {
+public final class OffsetsAccumulator extends OffsetsAccumulatorBase {
     private final Directory dir;
     private final IOContext context;
     private final int directMonotonicBlockShift;
@@ -66,6 +65,7 @@ public final class OffsetsAccumulator implements Closeable {
         );
     }
 
+    @Override
     public void addDoc(int docValueCount) throws IOException {
         addressesWriter.add(addr);
         addr += docValueCount;

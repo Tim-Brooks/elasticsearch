@@ -30,7 +30,7 @@ public interface OrdinalFieldWriter {
      * @param field                 field being written
      * @param valuesSource          source of doc values for this field
      * @param maxOrd                maximum ordinal value for this field
-     * @param docValueCountConsumer receives the per-doc value count for sorted-set offset
+     * @param offsetsAccumulator    receives the per-doc value count for sorted-set offset
      *                              tracking, or {@code null} when offsets are not needed
      * @param sortedFieldObserver   receives {@code (docId, ord)} pairs during the doc pass,
      *                              or {@code null} when no observer is attached
@@ -44,7 +44,7 @@ public interface OrdinalFieldWriter {
         FieldInfo field,
         TsdbDocValuesProducer valuesSource,
         long maxOrd,
-        AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
+        OffsetsAccumulatorBase offsetsAccumulator,
         SortedFieldObserver sortedFieldObserver,
         SkipIndexBuilder skipIndexBuilder
     ) throws IOException;

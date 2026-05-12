@@ -83,24 +83,6 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
      */
     public static final long NO_MAX_ORD = -1L;
 
-    /**
-     * Callback that receives the number of doc values per document during the field write loop.
-     *
-     * <p>The write loop in {@link TSDBDocValuesBlockWriter} calls {@link #accept} once per
-     * document with that document's value count. Implementations accumulate these counts to
-     * build the per-doc offset table that multi-valued fields (sorted-numeric, sorted-set)
-     * need to locate the values for a given document.
-     *
-     * @see OffsetsAccumulator
-     */
-    @FunctionalInterface
-    public interface DocValueCountConsumer {
-        /**
-         * @param docValueCount number of doc values for the current document
-         */
-        void accept(int docValueCount) throws IOException;
-    }
-
     final Directory dir;
     final IOContext context;
     IndexOutput data, meta, skip;
@@ -270,11 +252,11 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         final NumericWriteContext ctx,
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
-        final DocValueCountConsumer countConsumer,
+        final OffsetsAccumulatorBase offsetsAccumulator,
         final SkipIndexBuilder skipIndexBuilder,
         final boolean deferStats
     ) throws IOException {
-        return numericCodec.createWriter(ctx).writeFieldEntry(field, valuesSource, countConsumer, null, skipIndexBuilder, deferStats);
+        return numericCodec.createWriter(ctx).writeFieldEntry(field, valuesSource, offsetsAccumulator, null, skipIndexBuilder, deferStats);
     }
 
     private DocValueFieldCountStats writeOrdinalField(
@@ -282,12 +264,12 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
         long maxOrd,
-        final DocValueCountConsumer countConsumer,
+        final OffsetsAccumulatorBase offsetsAccumulator,
         final SortedFieldObserver sortedFieldObserver,
         final SkipIndexBuilder skipIndexBuilder
     ) throws IOException {
         return ordinalCodec.createWriter(ctx)
-            .writeFieldEntry(field, valuesSource, maxOrd, countConsumer, sortedFieldObserver, skipIndexBuilder);
+            .writeFieldEntry(field, valuesSource, maxOrd, offsetsAccumulator, sortedFieldObserver, skipIndexBuilder);
     }
 
     /**
@@ -936,12 +918,13 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
      * collects the per-doc counts inline during the encoding loop and replays them after.
      *
      * <p>The {@code writer} callback writes one field's value blocks and returns the stats. It
-     * receives the optional {@link DocValueCountConsumer} that should be invoked once per doc
-     * with that doc's value count.
+     * receives the optional {@link OffsetsAccumulatorBase} that should be invoked once per doc
+     * with that doc's value count (or {@code null} when the field is single-valued and no
+     * address table is needed).
      */
     @FunctionalInterface
     private interface DocValueWriter {
-        DocValueFieldCountStats write(DocValueCountConsumer countConsumer, NumericWriteContext ctx) throws IOException;
+        DocValueFieldCountStats write(OffsetsAccumulatorBase accumulator, NumericWriteContext ctx) throws IOException;
     }
 
     private DocValueFieldCountStats writeEntryBuffered(
@@ -968,7 +951,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
                     formatConfig.directMonotonicBlockShift()
                 )
             ) {
-                DocValueFieldCountStats stats = writer.write(accumulator::addDoc, ctx);
+                DocValueFieldCountStats stats = writer.write(accumulator, ctx);
                 accumulator.build(ctx.meta(), data);
                 return stats;
             }
@@ -976,7 +959,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
         // Flush path: collect per-doc counts inline so we don't have to re-iterate values
         // after the field write to build the address table.
         try (DeferredOffsetsAccumulator deferred = new DeferredOffsetsAccumulator()) {
-            DocValueFieldCountStats stats = writer.write(deferred::addDoc, ctx);
+            DocValueFieldCountStats stats = writer.write(deferred, ctx);
             assert stats.numValues() >= stats.numDocsWithField();
             if (stats.numValues() > stats.numDocsWithField()) {
                 deferred.build(ctx.meta(), data, stats.numDocsWithField(), formatConfig.directMonotonicBlockShift());
