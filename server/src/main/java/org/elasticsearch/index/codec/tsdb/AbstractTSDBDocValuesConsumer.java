@@ -881,10 +881,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
             deferStats,
             (ctx, skipBuilder, defer) -> writeEntryBuffered(
                 ctx,
-                field,
                 valuesSource,
-                skipBuilder,
-                defer,
                 (accumulator, c) -> writeNumericField(c, field, valuesSource, accumulator, skipBuilder, defer)
             )
         );
@@ -897,10 +894,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
             ctx.meta().writeByte((byte) 1); // multiValued (1 = multiValued)
             return writeEntryBuffered(
                 ctx,
-                field,
                 valuesSource,
-                skipBuilder,
-                false,
                 (accumulator, c) -> writeOrdinalField(c, field, valuesSource, maxOrd, accumulator, null, skipBuilder)
             );
         });
@@ -929,10 +923,7 @@ public abstract class AbstractTSDBDocValuesConsumer extends XDocValuesConsumer {
 
     private DocValueFieldCountStats writeEntryBuffered(
         final NumericWriteContext ctx,
-        final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
-        final SkipIndexBuilder skipIndexBuilder,
-        final boolean deferStats,
         final DocValueWriter writer
     ) throws IOException {
         if (valuesSource.mergeStats.supported()) {

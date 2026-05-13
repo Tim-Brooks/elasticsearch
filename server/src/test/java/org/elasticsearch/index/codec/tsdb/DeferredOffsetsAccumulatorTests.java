@@ -31,12 +31,46 @@ public class DeferredOffsetsAccumulatorTests extends LuceneTestCase {
         assertMatchesOracle(new int[] { 1, 4, 2, 7, 3 });
     }
 
-    public void testAllSingleValued() throws IOException {
-        assertMatchesOracle(new int[] { 1, 1, 1, 1, 1, 1 });
-    }
-
     public void testLargeValueCounts() throws IOException {
         assertMatchesOracle(new int[] { 10000, 20000, 30000 });
+    }
+
+    /**
+     * When every doc has exactly one value, the caller skips {@link DeferredOffsetsAccumulator#build}.
+     * The accumulator must remain allocation-free for the buffer in that case, so this test
+     * verifies that {@code addDoc} works without ever allocating a buffer and that calling
+     * {@code build} would assert (contract: caller must skip build for all-single-valued fields).
+     */
+    public void testAllSingleValuedIsLazy() throws IOException {
+        try (DeferredOffsetsAccumulator acc = new DeferredOffsetsAccumulator()) {
+            for (int i = 0; i < 1024; i++) {
+                acc.addDoc(1);
+            }
+            // Caller would skip build() here (numValues == numDocsWithField).
+            assertEquals("no buffer should be allocated for all-single-valued docs", 0L, acc.bufferedByteCountForTests());
+        }
+    }
+
+    /**
+     * Verifies that switching from single-valued to multi-valued mid-stream backfills 1s for the
+     * already-seen single-valued docs so the address table is correct.
+     */
+    public void testSingleThenMultiValuedBackfill() throws IOException {
+        int[] counts = new int[] { 1, 1, 1, 1, 1, 3, 1, 1, 4, 1 };
+        assertMatchesOracle(counts);
+    }
+
+    /**
+     * Backfill across more than {@code ONES.length} (1024) prior single-valued docs to cover
+     * the chunked-write loop in {@code backfillOnes}.
+     */
+    public void testBackfillLargerThanChunkSize() throws IOException {
+        int[] counts = new int[2500];
+        for (int i = 0; i < counts.length - 1; i++) {
+            counts[i] = 1;
+        }
+        counts[counts.length - 1] = 2;
+        assertMatchesOracle(counts);
     }
 
     public void testRandom() throws IOException {
