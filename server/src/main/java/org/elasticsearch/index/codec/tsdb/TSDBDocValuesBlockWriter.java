@@ -10,7 +10,9 @@
 package org.elasticsearch.index.codec.tsdb;
 
 import org.apache.lucene.codecs.lucene90.IndexedDISI;
+import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.SortedNumericDocValues;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.store.ByteBuffersDataOutput;
@@ -228,20 +230,22 @@ public final class TSDBDocValuesBlockWriter {
                     if (valuesSource.mergeStats.supported() && numDocsWithValue < maxDoc) {
                         disiAccumulator = new DISIAccumulator(ctx.dir(), ctx.ioContext(), data, IndexedDISI.DEFAULT_DENSE_RANK_POWER);
                     }
-                    for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
-                        if (disiAccumulator != null) {
-                            disiAccumulator.addDocId(doc);
-                        }
-                        final int count = values.docValueCount();
-                        if (offsetsAccumulator != null) {
-                            offsetsAccumulator.addDoc(count);
-                        }
-                        for (int i = 0; i < count; ++i) {
-                            final long v = values.nextValue();
+                    // Specialization: when the field is single-valued, drive the underlying
+                    // NumericDocValues directly. This drops one level of vtable dispatch per
+                    // value (SingletonSortedNumericDocValues.nextDoc/nextValue → in.nextDoc/longValue)
+                    // and eliminates the inner per-value loop and docValueCount() call. The
+                    // multi-valued branch below is the reference; this branch must produce
+                    // byte-identical output for fields where DocValues.unwrapSingleton != null.
+                    final NumericDocValues single = DocValues.unwrapSingleton(values);
+                    if (single != null) {
+                        assert offsetsAccumulator == null : "single-valued field unexpectedly has offsets accumulator";
+                        for (int doc = single.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = single.nextDoc()) {
+                            if (disiAccumulator != null) {
+                                disiAccumulator.addDocId(doc);
+                            }
+                            final long v = single.longValue();
                             if (skipIndexBuilder != null) {
-                                if (i == 0) {
-                                    skipIndexBuilder.onNewDoc(doc, count, v);
-                                }
+                                skipIndexBuilder.onNewDoc(doc, 1, v);
                                 skipIndexBuilder.accumulate(v);
                             }
                             if (sortedFieldObserver != null) {
@@ -252,6 +256,34 @@ public final class TSDBDocValuesBlockWriter {
                                 indexWriter.add(data.getFilePointer() - valuesDataOffset);
                                 blockEncoder.encode(buffer, data);
                                 bufferSize = 0;
+                            }
+                        }
+                    } else {
+                        for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
+                            if (disiAccumulator != null) {
+                                disiAccumulator.addDocId(doc);
+                            }
+                            final int count = values.docValueCount();
+                            if (offsetsAccumulator != null) {
+                                offsetsAccumulator.addDoc(count);
+                            }
+                            for (int i = 0; i < count; ++i) {
+                                final long v = values.nextValue();
+                                if (skipIndexBuilder != null) {
+                                    if (i == 0) {
+                                        skipIndexBuilder.onNewDoc(doc, count, v);
+                                    }
+                                    skipIndexBuilder.accumulate(v);
+                                }
+                                if (sortedFieldObserver != null) {
+                                    sortedFieldObserver.onDoc(doc, v);
+                                }
+                                buffer[bufferSize++] = v;
+                                if (bufferSize == blockSize) {
+                                    indexWriter.add(data.getFilePointer() - valuesDataOffset);
+                                    blockEncoder.encode(buffer, data);
+                                    bufferSize = 0;
+                                }
                             }
                         }
                     }
@@ -312,23 +344,150 @@ public final class TSDBDocValuesBlockWriter {
         final TSDBDocValuesFormatConfig formatConfig = ctx.formatConfig();
         final int directMonotonicBlockShift = formatConfig.directMonotonicBlockShift();
 
+        // Encode value blocks to data and remember each block's offset. Stats and per-doc counts
+        // are accumulated inline so callers on the flush path don't need a separate pre-counting
+        // iteration or a post-write iteration to build the address table. The block-index
+        // monotonic writer is constructed after the loop, once numValues is known.
+        // fieldMetaWriter (e.g. ES95's pipeline descriptor) is invoked after the block-shift
+        // marker in the same logical position as the known-stats path.
+        //
+        // The loops are factored into two helpers so that each gets its own JIT compilation
+        // budget. Without the split, the combined body exceeds C2's frequency-inlining size,
+        // which leaves less headroom for inlining per-iteration callees (nextDoc/longValue,
+        // blockEncoder.encode, skipIndexBuilder.*).
+        final SortedNumericDocValues values = valuesSource.getSortedNumeric(field);
+        final long valuesDataOffset = data.getFilePointer();
+        final NumericDocValues single = DocValues.unwrapSingleton(values);
+        final DeferredEncodeResult result = (single != null)
+            ? encodeBlocksDeferredSingleValued(
+                single,
+                data,
+                valuesDataOffset,
+                blockSize,
+                blockEncoder,
+                skipIndexBuilder,
+                offsetsAccumulator
+            )
+            : encodeBlocksDeferredMultiValued(
+                values,
+                data,
+                valuesDataOffset,
+                blockSize,
+                blockEncoder,
+                skipIndexBuilder,
+                offsetsAccumulator
+            );
+
+        if (result.numValues > 0) {
+            final long valuesDataLength = data.getFilePointer() - valuesDataOffset;
+            final ByteBuffersDataOutput indexOut = new ByteBuffersDataOutput();
+            meta.writeInt(directMonotonicBlockShift);
+            if (fieldMetaWriter != null) {
+                fieldMetaWriter.write();
+            }
+            final DirectMonotonicWriter indexWriter = DirectMonotonicWriter.getInstance(
+                meta,
+                new ByteBuffersIndexOutput(indexOut, "temp-dv-index", "temp-dv-index"),
+                1L + ((result.numValues - 1) >>> blockShift),
+                directMonotonicBlockShift
+            );
+            for (int i = 0; i < result.numBlocks; i++) {
+                indexWriter.add(result.blockOffsets[i]);
+            }
+            indexWriter.finish();
+            final long indexDataOffset = data.getFilePointer();
+            data.copyBytes(indexOut.toDataInput(), indexOut.size());
+            meta.writeLong(indexDataOffset);
+            meta.writeLong(data.getFilePointer() - indexDataOffset);
+            meta.writeLong(valuesDataOffset);
+            meta.writeLong(valuesDataLength);
+        }
+
+        // disiAccumulator is null on the flush path (mergeStats not supported), so writeDISI
+        // re-opens the values source to write the bitset directly. This is unchanged behavior.
+        writeDISI(meta, data, ctx, valuesSource, field, AbstractTSDBDocValuesConsumer.NO_MAX_ORD, result.numDocsWithValue, null);
+
+        return new DocValueFieldCountStats(result.numDocsWithValue, result.numValues);
+    }
+
+    /**
+     * Output of an {@code encodeBlocksDeferred*} helper: the inline-computed stats and the
+     * (possibly grown) block-offsets array used by {@link #writeFieldEntryDeferredStats} to
+     * write the block-index monotonic table.
+     */
+    private record DeferredEncodeResult(int numDocsWithValue, long numValues, long[] blockOffsets, int numBlocks) {}
+
+    /**
+     * Single-valued specialization of the deferred-stats encoding loop. Drives a
+     * {@link NumericDocValues} directly, so {@code docValueCount} is implicitly 1 and the
+     * inner per-value loop disappears. Owns its scratch block buffer and tail flush so the
+     * caller stays linear.
+     */
+    private static DeferredEncodeResult encodeBlocksDeferredSingleValued(
+        final NumericDocValues single,
+        final IndexOutput data,
+        final long valuesDataOffset,
+        final int blockSize,
+        final BlockEncoder blockEncoder,
+        final SkipIndexBuilder skipIndexBuilder,
+        final OffsetsAccumulatorBase offsetsAccumulator
+    ) throws IOException {
+        final long[] buffer = new long[blockSize];
+        int bufferSize = 0;
+        long[] blockOffsets = new long[64];
+        int numBlocks = 0;
         int numDocsWithValue = 0;
         long numValues = 0;
 
+        for (int doc = single.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = single.nextDoc()) {
+            numDocsWithValue++;
+            numValues++;
+            if (offsetsAccumulator != null) {
+                offsetsAccumulator.addDoc(1);
+            }
+            final long v = single.longValue();
+            if (skipIndexBuilder != null) {
+                skipIndexBuilder.onNewDoc(doc, 1, v);
+                skipIndexBuilder.accumulate(v);
+            }
+            buffer[bufferSize++] = v;
+            if (bufferSize == blockSize) {
+                blockOffsets = ArrayUtil.grow(blockOffsets, numBlocks + 1);
+                blockOffsets[numBlocks++] = data.getFilePointer() - valuesDataOffset;
+                blockEncoder.encode(buffer, data);
+                bufferSize = 0;
+            }
+        }
+        if (bufferSize > 0) {
+            blockOffsets = ArrayUtil.grow(blockOffsets, numBlocks + 1);
+            blockOffsets[numBlocks++] = data.getFilePointer() - valuesDataOffset;
+            Arrays.fill(buffer, bufferSize, blockSize, 0L);
+            blockEncoder.encode(buffer, data);
+        }
+        return new DeferredEncodeResult(numDocsWithValue, numValues, blockOffsets, numBlocks);
+    }
+
+    /**
+     * Multi-valued reference of the deferred-stats encoding loop. Output must be byte-identical
+     * to {@link #encodeBlocksDeferredSingleValued} when the underlying field has exactly one
+     * value per doc.
+     */
+    private static DeferredEncodeResult encodeBlocksDeferredMultiValued(
+        final SortedNumericDocValues values,
+        final IndexOutput data,
+        final long valuesDataOffset,
+        final int blockSize,
+        final BlockEncoder blockEncoder,
+        final SkipIndexBuilder skipIndexBuilder,
+        final OffsetsAccumulatorBase offsetsAccumulator
+    ) throws IOException {
         final long[] buffer = new long[blockSize];
         int bufferSize = 0;
-
         long[] blockOffsets = new long[64];
         int numBlocks = 0;
+        int numDocsWithValue = 0;
+        long numValues = 0;
 
-        // Encode value blocks to data and remember each block's offset. Stats (numDocsWithValue,
-        // numValues) and per-doc counts are accumulated inline so callers on the flush path don't
-        // need a separate pre-counting iteration or a post-write iteration to build the address
-        // table. The block-index monotonic writer is constructed after the loop, once numValues
-        // is known. fieldMetaWriter (e.g. ES95's pipeline descriptor) is invoked after the
-        // block-shift marker in the same logical position as the known-stats path.
-        final SortedNumericDocValues values = valuesSource.getSortedNumeric(field);
-        final long valuesDataOffset = data.getFilePointer();
         for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
             final int count = values.docValueCount();
             numDocsWithValue++;
@@ -359,37 +518,7 @@ public final class TSDBDocValuesBlockWriter {
             Arrays.fill(buffer, bufferSize, blockSize, 0L);
             blockEncoder.encode(buffer, data);
         }
-
-        if (numValues > 0) {
-            final long valuesDataLength = data.getFilePointer() - valuesDataOffset;
-            final ByteBuffersDataOutput indexOut = new ByteBuffersDataOutput();
-            meta.writeInt(directMonotonicBlockShift);
-            if (fieldMetaWriter != null) {
-                fieldMetaWriter.write();
-            }
-            final DirectMonotonicWriter indexWriter = DirectMonotonicWriter.getInstance(
-                meta,
-                new ByteBuffersIndexOutput(indexOut, "temp-dv-index", "temp-dv-index"),
-                1L + ((numValues - 1) >>> blockShift),
-                directMonotonicBlockShift
-            );
-            for (int i = 0; i < numBlocks; i++) {
-                indexWriter.add(blockOffsets[i]);
-            }
-            indexWriter.finish();
-            final long indexDataOffset = data.getFilePointer();
-            data.copyBytes(indexOut.toDataInput(), indexOut.size());
-            meta.writeLong(indexDataOffset);
-            meta.writeLong(data.getFilePointer() - indexDataOffset);
-            meta.writeLong(valuesDataOffset);
-            meta.writeLong(valuesDataLength);
-        }
-
-        // disiAccumulator is null on the flush path (mergeStats not supported), so writeDISI
-        // re-opens the values source to write the bitset directly. This is unchanged behavior.
-        writeDISI(meta, data, ctx, valuesSource, field, AbstractTSDBDocValuesConsumer.NO_MAX_ORD, numDocsWithValue, null);
-
-        return new DocValueFieldCountStats(numDocsWithValue, numValues);
+        return new DeferredEncodeResult(numDocsWithValue, numValues, blockOffsets, numBlocks);
     }
 
     /**
