@@ -84,7 +84,7 @@ final class ES95NumericFieldWriter implements NumericFieldWriter {
             AbstractTSDBDocValuesConsumer.NO_MAX_ORD,
             offsetsAccumulator,
             sortedFieldObserver,
-            (buffer, data) -> numericFieldEncoder.encodeBlock(buffer, blockSize, data),
+            new TSDBDocValuesBlockWriter.BoundEncoder(numericFieldEncoder, blockSize),
             () -> FieldDescriptor.write(ctx.meta(), numericFieldEncoder.descriptor()),
             skipIndexBuilder,
             deferStats,

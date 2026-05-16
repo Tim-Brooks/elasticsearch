@@ -53,7 +53,7 @@ public final class TSDBNumericFieldWriter implements NumericFieldWriter {
             AbstractTSDBDocValuesConsumer.NO_MAX_ORD,
             offsetsAccumulator,
             sortedFieldObserver,
-            (buffer, data) -> encoder.encodeBlock(buffer, blockSize, data),
+            new TSDBDocValuesBlockWriter.BoundEncoder(encoder, blockSize),
             null,
             skipIndexBuilder,
             deferStats,

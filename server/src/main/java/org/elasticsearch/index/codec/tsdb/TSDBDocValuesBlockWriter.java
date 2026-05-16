@@ -52,6 +52,27 @@ public final class TSDBDocValuesBlockWriter {
     }
 
     /**
+     * Concrete {@link BlockEncoder} that binds a {@link NumericFieldWriter.Encoder} to a fixed
+     * block size. Using a named concrete class — rather than a per-caller lambda — keeps the
+     * {@code blockEncoder.encode} call site inside the hot encoding loops monomorphic, giving
+     * C2 the type profile it needs to devirtualize and inline the dispatch.
+     */
+    public static final class BoundEncoder implements BlockEncoder {
+        private final NumericFieldWriter.Encoder encoder;
+        private final int blockSize;
+
+        public BoundEncoder(final NumericFieldWriter.Encoder encoder, final int blockSize) {
+            this.encoder = encoder;
+            this.blockSize = blockSize;
+        }
+
+        @Override
+        public void encode(final long[] buffer, final IndexOutput data) throws IOException {
+            encoder.encodeBlock(buffer, blockSize, data);
+        }
+    }
+
+    /**
      * Writes one field's value blocks, block index, and DISI metadata.
      *
      * @param ctx                 segment-scoped write state

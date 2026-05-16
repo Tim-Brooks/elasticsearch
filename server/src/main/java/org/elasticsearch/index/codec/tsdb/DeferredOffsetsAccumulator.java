@@ -85,7 +85,8 @@ final class DeferredOffsetsAccumulator extends OffsetsAccumulatorBase {
      */
     void build(IndexOutput meta, IndexOutput data, int numDocsWithField, int directMonotonicBlockShift) throws IOException {
         assert numDocs == numDocsWithField : "buffered " + numDocs + " docs but caller reported " + numDocsWithField;
-        assert countBuffer != null : "build called on all-single-valued accumulator; caller must skip build when numValues == numDocsWithField";
+        assert countBuffer != null
+            : "build called on all-single-valued accumulator; caller must skip build when numValues == numDocsWithField";
         long start = data.getFilePointer();
         meta.writeLong(start);
         meta.writeVInt(directMonotonicBlockShift);
