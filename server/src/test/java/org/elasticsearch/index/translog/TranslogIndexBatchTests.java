@@ -122,6 +122,7 @@ public class TranslogIndexBatchTests extends ESTestCase {
                     1L,
                     firstSeqNo + i,
                     100L + i,
+                    i,
                     xContentType,
                     Uid.encodeId("doc-" + i),
                     i % 2 == 0 ? null : "route-" + i
@@ -148,8 +149,8 @@ public class TranslogIndexBatchTests extends ESTestCase {
             batchData = new BytesArray(eirf.data().toBytesRef(), true);
         }
         final List<Translog.IndexBatch.Op> metas = List.of(
-            new Translog.IndexBatch.IndexOp(1L, 5L, 100L, xContentType, Uid.encodeId("doc-0"), null),
-            new Translog.IndexBatch.IndexOp(1L, 6L, 101L, xContentType, Uid.encodeId("doc-1"), "route")
+            new Translog.IndexBatch.IndexOp(1L, 5L, 100L, 0, xContentType, Uid.encodeId("doc-0"), null),
+            new Translog.IndexBatch.IndexOp(1L, 6L, 101L, 1, xContentType, Uid.encodeId("doc-1"), "route")
         );
         final Translog.IndexBatch batch = new Translog.IndexBatch(batchData, primaryTerm.get(), metas);
 
@@ -278,6 +279,130 @@ public class TranslogIndexBatchTests extends ESTestCase {
         assertEquals(10L, cp.minSeqNo);
         assertEquals(10L + docCount - 1, cp.maxSeqNo);
         assertEquals(docCount, cp.numOps);
+    }
+
+    public void testSnapshotExplodesMixedIndexAndNoOpEntries() throws IOException {
+        // Simulates a primary sub-batch where the middle op succeeded preflight but failed
+        // post-Lucene with an assigned seqNo, so the engine converted it into a NoOpOp while the
+        // surrounding ops remained IndexOps. Replay must emit Index, NoOp, Index in that order.
+        final XContentType xContentType = XContentType.JSON;
+        final List<BytesReference> sources = List.of(
+            new BytesArray("{\"k\":\"row-0\"}"),
+            new BytesArray("{\"k\":\"row-2\"}")
+        );
+        final EirfBatch eirf = EirfEncoder.encode(sources, xContentType);
+        final BytesReference batchData;
+        try (eirf) {
+            batchData = new BytesArray(eirf.data().toBytesRef(), true);
+        }
+
+        final long term = primaryTerm.get();
+        final List<Translog.IndexBatch.Op> metas = List.of(
+            new Translog.IndexBatch.IndexOp(1L, 0L, 100L, 0, xContentType, Uid.encodeId("doc-0"), null),
+            new Translog.IndexBatch.NoOpOp(1L, "post-lucene failure"),
+            new Translog.IndexBatch.IndexOp(1L, 2L, 102L, 1, xContentType, Uid.encodeId("doc-2"), null)
+        );
+        final Translog.IndexBatch batch = new Translog.IndexBatch(batchData, term, metas);
+        translog.add(batch);
+
+        try (Translog.Snapshot snapshot = translog.newSnapshot()) {
+            assertEquals(3, snapshot.totalOperations());
+
+            final Translog.Operation op0 = snapshot.next();
+            assertTrue("expected Index op, got " + op0, op0 instanceof Translog.Index);
+            final Translog.Index idx0 = (Translog.Index) op0;
+            assertEquals(0L, idx0.seqNo());
+            assertEquals(Uid.encodeId("doc-0"), idx0.uid());
+            assertEquals("row-0", XContentHelper.convertToMap(idx0.source(), false, xContentType).v2().get("k"));
+
+            final Translog.Operation op1 = snapshot.next();
+            assertTrue("expected NoOp, got " + op1, op1 instanceof Translog.NoOp);
+            final Translog.NoOp noOp = (Translog.NoOp) op1;
+            assertEquals(1L, noOp.seqNo());
+            assertEquals(term, noOp.primaryTerm());
+            assertEquals("post-lucene failure", noOp.reason());
+
+            final Translog.Operation op2 = snapshot.next();
+            assertTrue("expected Index op, got " + op2, op2 instanceof Translog.Index);
+            final Translog.Index idx2 = (Translog.Index) op2;
+            assertEquals(2L, idx2.seqNo());
+            assertEquals(Uid.encodeId("doc-2"), idx2.uid());
+            // Crucially: the NoOp between the two IndexOps did not consume a row from the EIRF
+            // batch, and idx2's explicit rowIndex (1) correctly maps to the second row.
+            assertEquals("row-2", XContentHelper.convertToMap(idx2.source(), false, xContentType).v2().get("k"));
+
+            assertNull(snapshot.next());
+        }
+    }
+
+    public void testExplodeHonoursSparseRowIndex() throws IOException {
+        // Simulates the primary path where the middle op of a 3-row sub-batch hit a preflight
+        // failure (UNASSIGNED_SEQ_NO) and was dropped from the ops list. The EIRF batch still
+        // carries all three rows; surviving IndexOps must point at their original row indices
+        // so the replayed source matches the surviving op's uid/seqNo.
+        final XContentType xContentType = XContentType.JSON;
+        final List<BytesReference> sources = List.of(
+            new BytesArray("{\"k\":\"row-0\"}"),
+            new BytesArray("{\"k\":\"row-1\"}"),
+            new BytesArray("{\"k\":\"row-2\"}")
+        );
+        final EirfBatch eirf = EirfEncoder.encode(sources, xContentType);
+        final BytesReference batchData;
+        try (eirf) {
+            batchData = new BytesArray(eirf.data().toBytesRef(), true);
+        }
+
+        final long term = primaryTerm.get();
+        // Two surviving IndexOps point at rows 0 and 2; row 1's op was dropped (preflight skip).
+        final List<Translog.IndexBatch.Op> metas = List.of(
+            new Translog.IndexBatch.IndexOp(1L, 0L, 100L, 0, xContentType, Uid.encodeId("doc-0"), null),
+            new Translog.IndexBatch.IndexOp(1L, 2L, 102L, 2, xContentType, Uid.encodeId("doc-2"), null)
+        );
+        final Translog.IndexBatch batch = new Translog.IndexBatch(batchData, term, metas);
+        translog.add(batch);
+
+        try (Translog.Snapshot snapshot = translog.newSnapshot()) {
+            assertEquals(2, snapshot.totalOperations());
+
+            final Translog.Index op0 = (Translog.Index) snapshot.next();
+            assertNotNull(op0);
+            assertEquals(0L, op0.seqNo());
+            assertEquals(Uid.encodeId("doc-0"), op0.uid());
+            assertEquals("row-0", XContentHelper.convertToMap(op0.source(), false, xContentType).v2().get("k"));
+
+            final Translog.Index op2 = (Translog.Index) snapshot.next();
+            assertNotNull(op2);
+            assertEquals(2L, op2.seqNo());
+            assertEquals(Uid.encodeId("doc-2"), op2.uid());
+            // Crucially: row-2, not row-1 (which list-position-based explode would have returned).
+            assertEquals("row-2", XContentHelper.convertToMap(op2.source(), false, xContentType).v2().get("k"));
+
+            assertNull(snapshot.next());
+        }
+    }
+
+    public void testRowIndexOutOfRangeThrows() throws IOException {
+        final XContentType xContentType = XContentType.JSON;
+        final EirfBatch eirf = EirfEncoder.encode(List.of(new BytesArray("{\"k\":\"v\"}")), xContentType);
+        final BytesReference batchData;
+        try (eirf) {
+            batchData = new BytesArray(eirf.data().toBytesRef(), true);
+        }
+        // rowIndex 5 is out of range for a 1-row batch.
+        final Translog.IndexBatch batch = new Translog.IndexBatch(
+            batchData,
+            primaryTerm.get(),
+            List.of(new Translog.IndexBatch.IndexOp(1L, 0L, 0L, 5, xContentType, Uid.encodeId("doc-0"), null))
+        );
+        final IOException ex = expectThrows(IOException.class, batch::explode);
+        assertTrue("unexpected exception message: " + ex.getMessage(), ex.getMessage().contains("rowIndex"));
+    }
+
+    public void testNegativeRowIndexRejectedAtConstruction() {
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> new Translog.IndexBatch.IndexOp(1L, 0L, 0L, -1, XContentType.JSON, Uid.encodeId("doc-0"), null)
+        );
     }
 
     public void testReadByLocationThrowsForBatch() throws IOException {
