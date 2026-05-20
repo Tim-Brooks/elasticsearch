@@ -64,12 +64,14 @@ import org.elasticsearch.common.util.concurrent.ReleasableLock;
 import org.elasticsearch.common.util.concurrent.UncategorizedExecutionException;
 import org.elasticsearch.core.AbstractRefCounted;
 import org.elasticsearch.core.Assertions;
+import org.elasticsearch.core.CheckedFunction;
 import org.elasticsearch.core.CheckedRunnable;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.RefCounted;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
 import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.eirf.EirfBatch;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.codec.FieldInfosWithUsages;
@@ -713,10 +715,28 @@ public abstract class Engine implements Closeable {
      */
     public abstract IndexResult index(Index index) throws IOException;
 
-    public List<IndexResult> indexBatch(List<Index> operations) throws IOException {
-        ArrayList<IndexResult> results = new ArrayList<>(operations.size());
-        for (Index index : operations) {
-            results.add(index(index));
+    /**
+     * Index a batch of operations that originated from a single EIRF row batch. The operations
+     * list may mix {@link Index} entries with {@link NoOp} entries — the latter represent rows
+     * that were skipped (primary-detected NOOP) or failed after consuming a seqNo (post-Lucene
+     * failure) and must still be sequenced in the translog. {@code batch} contains exactly
+     * {@code operations.size()} rows so {@code operations.get(i)} corresponds to row {@code i}
+     * (NoOp rows keep their bytes for the contiguous slice but are never read on replay).
+     *
+     * <p>Implementations may write a single batched translog record covering every entry.
+     * The base implementation falls back to {@link #index(Index)} / {@link #noOp(NoOp)} per op
+     * and ignores the batch bytes.
+     */
+    public List<Result> indexBatch(List<Operation> operations, EirfBatch batch) throws IOException {
+        ArrayList<Result> results = new ArrayList<>(operations.size());
+        for (Operation op : operations) {
+            if (op instanceof Index index) {
+                results.add(index(index));
+            } else if (op instanceof NoOp noOp) {
+                results.add(noOp(noOp));
+            } else {
+                throw new IllegalArgumentException("indexBatch only supports Index and NoOp, got " + op.getClass().getName());
+            }
         }
         return results;
     }
@@ -1043,13 +1063,18 @@ public abstract class Engine implements Closeable {
         SearcherScope scope,
         SplitShardCountSummary splitShardCountSummary
     ) throws EngineException {
-        return acquireSearcherSupplier(wrapper, scope, splitShardCountSummary, getReferenceManager(scope));
+        return acquireSearcherSupplier(
+            wrapper,
+            scope,
+            r -> wrapExternalDirectoryReader(r, splitShardCountSummary),
+            getReferenceManager(scope)
+        );
     }
 
     protected SearcherSupplier acquireSearcherSupplier(
         Function<Searcher, Searcher> wrapper,
         SearcherScope scope,
-        SplitShardCountSummary splitShardCountSummary,
+        CheckedFunction<DirectoryReader, DirectoryReader, IOException> externalDirectoryReaderWrapper,
         ReferenceManager<ElasticsearchDirectoryReader> referenceManager
     ) throws EngineException {
         /* Acquire order here is store -> manager since we need
@@ -1060,12 +1085,12 @@ public abstract class Engine implements Closeable {
         }
         Releasable releasable = store::decRef;
         try {
-            ElasticsearchDirectoryReader acquire = referenceManager.acquire();
+            ElasticsearchDirectoryReader acquiredReader = referenceManager.acquire();
             final DirectoryReader maybeWrappedDirectoryReader;
             if (scope == SearcherScope.EXTERNAL) {
-                maybeWrappedDirectoryReader = wrapExternalDirectoryReader(acquire, splitShardCountSummary);
+                maybeWrappedDirectoryReader = externalDirectoryReaderWrapper.apply(acquiredReader);
             } else {
-                maybeWrappedDirectoryReader = acquire;
+                maybeWrappedDirectoryReader = acquiredReader;
             }
             SearcherSupplier reader = new SearcherSupplier(wrapper) {
                 @Override
@@ -1085,7 +1110,7 @@ public abstract class Engine implements Closeable {
                 @Override
                 protected void doClose() {
                     try {
-                        referenceManager.release(acquire);
+                        referenceManager.release(acquiredReader);
                     } catch (IOException e) {
                         throw new UncheckedIOException("failed to close", e);
                     } catch (AlreadyClosedException e) {

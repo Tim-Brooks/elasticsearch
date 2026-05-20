@@ -9,21 +9,17 @@
 
 package org.elasticsearch.action.bulk;
 
-import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.DocWriteResponse;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.support.replication.TransportWriteAction;
-import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.util.FeatureFlag;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.eirf.EirfBatch;
 import org.elasticsearch.eirf.EirfRowReader;
-import org.elasticsearch.eirf.EirfRowToXContent;
 import org.elasticsearch.eirf.EirfRowXContentParser;
-import org.elasticsearch.eirf.EirfSchema;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.ShardBatchMapper;
 import org.elasticsearch.index.mapper.SourceToParse;
@@ -33,15 +29,12 @@ import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
-import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import static org.elasticsearch.common.settings.Setting.boolSetting;
 
@@ -132,50 +125,43 @@ public final class ShardBatchIndexer {
             return;
         }
 
-        // TODO: Required because VersionLock is re-entrant. We likely can switch that to be semaphore based and remove this protection
-        final Set<String> seenIds = new HashSet<>(Math.min(items.length, BATCH_CHUNK_SIZE));
-
         for (int chunkStart = 0; chunkStart < items.length; chunkStart += BATCH_CHUNK_SIZE) {
             final int chunkEnd = Math.min(chunkStart + BATCH_CHUNK_SIZE, items.length);
-
-            for (int i = chunkStart; i < chunkEnd; i++) {
-                final IndexRequest indexRequest = (IndexRequest) items[i].request();
-                if (seenIds.add(indexRequest.id()) == false) {
-                    logger.debug("batch indexing on primary encountered duplicate uid at item [{}], falling back", i);
-                    return;
-                }
-            }
 
             final List<Engine.Index> operations = ShardBatchMapper.parseMappings(items, batch, primary, chunkEnd, chunkStart, resolution);
             if (operations == null) {
                 return;
             }
 
-            final List<Engine.IndexResult> results = primary.applyIndexOperationBatchOnPrimary(operations);
+            // parseMappings produces operations 1:1 with items[chunkStart..chunkEnd); a contiguous
+            // slice of the EIRF batch matches one-to-one with the operations list.
+            final EirfBatch chunkBatch = batch.slice(chunkStart, chunkEnd);
+            final List<Engine.IndexResult> results = primary.applyIndexOperationBatchOnPrimary(operations, chunkBatch);
 
             for (Engine.IndexResult result : results) {
                 assert context.hasMoreOperationsToExecute();
                 context.setRequestToExecute(context.getCurrent());
-                context.markOperationAsExecuted(result);
+                context.markBatchOperationAsExecuted(result);
                 context.markAsCompleted(context.getExecutionResult());
             }
-
-            seenIds.clear();
         }
     }
 
     /**
-     * Performs a batch index on a replica using EIRF data.
+     * Performs a batch index on a replica using EIRF data. Primary-side failures and NOOPs that
+     * consumed a seqNo are folded into the batch as {@link Engine.NoOp} entries so the engine
+     * writes a single translog record per sub-batch. Items that cannot be batched (pre-flight
+     * failure without a seqNo, prepareIndex exception, or a dynamic mapping update) stop the
+     * batch path at that index and the caller falls back to the per-op replica path.
      */
     static ReplicaBatchResult performBatchIndexOnReplica(BulkItemRequest[] items, EirfBatch batch, IndexShard replica) throws Exception {
-        final Set<BytesRef> seenUids = new HashSet<>(Math.min(items.length, BATCH_CHUNK_SIZE));
         final EirfRowXContentParser.SchemaNode schemaTree = EirfRowXContentParser.buildSchemaTree(batch.schema());
         Translog.Location location = null;
         int processedItems = 0;
 
         for (int chunkStart = 0; chunkStart < items.length; chunkStart += BATCH_CHUNK_SIZE) {
             final int chunkEnd = Math.min(chunkStart + BATCH_CHUNK_SIZE, items.length);
-            final List<Engine.Index> operations = new ArrayList<>(chunkEnd - chunkStart);
+            final List<Engine.Operation> operations = new ArrayList<>(chunkEnd - chunkStart);
 
             int i = chunkStart;
             while (i < chunkEnd) {
@@ -183,32 +169,58 @@ public final class ShardBatchIndexer {
                 final BulkItemResponse response = item.getPrimaryResponse();
 
                 if (response.isFailed()) {
-                    break;
-                }
-                if (response.getResponse().getResult() == DocWriteResponse.Result.NOOP) {
+                    final BulkItemResponse.Failure failure = response.getFailure();
+                    if (failure.getSeqNo() == SequenceNumbers.UNASSIGNED_SEQ_NO) {
+                        // Pre-flight failure: nothing to replicate at this seqNo; let the fallback path handle it.
+                        break;
+                    }
+                    operations.add(
+                        new Engine.NoOp(
+                            failure.getSeqNo(),
+                            failure.getTerm(),
+                            Engine.Operation.Origin.REPLICA,
+                            replica.getRelativeTimeInNanos(),
+                            failure.getCause().toString()
+                        )
+                    );
                     i++;
                     continue;
                 }
-                assert response.getResponse().getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO;
+
+                final DocWriteResponse primaryResponse = response.getResponse();
+                if (primaryResponse.getResult() == DocWriteResponse.Result.NOOP) {
+                    if (primaryResponse.getSeqNo() == SequenceNumbers.UNASSIGNED_SEQ_NO) {
+                        break;
+                    }
+                    operations.add(
+                        new Engine.NoOp(
+                            primaryResponse.getSeqNo(),
+                            primaryResponse.getPrimaryTerm(),
+                            Engine.Operation.Origin.REPLICA,
+                            replica.getRelativeTimeInNanos(),
+                            "primary detected NOOP"
+                        )
+                    );
+                    i++;
+                    continue;
+                }
+                assert primaryResponse.getSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO;
 
                 final IndexRequest indexRequest = (IndexRequest) item.request();
-                final DocWriteResponse primaryResponse = response.getResponse();
                 final EirfRowReader row = batch.getRowReader(i);
-                final EirfRowXContentParser parser = new EirfRowXContentParser(schemaTree, row);
 
                 final XContentType xContentType = indexRequest.getContentType() != null ? indexRequest.getContentType() : XContentType.JSON;
-                final BytesReference source = rowToSource(row, batch.schema(), xContentType);
                 final SourceToParse sourceToParse = new SourceToParse(
                     indexRequest.id(),
-                    source,
+                    schemaTree,
+                    row,
                     xContentType,
                     indexRequest.routing(),
                     Map.of(),
                     Map.of(),
                     indexRequest.getIncludeSourceOnError(),
                     XContentMeteringParserDecorator.NOOP,
-                    indexRequest.tsid(),
-                    parser
+                    indexRequest.tsid()
                 );
                 Engine.Index operation;
                 try {
@@ -234,21 +246,18 @@ public final class ShardBatchIndexer {
                     logger.debug("batch indexing on replica encountered dynamic mapping update at item [{}], falling back", i);
                     break;
                 }
-                if (seenUids.add(operation.uid()) == false) {
-                    logger.debug("batch indexing on replica encountered duplicate uid at item [{}], falling back", i);
-                    break;
-                }
                 operations.add(operation);
                 i++;
             }
 
             if (operations.isEmpty() == false) {
-                final List<Engine.IndexResult> results = replica.applyIndexOperationBatchOnReplica(operations);
-                for (Engine.IndexResult result : results) {
+                final EirfBatch chunkBatch = batch.slice(chunkStart, chunkStart + operations.size());
+                final List<Engine.Result> results = replica.applyIndexOperationBatchOnReplica(operations, chunkBatch);
+                for (Engine.Result result : results) {
                     if (result.getFailure() != null) {
                         throw result.getFailure();
                     }
-                    location = TransportWriteAction.locationToSync(location, result.getTranslogLocation());
+                    location = TransportWriteAction.batchLocationToSync(location, result.getTranslogLocation());
                 }
             }
 
@@ -258,17 +267,9 @@ public final class ShardBatchIndexer {
             }
 
             processedItems = chunkEnd;
-            seenUids.clear();
         }
 
         return new ReplicaBatchResult(processedItems, location);
-    }
-
-    static BytesReference rowToSource(EirfRowReader row, EirfSchema schema, XContentType xContentType) throws IOException {
-        try (XContentBuilder builder = XContentBuilder.builder(xContentType.xContent())) {
-            EirfRowToXContent.writeRow(row, schema, builder);
-            return BytesReference.bytes(builder);
-        }
     }
 
     record ReplicaBatchResult(int processedItems, @Nullable Translog.Location location) {}

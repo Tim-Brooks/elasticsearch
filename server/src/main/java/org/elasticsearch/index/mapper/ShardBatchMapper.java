@@ -272,7 +272,6 @@ public final class ShardBatchMapper {
             sourceToParse.routing(),
             List.of(doc),
             sourceToParse.source(),
-            sourceToParse.getXContentType(),
             null,
             XContentMeteringParserDecorator.UNKNOWN_SIZE
         );

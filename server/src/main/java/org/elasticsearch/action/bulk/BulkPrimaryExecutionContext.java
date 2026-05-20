@@ -278,8 +278,18 @@ class BulkPrimaryExecutionContext {
         markAsCompleted(executionResult);
     }
 
+    /** the current operation has been executed as a batch item on the primary with the specified result. The main difference between this
+     * and markOperationAsExecuted is that the translog location can stay the same as prior executed operations. */
+    public void markBatchOperationAsExecuted(Engine.Result result) {
+        markOperationAsExecuted(result, true);
+    }
+
     /** the current operation has been executed on the primary with the specified result */
     public void markOperationAsExecuted(Engine.Result result) {
+        markOperationAsExecuted(result, false);
+    }
+
+    private void markOperationAsExecuted(Engine.Result result, boolean isBatch) {
         assert assertInvariants(ItemProcessingState.TRANSLATED);
         final BulkItemRequest current = getCurrentItem();
         DocWriteRequest<?> docWriteRequest = getRequestToExecute();
@@ -320,7 +330,9 @@ class BulkPrimaryExecutionContext {
                 executionResult = BulkItemResponse.success(current.id(), current.request().opType(), response);
                 // set a blank ShardInfo so we can safely send it to the replicas. We won't use it in the real response though.
                 executionResult.getResponse().setShardInfo(ReplicationResponse.ShardInfo.EMPTY);
-                locationToSync = TransportWriteAction.locationToSync(locationToSync, result.getTranslogLocation());
+                locationToSync = isBatch
+                    ? TransportWriteAction.batchLocationToSync(locationToSync, result.getTranslogLocation())
+                    : TransportWriteAction.locationToSync(locationToSync, result.getTranslogLocation());
             }
             case FAILURE -> {
                 /*
@@ -336,7 +348,9 @@ class BulkPrimaryExecutionContext {
                 );
                 // A FAILURE result can still carry a translog location when InternalEngine converts it into a no-op.
                 if (result.getTranslogLocation() != null) {
-                    locationToSync = TransportWriteAction.locationToSync(locationToSync, result.getTranslogLocation());
+                    locationToSync = isBatch
+                        ? TransportWriteAction.batchLocationToSync(locationToSync, result.getTranslogLocation())
+                        : TransportWriteAction.locationToSync(locationToSync, result.getTranslogLocation());
                 }
             }
             default -> throw new AssertionError("unknown result type for " + getCurrentItem() + ": " + result.getResultType());
