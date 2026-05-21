@@ -2028,7 +2028,7 @@ public abstract class Engine implements Closeable {
 
         @Override
         public int estimatedSizeInBytes() {
-            return (id().length() * 2) + estimatedSizeInBytes() + 12;
+            return (id().length() * 2) + this.doc.estimatedSize() + 12;
         }
 
         /**
