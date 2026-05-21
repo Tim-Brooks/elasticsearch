@@ -213,6 +213,10 @@ public class ParsedDocument {
         return this.source.originalBytes();
     }
 
+    public int estimatedSize() {
+        return this.source.estimatedRecoverySizeInBytes();
+    }
+
     public XContentType getXContentType() {
         return this.source.xContentType();
     }
