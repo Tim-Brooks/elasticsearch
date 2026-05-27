@@ -347,29 +347,31 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                 TransportBulkAction.prohibitAppendWritesInBackingIndices(docWriteRequest, ia, project::index);
                 docWriteRequest.routing(project.resolveWriteIndexRouting(docWriteRequest.routing(), docWriteRequest.index()));
 
-                final Index concreteIndex = docWriteRequest.getConcreteWriteIndex(ia, project);
-                if (addFailureIfIndexIsClosed(docWriteRequest, concreteIndex, bulkItemRequest.id(), project)) {
-                    continue;
-                }
-                IndexRouting indexRouting = concreteIndices.routing(concreteIndex);
-                docWriteRequest.preRoutingProcess(indexRouting);
-                int shardId;
+                ShardId destShardId = null;
                 if (encoders != null && encoders.disabled() == false) {
-                    // The pre-scan in doRun() guarantees every item is an IndexRequest with inline
-                    // source and a known content type, so we don't need to re-check eligibility
-                    // here. The only way we fall through is a runtime encoder failure, which
-                    // disables the helper for the rest of the bulk and routes this item via the
-                    // inline-source path.
-                    int encoded = encoders.tryEncodeAndRoute((IndexRequest) docWriteRequest, concreteIndex, indexRouting);
-                    shardId = (encoded == BulkBatchEncoders.NOT_BATCHABLE) ? docWriteRequest.route(indexRouting) : encoded;
-                } else {
-                    shardId = docWriteRequest.route(indexRouting);
+                    // Batched path: defer concrete-index resolution, IndexRouting lookup, and
+                    // preRouting/postRouting into the encoder. The encoder parses source once, then
+                    // — for TSDB writes without a pre-extracted @timestamp — uses the scratch
+                    // buffer to pick the backing index before routing. Returning non-null means the
+                    // item is fully placed; null means fall back to the inline-source path below.
+                    destShardId = encoders.tryEncodeAndRoute((IndexRequest) docWriteRequest, ia, project, concreteIndices::routing);
+                    if (destShardId != null
+                        && addFailureIfIndexIsClosed(docWriteRequest, destShardId.getIndex(), bulkItemRequest.id(), project)) {
+                        continue;
+                    }
                 }
-                docWriteRequest.postRoutingProcess(indexRouting);
-                List<BulkItemRequest> shardRequests = requestsByShard.computeIfAbsent(
-                    new ShardId(concreteIndex, shardId),
-                    shard -> new ArrayList<>()
-                );
+                if (destShardId == null) {
+                    final Index concreteIndex = docWriteRequest.getConcreteWriteIndex(ia, project);
+                    if (addFailureIfIndexIsClosed(docWriteRequest, concreteIndex, bulkItemRequest.id(), project)) {
+                        continue;
+                    }
+                    IndexRouting indexRouting = concreteIndices.routing(concreteIndex);
+                    docWriteRequest.preRoutingProcess(indexRouting);
+                    int shardId = docWriteRequest.route(indexRouting);
+                    docWriteRequest.postRoutingProcess(indexRouting);
+                    destShardId = new ShardId(concreteIndex, shardId);
+                }
+                List<BulkItemRequest> shardRequests = requestsByShard.computeIfAbsent(destShardId, shard -> new ArrayList<>());
                 shardRequests.add(bulkItemRequest);
             } catch (DataStream.TimestampError timestampError) {
                 IndexDocFailureStoreStatus failureStoreStatus = processFailure(bulkItemRequest, project, timestampError);

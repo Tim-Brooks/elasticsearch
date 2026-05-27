@@ -19,6 +19,7 @@ import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.index.Index;
 import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
@@ -28,7 +29,9 @@ import org.elasticsearch.xcontent.XContentType;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Encodes documents into EIRF (Elastic Internal Row Format) batches.
@@ -63,19 +66,41 @@ public class EirfEncoder implements Releasable {
     private static final int INITIAL_CAPACITY = 16;
     private static final int INITIAL_PARTITION_CAPACITY = 4;
 
+    /**
+     * Top-level data-stream timestamp field. Tracked here as a literal (rather than imported
+     * from {@code DataStream.TIMESTAMP_FIELD_NAME}) to keep the EIRF package independent of
+     * the {@code cluster.metadata} package.
+     */
+    private static final String TIMESTAMP_FIELD = "@timestamp";
+
+    /**
+     * Sentinel {@link Index} used as the partition map key for the legacy single-index commit
+     * APIs ({@link #commitScratchTo(int)}, {@link #buildPartition(int)}). Encoders that drive
+     * multiple concrete write indices use {@link #commitScratchTo(Index, int)} and key the map
+     * with the actual concrete {@link Index}.
+     */
+    static final Index DEFAULT_INDEX = new Index("_eirf_default_", "_na_");
+
     private final EirfSchema schema;
     private final ScratchBuffers scratch;
-    private Partition[] partitions;
+    /** Per-concrete-index partition arrays. Each array is sparse-by-shard-number. */
+    private final Map<Index, Partition[]> partitionsByIndex;
     /** Cached dotted path per leaf column index. Lazily filled and grown as the schema grows. */
     private String[] cachedPath;
     /** True after {@link #parseToScratch} returns and before {@link #commitScratchTo} is called. */
     private boolean rowStaged;
+    /**
+     * Leaf column index for the top-level {@code @timestamp} field, or {@code -1} until the
+     * field appears in the cumulative schema. Cached after first sighting; subsequent
+     * {@link #parseToScratch} calls re-check only while still {@code -1}.
+     */
+    private int timestampColumnIndex = -1;
 
     public EirfEncoder() {
         this.schema = new EirfSchema();
         this.scratch = new ScratchBuffers(INITIAL_CAPACITY);
         this.cachedPath = new String[INITIAL_CAPACITY];
-        this.partitions = new Partition[INITIAL_PARTITION_CAPACITY];
+        this.partitionsByIndex = new HashMap<>();
     }
 
     /**
@@ -108,20 +133,37 @@ public class EirfEncoder implements Releasable {
             parser.nextToken(); // START_OBJECT
             flattenObject(parser, 0, schema, scratch, parser.nextToken(), this, sink);
         }
+        if (timestampColumnIndex < 0) {
+            timestampColumnIndex = schema.findLeaf(TIMESTAMP_FIELD, 0);
+        }
         rowStaged = true;
     }
 
     /**
      * Flushes the row currently staged in scratch into the partition identified by
-     * {@code partitionKey}, returning the row's index within that partition.
+     * {@code partitionKey} under the {@link #DEFAULT_INDEX} sentinel. Equivalent to
+     * {@code commitScratchTo(DEFAULT_INDEX, partitionKey)}; retained for single-index callers.
      *
      * @throws IllegalStateException if no row is currently staged.
      */
     public int commitScratchTo(int partitionKey) throws IOException {
+        return commitScratchTo(DEFAULT_INDEX, partitionKey);
+    }
+
+    /**
+     * Flushes the row currently staged in scratch into the partition identified by
+     * ({@code concreteIndex}, {@code shardNum}), returning the row's index within that partition.
+     * Allows a single encoder to fan its shared-schema rows out to multiple concrete write indices —
+     * e.g. when a bulk to a data stream straddles a rollover and different docs land in different
+     * backing indices.
+     *
+     * @throws IllegalStateException if no row is currently staged.
+     */
+    public int commitScratchTo(Index concreteIndex, int shardNum) throws IOException {
         if (rowStaged == false) {
             throw new IllegalStateException("commitScratchTo called without a staged row");
         }
-        Partition partition = getOrCreatePartition(partitionKey);
+        Partition partition = getOrCreatePartition(concreteIndex, shardNum);
         int columnCount = schema.leafCount();
         int rowStart = (int) partition.rowOutput.position();
         partition.ensureRowCapacity();
@@ -135,12 +177,20 @@ public class EirfEncoder implements Releasable {
     }
 
     /**
-     * Builds an {@link EirfBatch} for the partition identified by {@code partitionKey}. Producing a
-     * batch consumes that partition's row data; subsequent calls for the same key will produce an
-     * empty batch.
+     * Builds an {@link EirfBatch} for the partition identified by {@code partitionKey} under the
+     * {@link #DEFAULT_INDEX} sentinel. Equivalent to {@code buildPartition(DEFAULT_INDEX, partitionKey)}.
      */
     public EirfBatch buildPartition(int partitionKey) {
-        Partition partition = getOrCreatePartition(partitionKey);
+        return buildPartition(DEFAULT_INDEX, partitionKey);
+    }
+
+    /**
+     * Builds an {@link EirfBatch} for the partition identified by ({@code concreteIndex},
+     * {@code shardNum}). Producing a batch consumes that partition's row data; subsequent calls for
+     * the same key will produce an empty batch.
+     */
+    public EirfBatch buildPartition(Index concreteIndex, int shardNum) {
+        Partition partition = getOrCreatePartition(concreteIndex, shardNum);
         ReleasableBytesReference rowBytes = partition.rowOutput.moveToBytesReference();
         BytesReference headerBytes = buildHeader(schema, partition.docCount, partition.rowOffsets, partition.rowLengths, rowBytes.length());
         BytesReference combined = CompositeBytesReference.of(headerBytes, rowBytes);
@@ -148,21 +198,125 @@ public class EirfEncoder implements Releasable {
     }
 
     /**
-     * Returns the number of rows committed to the partition identified by {@code partitionKey}.
-     * Returns 0 for partitions that have never been written to.
+     * Returns the number of rows committed to the partition identified by {@code partitionKey}
+     * under the {@link #DEFAULT_INDEX} sentinel. Returns 0 for partitions that have never been
+     * written to.
      */
     public int docCount(int partitionKey) {
-        Partition partition = partitionKey < partitions.length ? partitions[partitionKey] : null;
+        Partition[] arr = partitionsByIndex.get(DEFAULT_INDEX);
+        Partition partition = (arr != null && partitionKey < arr.length) ? arr[partitionKey] : null;
         return partition == null ? 0 : partition.docCount;
     }
 
     /**
      * Returns true if at least one row has been committed to the partition identified by
-     * {@code partitionKey}.
+     * {@code partitionKey} under the {@link #DEFAULT_INDEX} sentinel.
      */
     public boolean hasPartition(int partitionKey) {
-        Partition partition = partitionKey < partitions.length ? partitions[partitionKey] : null;
+        Partition[] arr = partitionsByIndex.get(DEFAULT_INDEX);
+        Partition partition = (arr != null && partitionKey < arr.length) ? arr[partitionKey] : null;
         return partition != null && partition.docCount > 0;
+    }
+
+    /**
+     * Returns the leaf column index that the most recent {@link #parseToScratch} populated for the
+     * top-level {@code @timestamp} field, or {@code -1} if no document has yet had one.
+     */
+    public int timestampColumnIndex() {
+        return timestampColumnIndex;
+    }
+
+    /**
+     * Returns the most recently staged {@code @timestamp} value as either a {@link Long} (epoch
+     * millis from an integer leaf) or a {@link String} (from a string leaf), in the shape that
+     * {@code DataStream}'s raw-timestamp handling accepts. Returns {@code null} when no
+     * {@code @timestamp} column has appeared in the schema yet, when the staged row didn't set it,
+     * or when the column's type cannot be interpreted as a timestamp (e.g. boolean / array).
+     *
+     * <p>Reads directly from scratch — only valid after {@link #parseToScratch} and before
+     * {@link #commitScratchTo} (the row is still staged at that point).
+     */
+    public Object stagedTimestampValue() {
+        if (rowStaged == false || timestampColumnIndex < 0) {
+            return null;
+        }
+        int col = timestampColumnIndex;
+        if (col >= scratch.typeBytes.length) {
+            return null;
+        }
+        byte type = scratch.typeBytes[col];
+        return switch (type) {
+            case EirfType.STRING -> {
+                XContentString.UTF8Bytes bytes = (XContentString.UTF8Bytes) scratch.varData[col];
+                yield bytes == null ? null : new String(bytes.bytes(), bytes.offset(), bytes.length(), StandardCharsets.UTF_8);
+            }
+            case EirfType.INT -> (long) ByteUtils.readIntLE(scratch.fixedData, col * 8);
+            case EirfType.LONG -> ByteUtils.readLongLE(scratch.fixedData, col * 8);
+            default -> null;
+        };
+    }
+
+    /**
+     * Replays the values in the currently staged scratch row to {@code sink}, firing the same
+     * {@link LeafSink} callbacks that {@link #parseToScratch} would have fired during a live parse.
+     * Intended for routing computations that need to be deferred until after the parse pass — e.g.
+     * when the concrete write index (and therefore the routing strategy) is not known until the
+     * document's {@code @timestamp} has been read out of scratch.
+     *
+     * <p>Only valid for typed-mode sinks ({@link LeafSink#passRawText()} returning {@code false}):
+     * the original UTF-8 byte text of numeric and boolean leaves is not retained in scratch, so
+     * raw-text replay would not produce a byte-identical hash. Throws
+     * {@link UnsupportedOperationException} otherwise — callers are expected to detect raw-text
+     * mode and either run the sink during the parse pass or fall back to the inline-source path.
+     *
+     * @throws IllegalStateException if no row is currently staged.
+     */
+    public void replayScratchTo(LeafSink sink) {
+        if (rowStaged == false) {
+            throw new IllegalStateException("replayScratchTo called without a staged row");
+        }
+        if (sink == LeafSink.NO_OP) {
+            return;
+        }
+        if (sink.passRawText()) {
+            throw new UnsupportedOperationException("replayScratchTo does not support raw-text sinks");
+        }
+        int columnCount = schema.leafCount();
+        byte[] typeBytes = scratch.typeBytes;
+        byte[] fixedData = scratch.fixedData;
+        Object[] varData = scratch.varData;
+        for (int col = 0; col < columnCount; col++) {
+            byte type = typeBytes[col];
+            switch (type) {
+                case EirfType.STRING -> {
+                    XContentString.UTF8Bytes str = (XContentString.UTF8Bytes) varData[col];
+                    if (str != null) {
+                        sink.onTextPrimitive(col, columnPath(col), EirfType.STRING, str);
+                    }
+                }
+                case EirfType.INT -> sink.onLongPrimitive(col, columnPath(col), EirfType.INT, ByteUtils.readIntLE(fixedData, col * 8));
+                case EirfType.LONG -> sink.onLongPrimitive(col, columnPath(col), EirfType.LONG, ByteUtils.readLongLE(fixedData, col * 8));
+                case EirfType.FLOAT -> sink.onDoublePrimitive(
+                    col,
+                    columnPath(col),
+                    EirfType.FLOAT,
+                    Float.intBitsToFloat(ByteUtils.readIntLE(fixedData, col * 8))
+                );
+                case EirfType.DOUBLE -> sink.onDoublePrimitive(
+                    col,
+                    columnPath(col),
+                    EirfType.DOUBLE,
+                    Double.longBitsToDouble(ByteUtils.readLongLE(fixedData, col * 8))
+                );
+                case EirfType.TRUE -> sink.onBooleanPrimitive(col, columnPath(col), true);
+                case EirfType.FALSE -> sink.onBooleanPrimitive(col, columnPath(col), false);
+                case EirfType.FIXED_ARRAY, EirfType.UNION_ARRAY -> sink.onArrayLeaf(col, columnPath(col));
+                default -> {
+                    // 0 (unset / cleared), NULL, KEY_VALUE — no sink callback; matches parseToScratch's
+                    // behavior of not firing on null leaves or empty objects.
+                }
+            }
+        }
     }
 
     /**
@@ -187,12 +341,14 @@ public class EirfEncoder implements Releasable {
 
     @Override
     public void close() {
-        for (Partition partition : partitions) {
-            if (partition != null) {
-                partition.rowOutput.close();
+        for (Partition[] arr : partitionsByIndex.values()) {
+            for (Partition partition : arr) {
+                if (partition != null) {
+                    partition.rowOutput.close();
+                }
             }
         }
-        Arrays.fill(partitions, null);
+        partitionsByIndex.clear();
     }
 
     public static EirfBatch encode(List<BytesReference> sources, XContentType xContentType) throws IOException {
@@ -204,18 +360,25 @@ public class EirfEncoder implements Releasable {
         }
     }
 
-    private Partition getOrCreatePartition(int partitionKey) {
-        if (partitionKey >= partitions.length) {
+    private Partition getOrCreatePartition(Index concreteIndex, int shardNum) {
+        Partition[] partitions = partitionsByIndex.get(concreteIndex);
+        if (partitions == null) {
+            int initialCap = Math.max(INITIAL_PARTITION_CAPACITY, Integer.highestOneBit(shardNum) << 1);
+            partitions = new Partition[Math.max(INITIAL_PARTITION_CAPACITY, initialCap)];
+            partitionsByIndex.put(concreteIndex, partitions);
+        }
+        if (shardNum >= partitions.length) {
             int newCap = partitions.length;
-            while (partitionKey >= newCap) {
+            while (shardNum >= newCap) {
                 newCap <<= 1;
             }
             partitions = Arrays.copyOf(partitions, newCap);
+            partitionsByIndex.put(concreteIndex, partitions);
         }
-        Partition partition = partitions[partitionKey];
+        Partition partition = partitions[shardNum];
         if (partition == null) {
             partition = new Partition(new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE));
-            partitions[partitionKey] = partition;
+            partitions[shardNum] = partition;
         }
         return partition;
     }

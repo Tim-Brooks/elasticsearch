@@ -1768,6 +1768,29 @@ public final class DataStream implements SimpleDiffable<DataStream>, ToXContentO
         } else {
             timestamp = getTimestampFromParser(request.source(), request.getContentType());
         }
+        return selectTimeSeriesWriteIndexFromTimestamp(timestamp, project);
+    }
+
+    /**
+     * Resolves the time-series write backing index for a document whose {@code @timestamp} has
+     * already been extracted (e.g. by an EIRF parse pass). Accepts the same raw timestamp shapes
+     * that {@link IndexRequest#getRawTimestamp()} returns — a {@link Long} (epoch millis) or a
+     * {@link String} (ISO-8601 / epoch-millis text) — and applies the same canonical bound and
+     * range-selection logic as {@link #getWriteIndex(IndexRequest, ProjectMetadata)}.
+     *
+     * <p>Only valid when this data stream is in {@link IndexMode#TIME_SERIES} mode; callers are
+     * expected to gate on that before invoking. Throws {@link TimestampError} when the timestamp
+     * falls outside every backing index's time range, matching
+     * {@link #getWriteIndex(IndexRequest, ProjectMetadata)}.
+     */
+    public Index selectTimeSeriesWriteIndexFromValue(Object rawTimestamp, ProjectMetadata project) {
+        assert getIndexMode() == IndexMode.TIME_SERIES
+            : "selectTimeSeriesWriteIndexFromValue is only valid for time_series mode, got " + getIndexMode();
+        Instant timestamp = getTimeStampFromRaw(rawTimestamp);
+        return selectTimeSeriesWriteIndexFromTimestamp(timestamp, project);
+    }
+
+    private Index selectTimeSeriesWriteIndexFromTimestamp(Instant timestamp, ProjectMetadata project) {
         timestamp = getCanonicalTimestampBound(timestamp);
         Index result = selectTimeSeriesWriteIndex(timestamp, project);
         if (result == null) {
