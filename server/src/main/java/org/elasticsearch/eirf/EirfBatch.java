@@ -165,7 +165,7 @@ public final class EirfBatch implements Releasable, Accountable {
             return new EirfBatch(data, () -> {}, schema, docCount, docIndexOffset, dataOffset);
         }
         if (newDocCount == 0) {
-            BytesReference header = EirfEncoder.buildHeader(schema, 0, new int[0], new int[0], 0);
+            BytesReference header = EirfPartitionWriter.buildHeader(schema, 0, new int[0], new int[0], 0);
             return new EirfBatch(header, () -> {});
         }
         int[] newOffsets = new int[newDocCount];
@@ -180,7 +180,7 @@ public final class EirfBatch implements Releasable, Accountable {
         }
         int rowDataSize = newOffsets[newDocCount - 1] + newLengths[newDocCount - 1];
         BytesReference rowDataSlice = data.slice(dataOffset + firstRowOffset, rowDataSize);
-        BytesReference header = EirfEncoder.buildHeader(schema, newDocCount, newOffsets, newLengths, rowDataSize);
+        BytesReference header = EirfPartitionWriter.buildHeader(schema, newDocCount, newOffsets, newLengths, rowDataSize);
         BytesReference combined = CompositeBytesReference.of(header, rowDataSlice);
         return new EirfBatch(combined, () -> {});
     }

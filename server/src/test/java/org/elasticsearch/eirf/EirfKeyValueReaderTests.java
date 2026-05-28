@@ -29,7 +29,7 @@ public class EirfKeyValueReaderTests extends ESTestCase {
             )
         ) {
             parser.nextToken(); // START_OBJECT
-            return EirfEncoder.serializeKeyValue(parser);
+            return EirfDocumentParser.serializeKeyValue(parser);
         }
     }
 

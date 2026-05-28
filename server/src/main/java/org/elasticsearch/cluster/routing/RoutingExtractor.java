@@ -11,7 +11,7 @@ package org.elasticsearch.cluster.routing;
 
 import org.apache.lucene.util.FixedBitSet;
 import org.elasticsearch.action.index.IndexRequest;
-import org.elasticsearch.eirf.EirfEncoder;
+import org.elasticsearch.eirf.LeafSink;
 import org.elasticsearch.xcontent.XContentString;
 
 /**
@@ -29,11 +29,11 @@ import org.elasticsearch.xcontent.XContentString;
  * strategy and the column-index-to-path mapping are per-index.
  *
  * <p>The column-level cache is intentionally <b>not</b> cleared between documents: column indices
- * are stable for the lifetime of the {@link EirfEncoder} they're attached to (the schema is built
- * up cumulatively across all docs in the bulk for a single index), so once column N's predicate
- * result is known it remains valid for every subsequent document fed to this extractor.
+ * are stable for the lifetime of the schema they're attached to (built up cumulatively across all
+ * docs in the bulk for a single index), so once column N's predicate result is known it remains
+ * valid for every subsequent document fed to this extractor.
  */
-public abstract class RoutingExtractor implements EirfEncoder.LeafSink {
+public abstract class RoutingExtractor implements LeafSink {
 
     private FixedBitSet evaluated = new FixedBitSet(64);
     private FixedBitSet matched = new FixedBitSet(64);
@@ -87,28 +87,6 @@ public abstract class RoutingExtractor implements EirfEncoder.LeafSink {
     public abstract int computeShardId(IndexRequest indexRequest);
 
     /**
-     * Equivalent to {@link #reset()}, {@link EirfEncoder#replayScratchTo(EirfEncoder.LeafSink)
-     * encoder.replayScratchTo(this)}, then {@link #computeShardId(IndexRequest)}.
-     *
-     * <p>Used when the concrete write index — and therefore the routing strategy — isn't known
-     * until after the source has been parsed (e.g. a data-stream write whose backing index is
-     * picked from {@code @timestamp}). The encoder has already parsed the source into scratch,
-     * so this path walks scratch to feed the extractor's per-leaf callbacks instead of attaching
-     * the extractor as a sink during the parse.
-     *
-     * <p>Only valid for typed-mode extractors ({@link #passRawText()} returning {@code false}):
-     * the original UTF-8 byte text of numeric and boolean leaves is not retained in scratch, so
-     * raw-text scratch replay would not produce a byte-identical hash. Callers that need raw-text
-     * routing (e.g. {@code ForRoutingPath}) must attach the extractor as a sink during the parse
-     * pass instead, which requires the concrete write index to be known up front.
-     */
-    public final int computeShardIdFromScratch(EirfEncoder encoder, IndexRequest indexRequest) {
-        reset();
-        encoder.replayScratchTo(this);
-        return computeShardId(indexRequest);
-    }
-
-    /**
      * Strategy-specific path predicate. Invoked at most once per leaf column index across the
      * lifetime of this extractor; the result is cached internally.
      */
@@ -132,9 +110,7 @@ public abstract class RoutingExtractor implements EirfEncoder.LeafSink {
      */
     protected void handleDoublePrimitive(String dottedPath, byte type, double value) {}
 
-    /**
-     * Called for boolean leaves at matched columns when {@link #passRawText()} is {@code false}.
-     */
+    /** Called for boolean leaves at matched columns when {@link #passRawText()} is {@code false}. */
     protected void handleBooleanPrimitive(String dottedPath, boolean value) {}
 
     /** Reset per-document builder state. The column-level cache is preserved across documents. */

@@ -14,6 +14,7 @@ import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.bytes.CompositeBytesReference;
 import org.elasticsearch.common.bytes.ReleasableBytesReference;
 import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
+import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentString;
@@ -24,7 +25,7 @@ import java.util.Arrays;
 
 /**
  * Programmatic API for building an {@link EirfBatch} without parsing XContent.
- * Uses the same binary format as {@link EirfEncoder} but allows callers
+ * Uses the same binary format as {@link EirfDocumentParser} but allows callers
  * to set column values directly via setter methods.
  *
  * <p>Field paths use dot notation for nested objects (e.g., "user.name").
@@ -35,7 +36,7 @@ public final class EirfRowBuilder implements Releasable {
     private static final int INITIAL_CAPACITY = 16;
 
     private final EirfSchema schema;
-    private final EirfEncoder.ScratchBuffers scratch;
+    private final BufferedRow row;
     private final RecyclerBytesStreamOutput rowOutput;
 
     private int[] rowOffsets;
@@ -45,7 +46,7 @@ public final class EirfRowBuilder implements Releasable {
 
     public EirfRowBuilder() {
         this.schema = new EirfSchema();
-        this.scratch = new EirfEncoder.ScratchBuffers(INITIAL_CAPACITY);
+        this.row = new BufferedRow();
         this.rowOutput = new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE);
         this.rowOffsets = new int[INITIAL_CAPACITY];
         this.rowLengths = new int[INITIAL_CAPACITY];
@@ -58,10 +59,7 @@ public final class EirfRowBuilder implements Releasable {
             throw new IllegalStateException("Already in a document");
         }
         inDocument = true;
-        int columnCount = schema.leafCount();
-        Arrays.fill(scratch.typeBytes, 0, columnCount, (byte) 0);
-        Arrays.fill(scratch.varData, 0, columnCount, null);
-        scratch.resetCounters();
+        row.reset(schema.leafCount());
     }
 
     public void endDocument() {
@@ -80,7 +78,7 @@ public final class EirfRowBuilder implements Releasable {
         int rowStart = (int) rowOutput.position();
         rowOffsets[docCount] = rowStart;
         try {
-            EirfEncoder.writeRow(rowOutput, columnCount, scratch);
+            EirfPartitionWriter.writeRow(rowOutput, columnCount, row);
         } catch (IOException e) {
             throw new RuntimeException("Failed to write row", e);
         }
@@ -121,96 +119,96 @@ public final class EirfRowBuilder implements Releasable {
     public void setBoolean(String path, boolean value) {
         int colIdx = resolveColumn(path);
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = value ? EirfType.TRUE : EirfType.FALSE;
+        row.typeBytes[colIdx] = value ? EirfType.TRUE : EirfType.FALSE;
     }
 
     public void setNull(String path) {
         int colIdx = resolveColumn(path);
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = EirfType.NULL;
+        row.typeBytes[colIdx] = EirfType.NULL;
     }
 
     public void setBinary(String path, BytesReference bytes) {
         int colIdx = resolveColumn(path);
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = EirfType.BINARY;
-        scratch.varData[colIdx] = bytes;
-        scratch.totalVarSize += bytes.length();
-        scratch.varColumnCount++;
+        row.typeBytes[colIdx] = EirfType.BINARY;
+        row.varData[colIdx] = bytes;
+        row.totalVarSize += bytes.length();
+        row.varColumnCount++;
     }
 
     public void setUnionArray(String path, byte[] packed) {
         int colIdx = resolveColumn(path);
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = EirfType.UNION_ARRAY;
-        scratch.varData[colIdx] = new BytesArray(packed);
-        scratch.totalVarSize += packed.length;
-        scratch.varColumnCount++;
+        row.typeBytes[colIdx] = EirfType.UNION_ARRAY;
+        row.varData[colIdx] = new BytesArray(packed);
+        row.totalVarSize += packed.length;
+        row.varColumnCount++;
     }
 
     public void setFixedArray(String path, byte[] packed) {
         int colIdx = resolveColumn(path);
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = EirfType.FIXED_ARRAY;
-        scratch.varData[colIdx] = new BytesArray(packed);
-        scratch.totalVarSize += packed.length;
-        scratch.varColumnCount++;
+        row.typeBytes[colIdx] = EirfType.FIXED_ARRAY;
+        row.varData[colIdx] = new BytesArray(packed);
+        row.totalVarSize += packed.length;
+        row.varColumnCount++;
     }
 
     public void setKeyValue(String path, byte[] bytes) {
         int colIdx = resolveColumn(path);
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = EirfType.KEY_VALUE;
-        scratch.varData[colIdx] = new BytesArray(bytes);
-        scratch.totalVarSize += bytes.length;
-        scratch.varColumnCount++;
+        row.typeBytes[colIdx] = EirfType.KEY_VALUE;
+        row.varData[colIdx] = new BytesArray(bytes);
+        row.totalVarSize += bytes.length;
+        row.varColumnCount++;
     }
 
     public void setStringAt(int colIdx, String value) {
         checkNotSet(colIdx);
         byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
-        scratch.typeBytes[colIdx] = EirfType.STRING;
-        scratch.varData[colIdx] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
-        scratch.totalVarSize += utf8.length;
-        scratch.varColumnCount++;
+        row.typeBytes[colIdx] = EirfType.STRING;
+        row.varData[colIdx] = new XContentString.UTF8Bytes(utf8, 0, utf8.length);
+        row.totalVarSize += utf8.length;
+        row.varColumnCount++;
     }
 
     public void setStringAt(int colIdx, byte[] utf8, int offset, int length) {
         checkNotSet(colIdx);
         byte[] copy = new byte[length];
         System.arraycopy(utf8, offset, copy, 0, length);
-        scratch.typeBytes[colIdx] = EirfType.STRING;
-        scratch.varData[colIdx] = new XContentString.UTF8Bytes(copy, 0, length);
-        scratch.totalVarSize += length;
-        scratch.varColumnCount++;
+        row.typeBytes[colIdx] = EirfType.STRING;
+        row.varData[colIdx] = new XContentString.UTF8Bytes(copy, 0, length);
+        row.totalVarSize += length;
+        row.varColumnCount++;
     }
 
     public void setIntAt(int colIdx, int value) {
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = EirfType.INT;
-        EirfEncoder.writeIntToFixed(scratch.fixedData, colIdx, value);
-        scratch.scalarFixedSize += 4;
+        row.typeBytes[colIdx] = EirfType.INT;
+        ByteUtils.writeIntLE(value, row.fixedData, colIdx * 8);
+        row.scalarFixedSize += 4;
     }
 
     public void setLongAt(int colIdx, long value) {
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = EirfType.LONG;
-        EirfEncoder.writeLongToFixed(scratch.fixedData, colIdx, value);
-        scratch.scalarFixedSize += 8;
+        row.typeBytes[colIdx] = EirfType.LONG;
+        ByteUtils.writeLongLE(value, row.fixedData, colIdx * 8);
+        row.scalarFixedSize += 8;
     }
 
     public void setFloatAt(int colIdx, float value) {
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = EirfType.FLOAT;
-        EirfEncoder.writeIntToFixed(scratch.fixedData, colIdx, Float.floatToRawIntBits(value));
-        scratch.scalarFixedSize += 4;
+        row.typeBytes[colIdx] = EirfType.FLOAT;
+        ByteUtils.writeIntLE(Float.floatToRawIntBits(value), row.fixedData, colIdx * 8);
+        row.scalarFixedSize += 4;
     }
 
     public void setDoubleAt(int colIdx, double value) {
         checkNotSet(colIdx);
-        scratch.typeBytes[colIdx] = EirfType.DOUBLE;
-        EirfEncoder.writeLongToFixed(scratch.fixedData, colIdx, Double.doubleToRawLongBits(value));
-        scratch.scalarFixedSize += 8;
+        row.typeBytes[colIdx] = EirfType.DOUBLE;
+        ByteUtils.writeLongLE(Double.doubleToRawLongBits(value), row.fixedData, colIdx * 8);
+        row.scalarFixedSize += 8;
     }
 
     /**
@@ -222,7 +220,7 @@ public final class EirfRowBuilder implements Releasable {
         }
 
         ReleasableBytesReference rowBytes = rowOutput.moveToBytesReference();
-        BytesReference headerBytes = EirfEncoder.buildHeader(schema, docCount, rowOffsets, rowLengths, rowBytes.length());
+        BytesReference headerBytes = EirfPartitionWriter.buildHeader(schema, docCount, rowOffsets, rowLengths, rowBytes.length());
         BytesReference combined = CompositeBytesReference.of(headerBytes, rowBytes);
         return new EirfBatch(combined, rowBytes);
     }
@@ -232,7 +230,7 @@ public final class EirfRowBuilder implements Releasable {
     }
 
     private void checkNotSet(int colIdx) {
-        if (scratch.columnsSet.getAndSet(colIdx)) {
+        if (row.columnsSet.getAndSet(colIdx)) {
             throw new IllegalStateException("Column [" + colIdx + "] already set");
         }
     }
@@ -261,7 +259,7 @@ public final class EirfRowBuilder implements Releasable {
         }
         String leafName = lastDot >= 0 ? path.substring(lastDot + 1) : path;
         int colIdx = schema.appendLeaf(leafName, parentIdx);
-        scratch.ensureCapacity(colIdx + 1);
+        row.ensureCapacity(colIdx + 1);
         return colIdx;
     }
 
