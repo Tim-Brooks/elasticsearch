@@ -38,6 +38,24 @@ public final class EirfDocumentParser {
     private EirfDocumentParser() {}
 
     /**
+     * Callback invoked by {@link #parseXContentWithDeferredSink} when the top-level
+     * {@code @timestamp} field is encountered during deferred-TSDB parsing.
+     */
+    @FunctionalInterface
+    public interface TimestampCallback {
+        /**
+         * Called when the top-level {@code @timestamp} scalar is found.
+         *
+         * @param rawTimestampValue a {@link Long} (epoch millis) or {@link String} representing the
+         *     timestamp value
+         * @return the {@link LeafSink} to switch to for remaining fields — the resolved routing
+         *     extractor, {@link LeafSink#NO_OP} for id-only routing strategies, or {@code null} to
+         *     signal that this item cannot be batched and must fall back to the inline-source path
+         */
+        LeafSink resolve(Object rawTimestampValue);
+    }
+
+    /**
      * Parses {@code source} into {@code row}, growing {@code schema} as new fields appear, and
      * firing {@code sink} for every primitive leaf value.
      *
@@ -64,6 +82,202 @@ public final class EirfDocumentParser {
             parser.allowDuplicateKeys(true);
             parser.nextToken(); // START_OBJECT
             flattenObject(parser, 0, schema, row, parser.nextToken(), pathCache, sink);
+        }
+    }
+
+    /**
+     * Variant of {@link #parseXContent} for the deferred-TSDB path where the concrete write index
+     * cannot be determined until the top-level {@code @timestamp} field is observed in the document.
+     *
+     * <p>Parses the document with {@link LeafSink#NO_OP} initially. When the top-level
+     * {@code @timestamp} field is encountered, {@code tsCallback} is invoked with the raw timestamp
+     * value. If the callback returns a non-null sink:
+     * <ol>
+     *   <li>Any columns already written to {@code row} before {@code @timestamp} are replayed to the
+     *       new sink via {@link BufferedRow#replayTo}. The {@code @timestamp} column itself is included
+     *       in the replay but ignored by typed routing extractors.</li>
+     *   <li>All remaining fields are parsed with the new sink as the live {@link LeafSink}.</li>
+     * </ol>
+     *
+     * <p>When {@code @timestamp} is the first field (the common case for TSDB documents), the replay
+     * covers zero pre-timestamp columns and the extractor handles everything after in a single pass.
+     *
+     * <p>{@code row} must have been {@link BufferedRow#reset(int) reset} by the caller before calling
+     * this method.
+     *
+     * @param tsCallback invoked when the top-level {@code @timestamp} scalar is found; should return
+     *     the sink to switch to, {@link LeafSink#NO_OP} for id-only routing, or {@code null} to
+     *     signal that this item cannot be batched
+     * @return {@code true} if {@code @timestamp} was found and the callback returned a non-null sink;
+     *     {@code false} if {@code @timestamp} was absent, its value was unusable as a timestamp, or
+     *     the callback returned {@code null}
+     */
+    public static boolean parseXContentWithDeferredSink(
+        BytesReference source,
+        XContentType xContentType,
+        EirfSchema schema,
+        BufferedRow row,
+        ColumnPathCache pathCache,
+        TimestampCallback tsCallback
+    ) throws IOException {
+        try (XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)) {
+            parser.allowDuplicateKeys(true);
+            parser.nextToken(); // START_OBJECT
+
+            LeafSink activeSink = LeafSink.NO_OP;
+            boolean tsDetected = false;
+            boolean fallback = false;
+
+            XContentParser.Token token = parser.nextToken();
+            while (token != XContentParser.Token.END_OBJECT) {
+                if (token != XContentParser.Token.FIELD_NAME) {
+                    throw new IllegalStateException("Expected FIELD_NAME but got " + token);
+                }
+                String fieldName = parser.currentName();
+                token = parser.nextToken();
+
+                if (token == XContentParser.Token.START_OBJECT) {
+                    XContentParser.Token inner = parser.nextToken();
+                    if (inner == XContentParser.Token.END_OBJECT) {
+                        int emptyColIdx = schema.appendLeaf(fieldName, 0);
+                        row.ensureCapacity(emptyColIdx + 1);
+                        if (row.columnsSet.getAndSet(emptyColIdx)) {
+                            throw new IllegalArgumentException("Duplicate field [" + fieldName + "]");
+                        }
+                        row.typeBytes[emptyColIdx] = EirfType.KEY_VALUE;
+                        row.varData[emptyColIdx] = BytesArray.EMPTY;
+                        row.varColumnCount++;
+                    } else {
+                        int nonLeafIdx = schema.appendNonLeaf(fieldName, 0);
+                        flattenObject(parser, nonLeafIdx, schema, row, inner, pathCache, activeSink);
+                    }
+                    token = parser.nextToken();
+                    continue;
+                }
+
+                int colIdx = schema.appendLeaf(fieldName, 0);
+                row.ensureCapacity(colIdx + 1);
+                if (row.columnsSet.getAndSet(colIdx)) {
+                    throw new IllegalArgumentException("Duplicate field [" + fieldName + "]");
+                }
+
+                boolean firePathSink = activeSink != LeafSink.NO_OP;
+                boolean rawTextMode = firePathSink && activeSink.passRawText();
+                switch (token) {
+                    case START_ARRAY -> {
+                        PackedArray arr = parseArray(parser, row);
+                        row.typeBytes[colIdx] = arr.arrayType;
+                        row.varData[colIdx] = new BytesArray(arr.packed);
+                        row.totalVarSize += arr.packed.length;
+                        row.varColumnCount++;
+                        if (firePathSink) {
+                            activeSink.onArrayLeaf(colIdx, pathCache.get(colIdx, schema));
+                        }
+                    }
+                    case VALUE_STRING -> {
+                        row.typeBytes[colIdx] = EirfType.STRING;
+                        XContentString.UTF8Bytes str = parser.optimizedText().bytes();
+                        row.varData[colIdx] = str;
+                        row.totalVarSize += str.length();
+                        row.varColumnCount++;
+                        if (firePathSink) {
+                            activeSink.onTextPrimitive(colIdx, pathCache.get(colIdx, schema), EirfType.STRING, str);
+                        }
+                    }
+                    case VALUE_NUMBER -> {
+                        XContentParser.NumberType numType = parser.numberType();
+                        switch (numType) {
+                            case INT, LONG -> {
+                                long val = parser.longValue();
+                                byte type;
+                                if (val >= Integer.MIN_VALUE && val <= Integer.MAX_VALUE) {
+                                    type = EirfType.INT;
+                                    row.typeBytes[colIdx] = type;
+                                    ByteUtils.writeIntLE((int) val, row.fixedData, colIdx * 8);
+                                    row.scalarFixedSize += 4;
+                                } else {
+                                    type = EirfType.LONG;
+                                    row.typeBytes[colIdx] = type;
+                                    ByteUtils.writeLongLE(val, row.fixedData, colIdx * 8);
+                                    row.scalarFixedSize += 8;
+                                }
+                                if (rawTextMode) {
+                                    activeSink.onTextPrimitive(colIdx, pathCache.get(colIdx, schema), type, parser.optimizedText().bytes());
+                                } else if (firePathSink) {
+                                    activeSink.onLongPrimitive(colIdx, pathCache.get(colIdx, schema), type, val);
+                                }
+                            }
+                            case FLOAT, DOUBLE -> {
+                                double val = parser.doubleValue();
+                                float fval = (float) val;
+                                byte type;
+                                if ((double) fval == val) {
+                                    type = EirfType.FLOAT;
+                                    row.typeBytes[colIdx] = type;
+                                    ByteUtils.writeIntLE(Float.floatToRawIntBits(fval), row.fixedData, colIdx * 8);
+                                    row.scalarFixedSize += 4;
+                                } else {
+                                    type = EirfType.DOUBLE;
+                                    row.typeBytes[colIdx] = type;
+                                    ByteUtils.writeLongLE(Double.doubleToRawLongBits(val), row.fixedData, colIdx * 8);
+                                    row.scalarFixedSize += 8;
+                                }
+                                if (rawTextMode) {
+                                    activeSink.onTextPrimitive(colIdx, pathCache.get(colIdx, schema), type, parser.optimizedText().bytes());
+                                } else if (firePathSink) {
+                                    activeSink.onDoublePrimitive(colIdx, pathCache.get(colIdx, schema), type, val);
+                                }
+                            }
+                            default -> {
+                                row.typeBytes[colIdx] = EirfType.STRING;
+                                XContentString.UTF8Bytes str = parser.optimizedText().bytes();
+                                row.varData[colIdx] = str;
+                                row.totalVarSize += str.length();
+                                row.varColumnCount++;
+                                if (firePathSink) {
+                                    activeSink.onTextPrimitive(colIdx, pathCache.get(colIdx, schema), EirfType.STRING, str);
+                                }
+                            }
+                        }
+                    }
+                    case VALUE_BOOLEAN -> {
+                        boolean v = parser.booleanValue();
+                        byte type = v ? EirfType.TRUE : EirfType.FALSE;
+                        row.typeBytes[colIdx] = type;
+                        if (rawTextMode) {
+                            activeSink.onTextPrimitive(colIdx, pathCache.get(colIdx, schema), type, parser.optimizedText().bytes());
+                        } else if (firePathSink) {
+                            activeSink.onBooleanPrimitive(colIdx, pathCache.get(colIdx, schema), v);
+                        }
+                    }
+                    case VALUE_NULL -> row.typeBytes[colIdx] = EirfType.NULL;
+                    default -> throw new IllegalStateException("Unexpected token: " + token);
+                }
+
+                // When @timestamp is found at the top level, switch the active sink so that
+                // remaining fields are processed with the resolved routing extractor in a single
+                // pass rather than being replayed in a second walk.
+                if (tsDetected == false && "@timestamp".equals(fieldName)) {
+                    Object rawTs = row.readTimestamp(colIdx);
+                    if (rawTs != null) {
+                        tsDetected = true;
+                        LeafSink newSink = tsCallback.resolve(rawTs);
+                        if (newSink == null) {
+                            fallback = true;
+                            // activeSink stays NO_OP; drain remaining tokens normally
+                        } else {
+                            // Replay columns already written (including @timestamp, which typed
+                            // extractors ignore) so pre-timestamp fields reach the extractor.
+                            row.replayTo(schema.leafCount(), schema, pathCache, newSink);
+                            activeSink = newSink;
+                        }
+                    }
+                }
+
+                token = parser.nextToken();
+            }
+
+            return tsDetected && !fallback;
         }
     }
 

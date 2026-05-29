@@ -30,7 +30,7 @@ import java.util.Arrays;
  * {@link #reset(int)} must be called before each parse to clear the live column range.
  *
  * <pre>
- * EirfRow row = new EirfRow();
+ * BufferedRow row = new BufferedRow();
  * row.reset(schema.leafCount());
  * EirfDocumentParser.parseXContent(source, type, schema, row, sink, pathCache);
  * Object ts = row.readTimestamp(timestampColumnIndex);
@@ -47,7 +47,7 @@ public final class BufferedRow {
     byte[] fixedData;
     /** Per-column variable-length data: {@link XContentString.UTF8Bytes} for strings,
      *  {@link org.elasticsearch.common.bytes.BytesReference} for binary, or
-     *  {@link org.elasticsearch.common.bytes.BytesArray} for arrays/key-values. */
+     *  {@link org.elasticsearch.common.bytes.BytesArray} for arrays. */
     Object[] varData;
 
     /** Total byte size of all variable-length column values accumulated during parsing. */
@@ -57,7 +57,7 @@ public final class BufferedRow {
     /** Total byte size of all scalar fixed-width values accumulated during parsing. */
     int scalarFixedSize;
 
-    /** Tracks which columns have been set in the current document, to detect duplicates. */
+    /** Tracks which columns have been set in the current document to detect duplicates. */
     FixedBitSet columnsSet;
 
     /** Reusable buffers for array element parsing; null until first array is encountered.

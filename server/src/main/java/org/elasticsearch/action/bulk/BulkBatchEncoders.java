@@ -20,11 +20,11 @@ import org.elasticsearch.cluster.routing.IndexRouting;
 import org.elasticsearch.cluster.routing.RoutingExtractionException;
 import org.elasticsearch.cluster.routing.RoutingExtractor;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.eirf.BufferedRow;
 import org.elasticsearch.eirf.ColumnPathCache;
 import org.elasticsearch.eirf.EirfBatch;
 import org.elasticsearch.eirf.EirfDocumentParser;
 import org.elasticsearch.eirf.EirfPartitionWriter;
-import org.elasticsearch.eirf.BufferedRow;
 import org.elasticsearch.eirf.EirfSchema;
 import org.elasticsearch.eirf.LeafSink;
 import org.elasticsearch.index.Index;
@@ -93,11 +93,6 @@ final class BulkBatchEncoders implements Releasable {
          * documents so {@link RoutingExtractor#matchesField} is invoked at most once per column.
          */
         final Map<Index, RoutingExtractor> extractorByIndex = new HashMap<>();
-        /**
-         * Leaf column index of the {@code @timestamp} field in this target's schema, or {@code -1}
-         * until the field first appears.
-         */
-        int timestampColumnIndex = -1;
         /** Pending row attachments per destination shard, used by {@link #finalizeBatches}. */
         final Map<ShardId, List<PendingAttachment>> pendingByShard = new HashMap<>();
 
@@ -108,6 +103,9 @@ final class BulkBatchEncoders implements Releasable {
     }
 
     private record PendingAttachment(IndexRequest indexRequest, int rowIndex) {}
+
+    /** Captures the routing state resolved inside the deferred-timestamp callback. */
+    private record DeferredResolution(Index concreteIndex, IndexRouting indexRouting, RoutingExtractor extractor) {}
 
     private final Map<String, TargetState> targets = new HashMap<>();
     /** Shared row for the bulk session; grows to accommodate the largest schema seen. */
@@ -179,11 +177,16 @@ final class BulkBatchEncoders implements Releasable {
         // Pre-resolve the concrete write index when it doesn't depend on the document contents.
         Index concreteIndex = tryPreResolveConcreteIndex(request, ia, project);
 
-        // When the concrete index is known up front, attach the cached routing extractor as a live
-        // LeafSink so routing data is accumulated in a single parse pass.
         IndexRouting indexRouting = null;
         RoutingExtractor liveExtractor = null;
+
+        // Parse the source into the shared row, growing the target's schema as new fields appear.
+        row.reset(target.schema.leafCount());
+        XContentType contentType = request.getContentType();
+
         if (concreteIndex != null) {
+            // Pre-resolved path: attach the cached routing extractor as a live LeafSink so routing
+            // data is accumulated in a single parse pass.
             indexRouting = routingResolver.apply(concreteIndex);
             // preRoutingProcess may auto-generate the document id; routing strategies that need the
             // id read it during computeShardId. Run before the parse so the extractor has a valid id.
@@ -192,54 +195,56 @@ final class BulkBatchEncoders implements Releasable {
             if (liveExtractor != null) {
                 liveExtractor.reset();
             }
-        }
-
-        LeafSink sink = liveExtractor != null ? liveExtractor : LeafSink.NO_OP;
-        XContentType contentType = request.getContentType();
-
-        // Parse the source into the shared row, growing the target's schema as new fields appear.
-        row.reset(target.schema.leafCount());
-        try {
-            EirfDocumentParser.parseXContent(request.indexSource().bytes(), contentType, target.schema, row, sink, target.pathCache);
-        } catch (Exception e) {
-            // Parse failure (rare — source already passed BulkRequestParser validation) or extractor
-            // threw (e.g. array at a matched routing column, or CBOR in duplicate-key mode).
-            // Abandon the entire bulk's batch.
-            logger.debug("EIRF encoding / routing extraction failed; abandoning batch for the rest of this bulk", e);
-            disabled = true;
-            return null;
-        }
-
-        // Deferred path: concrete index wasn't pre-resolved. Read @timestamp from the row to pick
-        // the backing index, then materialize IndexRouting / extractor for it.
-        if (concreteIndex == null) {
-            if (target.timestampColumnIndex < 0) {
-                target.timestampColumnIndex = target.schema.findLeaf("@timestamp", 0);
-            }
-            Object rawTimestamp = request.getRawTimestamp();
-            if (rawTimestamp == null && target.timestampColumnIndex >= 0) {
-                rawTimestamp = row.readTimestamp(target.timestampColumnIndex);
-            }
-            if (rawTimestamp == null) {
-                // Let DataStream produce the canonical "missing @timestamp" error via its parsing path.
+            LeafSink sink = liveExtractor != null ? liveExtractor : LeafSink.NO_OP;
+            try {
+                EirfDocumentParser.parseXContent(request.indexSource().bytes(), contentType, target.schema, row, sink, target.pathCache);
+            } catch (Exception e) {
+                // Parse failure (rare) or extractor threw (e.g. array at a matched routing column).
+                // Abandon the entire bulk's batch.
+                logger.debug("EIRF encoding / routing extraction failed; abandoning batch for the rest of this bulk", e);
+                disabled = true;
                 return null;
             }
-            DataStream dataStream = DataStream.resolveDataStream(ia, project);
-            assert dataStream != null && dataStream.getIndexMode() == IndexMode.TIME_SERIES
-                : "deferred path is only reachable for TSDB data streams; ia=" + ia.getName();
-            concreteIndex = dataStream.selectTimeSeriesWriteIndexFromValue(rawTimestamp, project);
-            indexRouting = routingResolver.apply(concreteIndex);
-            request.preRoutingProcess(indexRouting);
-            liveExtractor = getOrCreateExtractor(target, concreteIndex, indexRouting);
-            if (liveExtractor != null) {
-                if (liveExtractor.passRawText()) {
-                    // Legacy TSDB (ForRoutingPath): raw-text hashing cannot be replayed from the row
-                    // because numeric/boolean bytes were not retained. Fall back per-item.
-                    return null;
-                }
-                liveExtractor.reset();
-                row.replayTo(target.schema.leafCount(), target.schema, target.pathCache, liveExtractor);
+        } else {
+            // Deferred path: concrete index depends on @timestamp. Switch the active sink mid-parse
+            // when @timestamp is found so the extractor handles remaining fields in a single pass.
+            DeferredResolution[] resolved = { null };
+            boolean continueAsBatch;
+            try {
+                continueAsBatch = EirfDocumentParser.parseXContentWithDeferredSink(
+                    request.indexSource().bytes(),
+                    contentType,
+                    target.schema,
+                    row,
+                    target.pathCache,
+                    rawTs -> {
+                        DeferredResolution dr = resolveDeferredTimestamp(target, ia, project, routingResolver, request, rawTs);
+                        if (dr.extractor() != null && dr.extractor().passRawText()) {
+                            // Legacy TSDB (ForRoutingPath): raw-text hashing cannot be replayed from
+                            // the row because numeric/boolean bytes were not retained. Fall back.
+                            return null;
+                        }
+                        resolved[0] = dr;
+                        if (dr.extractor() != null) {
+                            dr.extractor().reset();
+                            return dr.extractor();
+                        }
+                        return LeafSink.NO_OP;
+                    }
+                );
+            } catch (Exception e) {
+                logger.debug("EIRF encoding / routing extraction failed; abandoning batch for the rest of this bulk", e);
+                disabled = true;
+                return null;
             }
+            if (continueAsBatch == false || resolved[0] == null) {
+                // @timestamp absent, unusable value, or raw-text extractor fallback.
+                // Let the inline-source path surface the appropriate error.
+                return null;
+            }
+            concreteIndex = resolved[0].concreteIndex();
+            indexRouting = resolved[0].indexRouting();
+            liveExtractor = resolved[0].extractor();
         }
 
         int shardNum;
@@ -308,13 +313,36 @@ final class BulkBatchEncoders implements Releasable {
     }
 
     /**
+     * Resolves the concrete write index and routing state for the deferred-TSDB path. Called from
+     * inside the {@link EirfDocumentParser.TimestampCallback} when {@code @timestamp} is found
+     * during parsing.
+     */
+    private static DeferredResolution resolveDeferredTimestamp(
+        TargetState target,
+        IndexAbstraction ia,
+        ProjectMetadata project,
+        Function<Index, IndexRouting> routingResolver,
+        IndexRequest request,
+        Object rawTimestamp
+    ) {
+        DataStream dataStream = DataStream.resolveDataStream(ia, project);
+        assert dataStream != null && dataStream.getIndexMode() == IndexMode.TIME_SERIES
+            : "deferred path is only reachable for TSDB data streams; ia=" + ia.getName();
+        Index concreteIndex = dataStream.selectTimeSeriesWriteIndexFromValue(rawTimestamp, project);
+        IndexRouting indexRouting = routingResolver.apply(concreteIndex);
+        request.preRoutingProcess(indexRouting);
+        RoutingExtractor extractor = getOrCreateExtractor(target, concreteIndex, indexRouting);
+        return new DeferredResolution(concreteIndex, indexRouting, extractor);
+    }
+
+    /**
      * Returns the cached {@link RoutingExtractor} for the given concrete index, creating and
      * caching it on the first call. Returns null if the routing strategy doesn't use a
      * source-inspecting extractor.
      *
      * <p>The cached extractor is bound to this target's schema column space. Its per-column
-     * "matched" bitmask is preserved across documents so {@link RoutingExtractor#matchesField} is
-     * called at most once per column per concrete index over the lifetime of the bulk.
+     * "matched" bitmask is preserved across documents so {@code matchesField} is called at most
+     * once per column per concrete index over the lifetime of the bulk.
      */
     private static RoutingExtractor getOrCreateExtractor(TargetState target, Index concreteIndex, IndexRouting indexRouting) {
         return target.extractorByIndex.computeIfAbsent(concreteIndex, k -> indexRouting.newRoutingExtractor());
