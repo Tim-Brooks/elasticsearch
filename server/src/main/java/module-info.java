@@ -385,6 +385,7 @@ module org.elasticsearch.server {
     exports org.elasticsearch.search.suggest.phrase;
     exports org.elasticsearch.search.suggest.term;
     exports org.elasticsearch.search.vectors;
+    exports org.elasticsearch.sourcebatch;
     exports org.elasticsearch.shutdown;
     exports org.elasticsearch.snapshots;
     exports org.elasticsearch.synonyms;

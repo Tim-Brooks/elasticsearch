@@ -16,10 +16,10 @@ import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.routing.IndexRouting;
 import org.elasticsearch.cluster.routing.RoutingExtractor;
 import org.elasticsearch.core.Releasable;
-import org.elasticsearch.eirf.EirfBatch;
 import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.shard.ShardId;
+import org.elasticsearch.sourcebatch.SourceBatch;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.util.ArrayList;
@@ -176,11 +176,11 @@ final class BulkBatchEncoders implements Releasable {
      * on each item routed there (replacing inline source bytes with a row reference), and return
      * the resulting batches keyed by ShardId. Returns an empty map when {@link #disabled()} is true.
      */
-    Map<ShardId, EirfBatch> finalizeBatches() {
+    Map<ShardId, SourceBatch> finalizeBatches() {
         if (disabled) {
             return Collections.emptyMap();
         }
-        Map<ShardId, EirfBatch> batchesByShard = new HashMap<>();
+        Map<ShardId, SourceBatch> batchesByShard = new HashMap<>();
         for (IndexState state : indexStates.values()) {
             for (Map.Entry<ShardId, List<PendingAttachment>> entry : state.pendingByShard.entrySet()) {
                 List<PendingAttachment> pending = entry.getValue();
@@ -188,7 +188,7 @@ final class BulkBatchEncoders implements Releasable {
                     continue;
                 }
                 ShardId shardId = entry.getKey();
-                EirfBatch batch = state.encoder.buildPartition(shardId.getId());
+                SourceBatch batch = state.encoder.buildPartition(shardId.getId());
                 batchesByShard.put(shardId, batch);
                 for (PendingAttachment attachment : pending) {
                     attachment.indexRequest.indexSource().setEirfRow(batch, attachment.rowIndex);

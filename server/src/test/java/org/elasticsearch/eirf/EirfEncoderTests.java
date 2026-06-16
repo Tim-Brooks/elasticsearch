@@ -38,13 +38,13 @@ public class EirfEncoderTests extends ESTestCase {
         assertEquals("name", schema.getFullPath(0));
         assertEquals("age", schema.getFullPath(1));
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         assertEquals("alice", row0.getStringValue(0).string());
         // 30 fits in int
         assertEquals(EirfType.INT, row0.getTypeByte(1));
         assertEquals(30, row0.getIntValue(1));
 
-        EirfRowReader row1 = batch.getRowReader(1);
+        EirfRowReader row1 = batch.row(1);
         assertEquals("bob", row1.getStringValue(0).string());
         assertEquals(25, row1.getIntValue(1));
 
@@ -56,7 +56,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         // 42 fits in int
         assertEquals(EirfType.INT, row0.getTypeByte(0));
         assertEquals(42, row0.getIntValue(0));
@@ -72,7 +72,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         // 1.5 round-trips through float
         assertEquals(EirfType.FLOAT, row0.getTypeByte(0));
         assertEquals(1.5f, row0.getFloatValue(0), 0.0f);
@@ -88,7 +88,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         // Should use small row since var section is tiny
         assertTrue(row0.isSmallRow());
         assertEquals(EirfType.STRING, row0.getTypeByte(0));
@@ -111,7 +111,7 @@ public class EirfEncoderTests extends ESTestCase {
         assertEquals("user.name", schema.getFullPath(0));
         assertEquals("user.age", schema.getFullPath(1));
 
-        assertEquals("alice", batch.getRowReader(0).getStringValue(0).string());
+        assertEquals("alice", batch.row(0).getStringValue(0).string());
 
         batch.close();
     }
@@ -124,7 +124,7 @@ public class EirfEncoderTests extends ESTestCase {
         EirfSchema schema = batch.schema();
         assertEquals(3, schema.nonLeafCount());
         assertEquals("a.b.c", schema.getFullPath(0));
-        assertEquals(42, batch.getRowReader(0).getIntValue(0));
+        assertEquals(42, batch.row(0).getIntValue(0));
 
         batch.close();
     }
@@ -134,7 +134,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         byte type = row0.getTypeByte(0);
         // Should be FIXED_ARRAY since all strings
         assertEquals(EirfType.FIXED_ARRAY, type);
@@ -156,7 +156,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         assertEquals(EirfType.UNION_ARRAY, row0.getTypeByte(0));
 
         EirfArrayReader reader = row0.getArrayValue(0);
@@ -188,7 +188,7 @@ public class EirfEncoderTests extends ESTestCase {
         List<BytesReference> sources = List.of(new BytesArray(json.toString()));
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         assertEquals(EirfType.FIXED_ARRAY, row0.getTypeByte(0));
 
         EirfArrayReader reader = row0.getArrayValue(0);
@@ -207,7 +207,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        assertEquals(EirfType.UNION_ARRAY, batch.getRowReader(0).getTypeByte(0));
+        assertEquals(EirfType.UNION_ARRAY, batch.row(0).getTypeByte(0));
 
         batch.close();
     }
@@ -219,7 +219,7 @@ public class EirfEncoderTests extends ESTestCase {
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
         XContentBuilder builder = XContentFactory.jsonBuilder();
-        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        EirfRowToXContent.writeRow(batch.row(0), batch.schema(), builder);
         builder.close();
         Map<String, Object> map = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
         List<Object> items = (List<Object>) map.get("items");
@@ -241,7 +241,7 @@ public class EirfEncoderTests extends ESTestCase {
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
         XContentBuilder builder = XContentFactory.jsonBuilder();
-        EirfRowToXContent.writeRow(batch.getRowReader(0), batch.schema(), builder);
+        EirfRowToXContent.writeRow(batch.row(0), batch.schema(), builder);
         builder.close();
         Map<String, Object> map = XContentHelper.convertToMap(BytesReference.bytes(builder), false, XContentType.JSON).v2();
         List<Object> matrix = (List<Object>) map.get("matrix");
@@ -257,7 +257,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         // Empty array: union array with 0 elements
         byte type = row0.getTypeByte(0);
         assertTrue(EirfType.isVariable(type));
@@ -277,17 +277,17 @@ public class EirfEncoderTests extends ESTestCase {
         assertEquals(3, batch.docCount());
         assertEquals(3, batch.columnCount());
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         assertFalse(row0.isAbsent(0));
         assertFalse(row0.isAbsent(1));
         assertTrue(row0.isAbsent(2));
 
-        EirfRowReader row1 = batch.getRowReader(1);
+        EirfRowReader row1 = batch.row(1);
         assertFalse(row1.isAbsent(0));
         assertTrue(row1.isAbsent(1));
         assertTrue(row1.isAbsent(2));
 
-        EirfRowReader row2 = batch.getRowReader(2);
+        EirfRowReader row2 = batch.row(2);
         assertTrue(row2.isAbsent(0));
         assertFalse(row2.isAbsent(1));
         assertFalse(row2.isAbsent(2));
@@ -301,7 +301,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         assertTrue(row0.getBooleanValue(0));
         assertFalse(row0.getBooleanValue(1));
 
@@ -331,7 +331,7 @@ public class EirfEncoderTests extends ESTestCase {
         assertEquals(3, batch.docCount());
         assertEquals(3, batch.columnCount());
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         assertEquals(2, row0.columnCount());
         assertTrue(row0.isAbsent(2));
 
@@ -343,10 +343,10 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        assertEquals(EirfType.INT, batch.getRowReader(0).getTypeByte(0));
-        assertEquals(42, batch.getRowReader(0).getIntValue(0));
-        assertEquals(EirfType.STRING, batch.getRowReader(1).getTypeByte(0));
-        assertEquals("hello", batch.getRowReader(1).getStringValue(0).string());
+        assertEquals(EirfType.INT, batch.row(0).getTypeByte(0));
+        assertEquals(42, batch.row(0).getIntValue(0));
+        assertEquals(EirfType.STRING, batch.row(1).getTypeByte(0));
+        assertEquals("hello", batch.row(1).getStringValue(0).string());
 
         batch.close();
     }
@@ -358,8 +358,8 @@ public class EirfEncoderTests extends ESTestCase {
 
             EirfBatch batch = encoder.buildPartition(0);
             assertEquals(2, batch.docCount());
-            assertEquals("alice", batch.getRowReader(0).getStringValue(0).string());
-            assertEquals("bob", batch.getRowReader(1).getStringValue(0).string());
+            assertEquals("alice", batch.row(0).getStringValue(0).string());
+            assertEquals("bob", batch.row(1).getStringValue(0).string());
             batch.close();
         }
     }
@@ -369,7 +369,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         assertEquals(EirfType.INT, row0.getTypeByte(0));
         assertEquals(-100, row0.getIntValue(0));
 
@@ -384,7 +384,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         assertEquals(EirfType.INT, row0.getTypeByte(0));
         assertEquals(Integer.MAX_VALUE, row0.getIntValue(0));
         assertEquals(EirfType.LONG, row0.getTypeByte(1));
@@ -423,7 +423,7 @@ public class EirfEncoderTests extends ESTestCase {
 
         EirfBatch batch = EirfEncoder.encode(sources, XContentType.JSON);
 
-        EirfRowReader row0 = batch.getRowReader(0);
+        EirfRowReader row0 = batch.row(0);
         assertEquals(EirfType.FIXED_ARRAY, row0.getTypeByte(0));
 
         EirfArrayReader reader = row0.getArrayValue(0);

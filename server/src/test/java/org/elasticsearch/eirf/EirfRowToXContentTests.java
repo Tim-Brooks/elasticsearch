@@ -278,7 +278,7 @@ public class EirfRowToXContentTests extends ESTestCase {
 
     private static BytesReference writeRowToJson(EirfBatch batch, int rowIndex) throws IOException {
         try (XContentBuilder xcb = JsonXContent.contentBuilder()) {
-            EirfRowToXContent.writeRow(batch.getRowReader(rowIndex), batch.schema(), xcb);
+            EirfRowToXContent.writeRow(batch.row(rowIndex), batch.schema(), xcb);
             return BytesReference.bytes(xcb);
         }
     }

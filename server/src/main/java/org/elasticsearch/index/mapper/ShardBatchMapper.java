@@ -13,8 +13,6 @@ import org.elasticsearch.action.bulk.BulkItemRequest;
 import org.elasticsearch.action.bulk.ShardBatchIndexer;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.eirf.EirfBatch;
-import org.elasticsearch.eirf.EirfRowReader;
 import org.elasticsearch.eirf.EirfRowToXContent;
 import org.elasticsearch.eirf.EirfRowXContentParser;
 import org.elasticsearch.eirf.EirfSchema;
@@ -24,6 +22,8 @@ import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
+import org.elasticsearch.sourcebatch.SourceBatch;
+import org.elasticsearch.sourcebatch.SourceRow;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentType;
 
@@ -154,7 +154,7 @@ public final class ShardBatchMapper {
      */
     public static List<Engine.Index> parseMappings(
         BulkItemRequest[] items,
-        EirfBatch batch,
+        SourceBatch batch,
         IndexShard primary,
         int chunkEnd,
         int chunkStart,
@@ -171,7 +171,7 @@ public final class ShardBatchMapper {
 
         for (int i = chunkStart; i < chunkEnd; i++) {
             final IndexRequest indexRequest = (IndexRequest) items[i].request();
-            final EirfRowReader row = batch.getRowReader(i);
+            final SourceRow row = batch.row(i);
             final EirfRowXContentParser rowParser = new EirfRowXContentParser(schemaTree, row);
 
             final XContentType xContentType = indexRequest.getContentType() != null ? indexRequest.getContentType() : XContentType.JSON;
@@ -273,7 +273,7 @@ public final class ShardBatchMapper {
         );
     }
 
-    private static BytesReference rowToSource(EirfRowReader row, EirfSchema schema, XContentType xContentType) throws IOException {
+    private static BytesReference rowToSource(SourceRow row, EirfSchema schema, XContentType xContentType) throws IOException {
         try (XContentBuilder builder = XContentBuilder.builder(xContentType.xContent())) {
             EirfRowToXContent.writeRow(row, schema, builder);
             return BytesReference.bytes(builder);
