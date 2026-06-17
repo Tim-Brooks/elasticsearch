@@ -35,11 +35,11 @@ public class EirfRowBuilderTests extends ESTestCase {
             assertEquals(2, batch.docCount());
             assertEquals(2, batch.columnCount());
 
-            EirfRowReader row0 = batch.getRowReader(0);
+            EirfRowReader row0 = batch.row(0);
             assertEquals("alice", row0.getStringValue(0).string());
             assertEquals(30, row0.getIntValue(1));
 
-            EirfRowReader row1 = batch.getRowReader(1);
+            EirfRowReader row1 = batch.row(1);
             assertEquals("bob", row1.getStringValue(0).string());
             assertEquals(25, row1.getIntValue(1));
 
@@ -71,7 +71,7 @@ public class EirfRowBuilderTests extends ESTestCase {
             builder.endDocument();
 
             EirfBatch batch = builder.build();
-            EirfRowReader row0 = batch.getRowReader(0);
+            EirfRowReader row0 = batch.row(0);
             assertEquals(EirfType.INT, row0.getTypeByte(0));
             assertEquals(42, row0.getIntValue(0));
             assertEquals(EirfType.LONG, row0.getTypeByte(1));
@@ -89,7 +89,7 @@ public class EirfRowBuilderTests extends ESTestCase {
             builder.endDocument();
 
             EirfBatch batch = builder.build();
-            EirfRowReader row0 = batch.getRowReader(0);
+            EirfRowReader row0 = batch.row(0);
             assertEquals(EirfType.FLOAT, row0.getTypeByte(0));
             assertEquals(1.5f, row0.getFloatValue(0), 0.0f);
             assertEquals(EirfType.DOUBLE, row0.getTypeByte(1));
@@ -107,7 +107,7 @@ public class EirfRowBuilderTests extends ESTestCase {
             builder.endDocument();
 
             EirfBatch batch = builder.build();
-            EirfRowReader row0 = batch.getRowReader(0);
+            EirfRowReader row0 = batch.row(0);
             assertTrue(row0.getBooleanValue(0));
             assertFalse(row0.getBooleanValue(1));
 
@@ -122,7 +122,7 @@ public class EirfRowBuilderTests extends ESTestCase {
             builder.endDocument();
 
             EirfBatch batch = builder.build();
-            assertTrue(batch.getRowReader(0).isNull(0));
+            assertTrue(batch.row(0).isNull(0));
 
             batch.close();
         }
@@ -148,7 +148,7 @@ public class EirfRowBuilderTests extends ESTestCase {
             builder.endDocument();
 
             EirfBatch batch = builder.build();
-            EirfRowReader row0 = batch.getRowReader(0);
+            EirfRowReader row0 = batch.row(0);
             assertEquals(EirfType.KEY_VALUE, row0.getTypeByte(0));
             EirfKeyValueReader kv = row0.getKeyValue(0);
             assertTrue(kv.next());
@@ -176,10 +176,10 @@ public class EirfRowBuilderTests extends ESTestCase {
             EirfBatch batch = builder.build();
             assertEquals(3, batch.columnCount());
 
-            EirfRowReader row0 = batch.getRowReader(0);
+            EirfRowReader row0 = batch.row(0);
             assertTrue(row0.isAbsent(2));
 
-            EirfRowReader row1 = batch.getRowReader(1);
+            EirfRowReader row1 = batch.row(1);
             assertTrue(row1.isAbsent(1));
             assertEquals("bob@test.com", row1.getStringValue(2).string());
 
@@ -211,8 +211,8 @@ public class EirfRowBuilderTests extends ESTestCase {
             assertEquals(encoderBatch.columnCount(), builderBatch.columnCount());
 
             for (int doc = 0; doc < encoderBatch.docCount(); doc++) {
-                EirfRowReader er = encoderBatch.getRowReader(doc);
-                EirfRowReader br = builderBatch.getRowReader(doc);
+                EirfRowReader er = encoderBatch.row(doc);
+                EirfRowReader br = builderBatch.row(doc);
                 for (int col = 0; col < er.columnCount(); col++) {
                     assertEquals(er.getTypeByte(col), br.getTypeByte(col));
                 }
@@ -285,8 +285,8 @@ public class EirfRowBuilderTests extends ESTestCase {
 
             EirfBatch batch = builder.build();
             assertEquals(2, batch.docCount());
-            assertEquals(1, batch.getRowReader(0).getIntValue(0));
-            assertEquals(2, batch.getRowReader(1).getIntValue(0));
+            assertEquals(1, batch.row(0).getIntValue(0));
+            assertEquals(2, batch.row(1).getIntValue(0));
             batch.close();
         }
     }
@@ -301,7 +301,7 @@ public class EirfRowBuilderTests extends ESTestCase {
 
             EirfBatch batch = builder.build();
             assertEquals(20, batch.columnCount());
-            EirfRowReader row0 = batch.getRowReader(0);
+            EirfRowReader row0 = batch.row(0);
             for (int i = 0; i < 20; i++) {
                 assertEquals(i, row0.getIntValue(i));
             }

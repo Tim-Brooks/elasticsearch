@@ -11,6 +11,7 @@ package org.elasticsearch.eirf;
 
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.sourcebatch.SourceBatch;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xcontent.XContentType;
 
@@ -32,15 +33,15 @@ public class EirfBatchSliceTests extends ESTestCase {
         try (EirfBatch parent = encodeDocs(8)) {
             int from = randomIntBetween(0, 4);
             int to = randomIntBetween(from + 1, 8);
-            EirfBatch sliced = parent.slice(from, to);
+            SourceBatch sliced = parent.slice(from, to);
 
             assertEquals(to - from, sliced.docCount());
             assertEquals(parent.schema().leafCount(), sliced.schema().leafCount());
             assertEquals(parent.schema().nonLeafCount(), sliced.schema().nonLeafCount());
 
             for (int i = 0; i < to - from; i++) {
-                EirfRowReader parentRow = parent.getRowReader(from + i);
-                EirfRowReader slicedRow = sliced.getRowReader(i);
+                var parentRow = parent.row(from + i);
+                var slicedRow = sliced.row(i);
                 int expectedId = parentRow.getIntValue(0);
                 int actualId = slicedRow.getIntValue(0);
                 assertEquals("row " + i + " id mismatch", expectedId, actualId);
@@ -54,11 +55,11 @@ public class EirfBatchSliceTests extends ESTestCase {
 
     public void testFullSliceEqualsParent() throws IOException {
         try (EirfBatch parent = encodeDocs(5)) {
-            EirfBatch sliced = parent.slice(0, parent.docCount());
+            SourceBatch sliced = parent.slice(0, parent.docCount());
             assertEquals(parent.docCount(), sliced.docCount());
             for (int i = 0; i < parent.docCount(); i++) {
-                EirfRowReader p = parent.getRowReader(i);
-                EirfRowReader s = sliced.getRowReader(i);
+                var p = parent.row(i);
+                var s = sliced.row(i);
                 assertEquals(p.getIntValue(0), s.getIntValue(0));
                 assertEquals(p.getStringValue(1).string(), s.getStringValue(1).string());
             }
@@ -68,13 +69,13 @@ public class EirfBatchSliceTests extends ESTestCase {
 
     public void testNestedSlice() throws IOException {
         try (EirfBatch parent = encodeDocs(10)) {
-            EirfBatch outer = parent.slice(2, 8); // docs 2..7
-            EirfBatch inner = outer.slice(1, 4); // outer rows 1..3 == parent rows 3..5
+            SourceBatch outer = parent.slice(2, 8); // docs 2..7
+            SourceBatch inner = outer.slice(1, 4); // outer rows 1..3 == parent rows 3..5
 
             assertEquals(3, inner.docCount());
             for (int i = 0; i < 3; i++) {
-                EirfRowReader expected = parent.getRowReader(3 + i);
-                EirfRowReader actual = inner.getRowReader(i);
+                var expected = parent.row(3 + i);
+                var actual = inner.row(i);
                 assertEquals(expected.getIntValue(0), actual.getIntValue(0));
                 assertEquals(expected.getStringValue(1).string(), actual.getStringValue(1).string());
             }
@@ -85,7 +86,7 @@ public class EirfBatchSliceTests extends ESTestCase {
 
     public void testEmptySlice() throws IOException {
         try (EirfBatch parent = encodeDocs(4)) {
-            EirfBatch empty = parent.slice(2, 2);
+            SourceBatch empty = parent.slice(2, 2);
             assertEquals(0, empty.docCount());
             empty.close();
         }

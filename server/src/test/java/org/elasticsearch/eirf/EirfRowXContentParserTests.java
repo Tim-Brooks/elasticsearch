@@ -31,7 +31,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
             builder.endDocument();
 
             try (EirfBatch batch = builder.build()) {
-                EirfRowReader row = batch.getRowReader(0);
+                EirfRowReader row = batch.row(0);
                 EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
                 try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                     assertToken(parser, Token.START_OBJECT);
@@ -60,7 +60,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
             builder.endDocument();
 
             try (EirfBatch batch = builder.build()) {
-                EirfRowReader row = batch.getRowReader(0);
+                EirfRowReader row = batch.row(0);
                 EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
                 try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                     assertToken(parser, Token.START_OBJECT);
@@ -99,7 +99,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
             builder.endDocument();
 
             try (EirfBatch batch = builder.build()) {
-                EirfRowReader row = batch.getRowReader(1);
+                EirfRowReader row = batch.row(1);
                 EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
                 try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                     assertToken(parser, Token.START_OBJECT);
@@ -126,7 +126,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
             builder.endDocument();
 
             try (EirfBatch batch = builder.build()) {
-                EirfRowReader row = batch.getRowReader(0);
+                EirfRowReader row = batch.row(0);
                 EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
                 try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                     assertToken(parser, Token.START_OBJECT);
@@ -158,7 +158,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
             builder.endDocument();
 
             try (EirfBatch batch = builder.build()) {
-                EirfRowReader row = batch.getRowReader(0);
+                EirfRowReader row = batch.row(0);
                 EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
                 try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                     assertToken(parser, Token.START_OBJECT);
@@ -209,7 +209,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
             builder.endDocument();
 
             try (EirfBatch batch = builder.build()) {
-                EirfRowReader row = batch.getRowReader(0);
+                EirfRowReader row = batch.row(0);
                 EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
                 try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                     Map<String, Object> map = parser.map();
@@ -225,7 +225,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
         BytesReference source = new BytesArray("""
             {"items": [{"name": "a", "val": 1}, {"name": "b", "val": 2}]}""");
         try (EirfBatch batch = EirfEncoder.encode(List.of(source), XContentType.JSON)) {
-            EirfRowReader row = batch.getRowReader(0);
+            EirfRowReader row = batch.row(0);
             EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
             try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                 assertToken(parser, Token.START_OBJECT);
@@ -264,7 +264,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
         BytesReference source = new BytesArray("""
             {"matrix": [[1, 2], [3, 4]]}""");
         try (EirfBatch batch = EirfEncoder.encode(List.of(source), XContentType.JSON)) {
-            EirfRowReader row = batch.getRowReader(0);
+            EirfRowReader row = batch.row(0);
             EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
             try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                 assertToken(parser, Token.START_OBJECT);
@@ -299,7 +299,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
         BytesReference source = new BytesArray("""
             {"items": [{"tags": ["x", "y"], "id": 1}]}""");
         try (EirfBatch batch = EirfEncoder.encode(List.of(source), XContentType.JSON)) {
-            EirfRowReader row = batch.getRowReader(0);
+            EirfRowReader row = batch.row(0);
             EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
             try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                 assertToken(parser, Token.START_OBJECT);
@@ -333,7 +333,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
         BytesReference source = new BytesArray("""
             {"items": [{"k": "a", "v": 1}, {"k": "b", "v": 2}], "count": 2}""");
         try (EirfBatch batch = EirfEncoder.encode(List.of(source), XContentType.JSON)) {
-            EirfRowReader row = batch.getRowReader(0);
+            EirfRowReader row = batch.row(0);
             EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(batch.schema());
             try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                 Map<String, Object> map = parser.map();
@@ -361,7 +361,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
 
             try (EirfBatch batch = builder.build()) {
                 EirfSchema schema = batch.schema();
-                EirfRowReader row = batch.getRowReader(0);
+                EirfRowReader row = batch.row(0);
                 EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(schema);
                 try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                     // Look up each leaf by path, then position the parser at it.
@@ -407,7 +407,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
             {"items": [1, "two", true], "meta": {}, "trailing": 9}""");
         try (EirfBatch batch = EirfEncoder.encode(List.of(source), XContentType.JSON)) {
             EirfSchema schema = batch.schema();
-            EirfRowReader row = batch.getRowReader(0);
+            EirfRowReader row = batch.row(0);
             EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(schema);
             try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                 int itemsLeaf = schema.findLeaf("items", 0);
@@ -471,7 +471,7 @@ public class EirfRowXContentParserTests extends ESTestCase {
 
             try (EirfBatch batch = builder.build()) {
                 EirfSchema schema = batch.schema();
-                EirfRowReader row = batch.getRowReader(0);
+                EirfRowReader row = batch.row(0);
                 EirfRowXContentParser.SchemaNode tree = EirfRowXContentParser.buildSchemaTree(schema);
                 try (EirfRowXContentParser parser = new EirfRowXContentParser(tree, row)) {
                     int dataLeaf = schema.findLeaf("data", 0);
