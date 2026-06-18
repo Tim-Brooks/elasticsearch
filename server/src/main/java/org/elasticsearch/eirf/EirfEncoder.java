@@ -506,16 +506,23 @@ public class EirfEncoder implements Releasable {
         }
     }
 
-    private record PackedArray(byte arrayType, byte[] packed) {}
+    /**
+     * Packed array result: the array type byte ({@code EirfType.FIXED_ARRAY} or
+     * {@code EirfType.UNION_ARRAY}) and the packed element bytes.
+     */
+    public record PackedArray(byte arrayType, byte[] packed) {}
 
     /**
      * Parses an array from the parser (positioned after START_ARRAY) and packs it into
      * either FIXED_ARRAY (all elements same type) or UNION_ARRAY (mixed types) format.
      *
+     * <p>Pass {@code null} for {@code scratch} when calling from outside this class; the method
+     * will allocate its own element buffers.
+     *
      * @param scratch if non-null, array element buffers are borrowed from scratch to avoid allocation.
      *                Null is passed for recursive calls where the buffers are already in use.
      */
-    private static PackedArray parseArray(XContentParser parser, ScratchBuffers scratch) throws IOException {
+    public static PackedArray parseArray(XContentParser parser, ScratchBuffers scratch) throws IOException {
         byte[] elemTypes;
         long[] elemNumeric;
         Object[] elemVar;

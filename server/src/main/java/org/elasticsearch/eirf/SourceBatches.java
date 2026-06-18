@@ -11,6 +11,7 @@ package org.elasticsearch.eirf;
 
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.eicf.EicfBatch;
 import org.elasticsearch.sourcebatch.SourceBatch;
 
 /**
@@ -27,13 +28,22 @@ public final class SourceBatches {
     private SourceBatches() {}
 
     /**
-     * Reconstructs a {@link SourceBatch} from its raw serialised bytes.
+     * Reconstructs a {@link SourceBatch} from its raw serialised bytes. The format is detected
+     * from the magic bytes at the start of the data:
+     * <ul>
+     *   <li>{@code 'eicf'} (LE i32 {@link EicfBatch#MAGIC_LE}) → EICF column-major batch</li>
+     *   <li>Anything else (including {@code 'eirf'}) → EIRF row-major batch</li>
+     * </ul>
      *
      * @param data       the serialised batch bytes (as produced by {@link SourceBatch#data()})
      * @param releasable called on {@link SourceBatch#close()} to release any underlying buffers;
      *                   pass {@code () -> {}} when the bytes are not reference-counted
      */
     public static SourceBatch fromBytes(BytesReference data, Releasable releasable) {
+        int magic = data.getIntLE(0);
+        if (magic == EicfBatch.MAGIC_LE) {
+            return new EicfBatch(data, releasable);
+        }
         return new EirfBatch(data, releasable);
     }
 }

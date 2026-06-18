@@ -53,8 +53,9 @@ public final class EirfSchema {
 
     /**
      * Constructor for reading: builds from pre-parsed non-leaf and leaf arrays.
+     * Used by batch decoders that parse the schema section from raw bytes.
      */
-    EirfSchema(List<String> nonLeafNames, int[] nonLeafParents, List<String> leafNames, int[] leafParents) {
+    public EirfSchema(List<String> nonLeafNames, int[] nonLeafParents, List<String> leafNames, int[] leafParents) {
         this.nonLeaves = new FieldLevel(nonLeafNames, nonLeafParents);
         this.leaves = new FieldLevel(leafNames, leafParents);
     }
