@@ -8,32 +8,23 @@
 package org.elasticsearch.xpack.unsignedlong;
 
 import org.apache.lucene.index.IndexableField;
-import org.elasticsearch.action.bulk.BulkItemRequest;
-import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.eirf.EirfBatch;
-import org.elasticsearch.eirf.EirfRowBuilder;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
-import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.DocumentMapper;
 import org.elasticsearch.index.mapper.DocumentParsingException;
 import org.elasticsearch.index.mapper.FieldMapper;
-import org.elasticsearch.index.mapper.LuceneDocument;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.Mapper;
 import org.elasticsearch.index.mapper.MapperParsingException;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.NumberTypeOutOfRangeSpec;
 import org.elasticsearch.index.mapper.ParsedDocument;
-import org.elasticsearch.index.mapper.ShardBatchMapper;
-import org.elasticsearch.index.mapper.ShardBatchMapper.BatchMapperResolution;
 import org.elasticsearch.index.mapper.TimeSeriesParams;
 import org.elasticsearch.index.mapper.TimeSeriesRoutingHashFieldMapper;
 import org.elasticsearch.index.mapper.WholeNumberFieldMapperTests;
-import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.junit.AssumptionViolatedException;
@@ -54,9 +45,6 @@ import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
-import static org.hamcrest.Matchers.instanceOf;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 public class UnsignedLongFieldMapperTests extends WholeNumberFieldMapperTests {
 
@@ -544,6 +532,7 @@ public class UnsignedLongFieldMapperTests extends WholeNumberFieldMapperTests {
         return List.of(new SortShortcutSupport(this::minimalMapping, this::writeField, true));
     }
 
+    /* TODO columnar: re-enable when unsigned_long supports columnar batch indexing (reverted from batch support).
     public void testSupportsBatchIndexingHappyPath() throws IOException {
         MapperService mapperService = createMapperService(fieldMapping(b -> b.field("type", "unsigned_long")));
         FieldMapper mapper = (FieldMapper) mapperService.mappingLookup().getMapper("field");
@@ -640,4 +629,5 @@ public class UnsignedLongFieldMapperTests extends WholeNumberFieldMapperTests {
         assertThat(ops, hasSize(items.length));
         return ops;
     }
+    */
 }

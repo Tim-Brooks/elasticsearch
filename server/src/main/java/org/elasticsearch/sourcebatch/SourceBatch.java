@@ -95,4 +95,21 @@ public interface SourceBatch extends Releasable, Accountable {
      * @throws IndexOutOfBoundsException if the range is invalid.
      */
     SourceBatch slice(int from, int to);
+
+    /**
+     * The Lucene column batch assembled for this batch by the columnar bulk-mapping path, or
+     * {@code null} when no columnar artifact has been attached (e.g. the row-major format, or the
+     * sequential fallback). The engine uses this to index via {@code IndexWriter#addBatch}.
+     */
+    default ColumnBatchProvider columnBatchProvider() {
+        return null;
+    }
+
+    /**
+     * Attaches the assembled columnar indexing artifact to this batch. Implementations backing the
+     * columnar path (EICF) override this; others throw.
+     */
+    default void setColumnBatchProvider(ColumnBatchProvider provider) {
+        throw new UnsupportedOperationException("this SourceBatch does not support a column batch provider");
+    }
 }

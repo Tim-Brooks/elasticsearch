@@ -127,14 +127,15 @@ public final class ShardBatchIndexer {
 
         for (int chunkStart = 0; chunkStart < items.length; chunkStart += BATCH_CHUNK_SIZE) {
             final int chunkEnd = Math.min(chunkStart + BATCH_CHUNK_SIZE, items.length);
-            final List<Engine.Index> operations = ShardBatchMapper.parseMappings(items, batch, primary, chunkEnd, chunkStart, resolution);
+            // The chunk's operations map 1:1 to the rows [chunkStart, chunkEnd); the columnar mapping assembles a
+            // Lucene ColumnBatch and attaches it to this slice so the engine can index it via addBatch and write a
+            // single Translog.IndexBatch record.
+            final SourceBatch chunkBatch = batch.slice(chunkStart, chunkEnd);
+            final List<Engine.Index> operations = ShardBatchMapper.mapColumnBatch(items, chunkBatch, primary, chunkStart, resolution);
             if (operations == null) {
                 return;
             }
 
-            // The chunk's operations map 1:1 to the rows [chunkStart, chunkEnd); pass the matching slice so the
-            // engine can write them as a single Translog.IndexBatch record.
-            final SourceBatch chunkBatch = batch.slice(chunkStart, chunkEnd);
             final List<Engine.IndexResult> results = primary.applyIndexOperationBatchOnPrimary(operations, chunkBatch);
 
             for (Engine.IndexResult result : results) {

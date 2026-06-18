@@ -8,25 +8,18 @@
 package org.elasticsearch.xpack.constantkeyword.mapper;
 
 import org.apache.lucene.index.DirectoryReader;
-import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.index.RandomIndexWriter;
-import org.elasticsearch.action.bulk.BulkItemRequest;
-import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
-import org.elasticsearch.eirf.EirfBatch;
-import org.elasticsearch.eirf.EirfRowBuilder;
-import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.BlockLoader;
 import org.elasticsearch.index.mapper.DocumentMapper;
 import org.elasticsearch.index.mapper.DocumentParsingException;
 import org.elasticsearch.index.mapper.DummyBlockLoaderContext;
-import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.LuceneDocument;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.MapperParsingException;
@@ -34,10 +27,7 @@ import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.MapperService.MergeReason;
 import org.elasticsearch.index.mapper.MapperTestCase;
 import org.elasticsearch.index.mapper.ParsedDocument;
-import org.elasticsearch.index.mapper.ShardBatchMapper;
-import org.elasticsearch.index.mapper.ShardBatchMapper.BatchMapperResolution;
 import org.elasticsearch.index.mapper.TestBlock;
-import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xpack.constantkeyword.ConstantKeywordMapperPlugin;
@@ -49,13 +39,9 @@ import java.util.Collection;
 import java.util.List;
 
 import static org.elasticsearch.index.mapper.MapperService.INDEX_MAPPING_TOTAL_FIELDS_LIMIT_SETTING;
-import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.nullValue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 public class ConstantKeywordFieldMapperTests extends MapperTestCase {
 
@@ -328,6 +314,7 @@ public class ConstantKeywordFieldMapperTests extends MapperTestCase {
         return false;
     }
 
+    /* TODO columnar: re-enable when constant_keyword supports columnar batch indexing (reverted from batch support).
     public void testSupportsBatchIndexingWhenValueIsSet() throws IOException {
         MapperService mapperService = createMapperService(fieldMapping(b -> b.field("type", "constant_keyword").field("value", "foo")));
         FieldMapper mapper = (FieldMapper) mapperService.mappingLookup().getMapper("field");
@@ -404,4 +391,5 @@ public class ConstantKeywordFieldMapperTests extends MapperTestCase {
         assertThat(ops, hasSize(items.length));
         return ops;
     }
+    */
 }

@@ -13,12 +13,15 @@ import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.document.column.LongColumn;
 import org.apache.lucene.index.DocValuesType;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.index.fielddata.FieldDataContext;
 import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.fielddata.IndexNumericFieldData.NumericType;
@@ -265,6 +268,34 @@ public class SeqNoFieldMapper extends MetadataFieldMapper {
 
     private SeqNoFieldMapper() {
         super(SeqNoFieldType.UNSEARCHABLE);
+    }
+
+    private static final IndexableFieldType SEQ_NO_COLUMN_FIELD_TYPE = numericDocValuesFieldType(true);
+    private static final IndexableFieldType PRIMARY_TERM_COLUMN_FIELD_TYPE = numericDocValuesFieldType(false);
+
+    private static IndexableFieldType numericDocValuesFieldType(boolean withPoint) {
+        FieldType ft = new FieldType();
+        ft.setDocValuesType(DocValuesType.NUMERIC);
+        if (withPoint) {
+            ft.setDimensions(1, Long.BYTES);
+        }
+        ft.freeze();
+        return ft;
+    }
+
+    @Override
+    public void mapMetadataColumns(BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        // Engine-assigned values: register array-backed columns over the builder's mutable arrays;
+        // InternalEngine fills _seq_no / _primary_term per document before addBatch.
+        out.addColumn(EicfLuceneColumns.arrayLongColumn(out.seqNoArray(), NAME, SEQ_NO_COLUMN_FIELD_TYPE, LongColumn.NumericKind.LONG));
+        out.addColumn(
+            EicfLuceneColumns.arrayLongColumn(
+                out.primaryTermArray(),
+                PRIMARY_TERM_NAME,
+                PRIMARY_TERM_COLUMN_FIELD_TYPE,
+                LongColumn.NumericKind.LONG
+            )
+        );
     }
 
     @Override

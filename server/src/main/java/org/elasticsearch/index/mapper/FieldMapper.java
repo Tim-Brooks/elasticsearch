@@ -217,6 +217,22 @@ public abstract class FieldMapper extends Mapper {
     }
 
     /**
+     * Attaches this field's values as a Lucene column to {@code out} for the columnar bulk batch path
+     * (see {@code ShardBatchMapper}). {@code column} holds the field's values across every document in
+     * the batch; {@code contexts} are the per-document parse contexts. Mappers that return {@code true}
+     * from {@link #supportsBatchIndexing()} must override this. The default throws.
+     *
+     * @throws UnsupportedOperationException if this mapper does not support columnar batch indexing
+     */
+    public void mapColumnBatch(
+        org.elasticsearch.sourcebatch.SourceColumn column,
+        BatchDocumentParserContext[] contexts,
+        ColumnBatchBuilder out
+    ) {
+        throw new UnsupportedOperationException("mapper of type [" + typeName() + "] does not implement columnar batch indexing");
+    }
+
+    /**
      * Parse the field value using the provided {@link DocumentParserContext}.
      */
     public void parse(DocumentParserContext context) throws IOException {

@@ -1531,27 +1531,67 @@ public class InternalEngine extends Engine {
                 assert index.seqNo() >= 0 : "ops should have an assigned seq no.; origin: " + index.origin();
             }
 
-            // Lucene
-            for (int i = 0; i < subBatchSize; i++) {
-                int originalIdx = subBatchIdx + i;
-                if (allResults[originalIdx] != null) {
-                    // early result already set
-                    continue;
+            // Columnar fast path: when the bulk mapper attached a Lucene ColumnBatch and the entire
+            // chunk is processed as a single append-only sub-batch, index it with one
+            // IndexWriter#addBatch instead of per-document addDocuments. Any other shape (sub-batch
+            // split by lock contention, version conflicts, updates, stale ops) uses the per-op path.
+            final org.elasticsearch.sourcebatch.ColumnBatchProvider columnProvider = batch.columnBatchProvider();
+            boolean useColumnBatch = columnProvider != null && subBatchIdx == 0 && subBatchSize == columnProvider.docCount();
+            if (useColumnBatch) {
+                for (int i = 0; i < subBatchSize; i++) {
+                    final IndexingStrategy plan = plans[i];
+                    if (allResults[subBatchIdx + i] != null
+                        || plan.indexIntoLucene == false
+                        || plan.useLuceneUpdateDocument
+                        || plan.addStaleOpToLucene) {
+                        useColumnBatch = false;
+                        break;
+                    }
                 }
-                IndexingStrategy plan = plans[i];
-                Index op = subBatchOps[i];
+            }
 
-                if (plan.indexIntoLucene || plan.addStaleOpToLucene) {
-                    // TODO: Should be able to optimize batch adds of append-only documents
-                    allResults[originalIdx] = indexIntoLucene(op, plan);
-                } else {
-                    allResults[originalIdx] = new IndexResult(
+            if (useColumnBatch) {
+                for (int i = 0; i < subBatchSize; i++) {
+                    final Index op = subBatchOps[i];
+                    columnProvider.setSeqNo(i, op.seqNo());
+                    columnProvider.setPrimaryTerm(i, op.primaryTerm());
+                    columnProvider.setVersion(i, plans[i].versionForIndexing);
+                }
+                indexWriter.addBatch(columnProvider.columnBatch(0, subBatchSize));
+                for (int i = 0; i < subBatchSize; i++) {
+                    final Index op = subBatchOps[i];
+                    final IndexingStrategy plan = plans[i];
+                    allResults[subBatchIdx + i] = new IndexResult(
                         plan.versionForIndexing,
                         op.primaryTerm(),
                         op.seqNo(),
                         plan.currentNotFoundOrDeleted,
                         op.id()
                     );
+                }
+            } else {
+                // Lucene
+                for (int i = 0; i < subBatchSize; i++) {
+                    int originalIdx = subBatchIdx + i;
+                    if (allResults[originalIdx] != null) {
+                        // early result already set
+                        continue;
+                    }
+                    IndexingStrategy plan = plans[i];
+                    Index op = subBatchOps[i];
+
+                    if (plan.indexIntoLucene || plan.addStaleOpToLucene) {
+                        // TODO: Should be able to optimize batch adds of append-only documents
+                        allResults[originalIdx] = indexIntoLucene(op, plan);
+                    } else {
+                        allResults[originalIdx] = new IndexResult(
+                            plan.versionForIndexing,
+                            op.primaryTerm(),
+                            op.seqNo(),
+                            plan.currentNotFoundOrDeleted,
+                            op.id()
+                        );
+                    }
                 }
             }
 

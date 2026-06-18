@@ -12,10 +12,13 @@ package org.elasticsearch.index.mapper;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StoredField;
+import org.apache.lucene.document.column.LongColumn;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.util.BytesRef;
@@ -27,6 +30,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.CollectionUtils;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
@@ -492,6 +496,61 @@ public class SourceFieldMapper extends MetadataFieldMapper {
             context.doc().add(new StoredField(RECOVERY_SOURCE_NAME, recoverySource.bytes, recoverySource.offset, recoverySource.length));
             context.doc().add(new NumericDocValuesField(RECOVERY_SOURCE_NAME, 1));
         }
+    }
+
+    private static final IndexableFieldType SOURCE_COLUMN_FIELD_TYPE = buildStoredColumnFieldType();
+    private static final IndexableFieldType RECOVERY_SOURCE_SIZE_COLUMN_FIELD_TYPE = buildNumericDvColumnFieldType();
+
+    private static IndexableFieldType buildStoredColumnFieldType() {
+        FieldType ft = new FieldType();
+        ft.setStored(true);
+        ft.freeze();
+        return ft;
+    }
+
+    private static IndexableFieldType buildNumericDvColumnFieldType() {
+        FieldType ft = new FieldType();
+        ft.setDocValuesType(DocValuesType.NUMERIC);
+        ft.freeze();
+        return ft;
+    }
+
+    @Override
+    public void mapMetadataColumns(BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) throws IOException {
+        final boolean recoverySourceEnabled = contexts[0].indexSettings().isRecoverySourceEnabled();
+        final boolean syntheticRecovery = recoverySourceEnabled && contexts[0].indexSettings().isRecoverySourceSyntheticEnabled();
+
+        if (stored() && mode != Mode.COLUMNAR_STORED) {
+            final BytesRef[] sources = new BytesRef[contexts.length];
+            for (int d = 0; d < contexts.length; d++) {
+                final SourceToParse.Source sourceObject = contexts[d].sourceToParse().source();
+                final XContentType contentType = sourceObject.xContentType();
+                final BytesReference originalSource = sourceObject.originalBytes();
+                final BytesReference storedSource = removeSyntheticVectorFields(contexts[d].mappingLookup(), originalSource, contentType);
+                final BytesReference adaptedStoredSource = applyFilters(contexts[d].mappingLookup(), storedSource, contentType, false);
+                sources[d] = adaptedStoredSource == null ? new BytesRef() : adaptedStoredSource.toBytesRef();
+            }
+            out.addColumn(EicfLuceneColumns.arrayBinaryColumn(sources, fieldType().name(), SOURCE_COLUMN_FIELD_TYPE));
+            return;
+        }
+
+        if (stored() == false && syntheticRecovery) {
+            // Synthetic-source recovery stores only the original source size as a numeric doc value.
+            final long[] sizes = new long[contexts.length];
+            for (int d = 0; d < contexts.length; d++) {
+                sizes[d] = contexts[d].sourceToParse().source().estimatedSizeInBytes();
+            }
+            out.addColumn(
+                EicfLuceneColumns.arrayLongColumn(
+                    sizes,
+                    RECOVERY_SOURCE_SIZE_NAME,
+                    RECOVERY_SOURCE_SIZE_COLUMN_FIELD_TYPE,
+                    LongColumn.NumericKind.LONG
+                )
+            );
+            return;
+        }
+        // TODO columnar: reduced _recovery_source (non-synthetic recovery, stored()==false) not yet emitted as a column.
     }
 
     @Override

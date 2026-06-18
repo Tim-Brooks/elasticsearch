@@ -38,8 +38,8 @@ public class EicfColumnTests extends ESTestCase {
      *   <li>col 2 {@code "b"}:     BOOL</li>
      *   <li>col 3 {@code "s"}:     STRING</li>
      *   <li>col 4 {@code "arr"}:   ARRAY</li>
-     *   <li>col 5 {@code "nu"}:    NUMERIC_UNION (long row + double row)</li>
-     *   <li>col 6 {@code "u"}:     UNION (string row + long row)</li>
+     *   <li>col 5 {@code "nu"}:    UNION via a long+double mix (long row + double row)</li>
+     *   <li>col 6 {@code "u"}:     UNION via a string+long mix (string row + long row)</li>
      *   <li>col 7 {@code "opt"}:   LONG, absent in doc 2</li>
      * </ul>
      */
@@ -48,7 +48,7 @@ public class EicfColumnTests extends ESTestCase {
             List.of(
                 // doc 0
                 new BytesArray("{\"n\":10,\"f\":1.5,\"b\":true,\"s\":\"hello\"," + "\"arr\":[1,2],\"nu\":100,\"u\":\"word\",\"opt\":99}"),
-                // doc 1: nu is double (→ NUMERIC_UNION); u is long (→ UNION)
+                // doc 1: nu is double (→ UNION); u is long (→ UNION)
                 new BytesArray("{\"n\":20,\"f\":2.5,\"b\":false,\"s\":\"world\"," + "\"arr\":[3,4,5],\"nu\":3.14,\"u\":42,\"opt\":77}"),
                 // doc 2: opt is absent
                 new BytesArray("{\"n\":30,\"f\":3.5,\"b\":true,\"s\":\"end\"," + "\"arr\":[6],\"nu\":200,\"u\":\"last\"}")
@@ -205,15 +205,15 @@ public class EicfColumnTests extends ESTestCase {
         }
     }
 
-    public void testNumericUnionColumn() throws IOException {
+    public void testNumericMixColumn() throws IOException {
         try (EicfBatch batch = buildAllKindsBatch()) {
-            SourceColumn col = batch.column(5); // "nu" — NUMERIC_UNION
+            SourceColumn col = batch.column(5); // "nu" — UNION from a long+double mix
 
             // doc 0: long value 100
             assertEquals(EirfType.LONG, col.getTypeByte(0));
             assertEquals(100L, col.getLongValue(0));
 
-            // doc 1: double value 3.14 (triggers NUMERIC_UNION)
+            // doc 1: double value 3.14 (promotes the column to UNION)
             assertEquals(EirfType.DOUBLE, col.getTypeByte(1));
             assertEquals(3.14, col.getDoubleValue(1), 1e-10);
 

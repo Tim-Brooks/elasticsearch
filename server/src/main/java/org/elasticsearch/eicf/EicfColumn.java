@@ -19,11 +19,17 @@ import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentString;
 
 /**
- * A direct-access column view over an EICF column data blob.
- *
- * <p>Unlike the row-major {@link org.elasticsearch.eirf.EirfColumn}, this implementation
- * reads values directly from the column vector without scanning any row. Absent values are
- * tracked by a per-column bitset at the start of the column blob.
+ * A direct-access column view over an EICF column's four fields: an optional absent bitset, an
+ * optional per-document type vector, an optional offset vector, and a data payload. Reads are
+ * driven by {@link EicfColumnKind kind} together with which fields are present:
+ * <ul>
+ *   <li>The <b>absent bitset</b>, when present, marks absent documents (bit set = absent).</li>
+ *   <li>The <b>type vector</b>, when present (ARRAY / UNION), gives the {@link EirfType} of each
+ *       document; otherwise the per-document type is implied by {@code kind}.</li>
+ *   <li>The <b>offset vector</b>, when present (STRING / BINARY / ARRAY / UNION), locates each
+ *       document's value in {@code data}; otherwise values are fixed 8-byte slots (LONG / DOUBLE)
+ *       or {@code data} is a value bitset (BOOL).</li>
+ * </ul>
  *
  * <p>All getters are pure reads that do not advance any cursor state.
  */
@@ -31,61 +37,32 @@ public final class EicfColumn implements SourceColumn {
 
     private final int columnIndex;
     private final byte kind;
-    /** The raw column data blob (kind-specific layout; see {@link EicfColumnKind}). */
-    private final BytesReference data;
     private final int docCount;
-    /** Number of bytes used by each bitset section: {@code ((docCount + 63) / 64) * 8}. */
-    private final int bitsetBytes;
+    /** Absent bitset (LE longs, bit set = absent), or {@code null} if no document is absent. */
+    private final BytesReference absent;
+    /** Per-document {@link EirfType} vector, or {@code null} when implied by {@link #kind}. */
+    private final BytesReference typeVector;
+    /** {@code (docCount + 1)} LE i32 offsets into {@link #data}, or {@code null} for fixed/bitset kinds. */
+    private final BytesReference offsets;
+    /** The value payload (LONG/DOUBLE slots, UTF-8/binary/packed bytes, a value bitset, or dense union bytes). */
+    private final BytesReference data;
 
-    /**
-     * Pre-computed section offsets within {@code data} (depend only on kind + docCount):
-     * <ul>
-     *   <li>LONG/DOUBLE:   valuesOffset = bitsetBytes</li>
-     *   <li>BOOL:          valueBitsOffset = bitsetBytes</li>
-     *   <li>STRING/BINARY: offsetsOffset = bitsetBytes;  bytesOffset = bitsetBytes + (docCount+1)*4</li>
-     *   <li>ARRAY:         typeVecOffset = bitsetBytes;  arrOffsetsOffset = typeVecOffset + docCount;
-     *                      packedOffset  = arrOffsetsOffset + (docCount+1)*4</li>
-     *   <li>NUMERIC_UNION: isDecimalOffset = bitsetBytes;  nuValuesOffset = 2*bitsetBytes</li>
-     *   <li>UNION:         typeVecOffset = bitsetBytes;  unionOffsetsOffset = typeVecOffset + docCount;
-     *                      denseOffset   = unionOffsetsOffset + (docCount+1)*4</li>
-     * </ul>
-     */
-    private final int offA; // first section after absent bitset
-    private final int offB; // second section (only for STRING/BINARY/ARRAY/NUMERIC_UNION/UNION)
-    private final int offC; // third section (only for ARRAY/UNION)
-
-    EicfColumn(int columnIndex, byte kind, BytesReference data, int docCount) {
+    EicfColumn(
+        int columnIndex,
+        byte kind,
+        int docCount,
+        BytesReference absent,
+        BytesReference typeVector,
+        BytesReference offsets,
+        BytesReference data
+    ) {
         this.columnIndex = columnIndex;
         this.kind = kind;
-        this.data = data;
         this.docCount = docCount;
-        this.bitsetBytes = EicfColumnBuilder.bitsetBytes(docCount);
-
-        // Pre-compute offsets
-        this.offA = bitsetBytes;
-        switch (kind) {
-            case EicfColumnKind.LONG, EicfColumnKind.DOUBLE, EicfColumnKind.BOOL -> {
-                offB = 0;
-                offC = 0;
-            }
-            case EicfColumnKind.STRING, EicfColumnKind.BINARY -> {
-                offB = offA + (docCount + 1) * 4;
-                offC = 0;
-            }
-            case EicfColumnKind.ARRAY -> {
-                offB = offA + docCount;                     // offsets start
-                offC = offB + (docCount + 1) * 4;          // packed bytes start
-            }
-            case EicfColumnKind.NUMERIC_UNION -> {
-                offB = bitsetBytes + bitsetBytes;           // values start
-                offC = 0;
-            }
-            case EicfColumnKind.UNION -> {
-                offB = offA + docCount;                     // offsets start
-                offC = offB + (docCount + 1) * 4;          // dense values start
-            }
-            default -> throw new IllegalArgumentException("Unknown column kind: " + EicfColumnKind.name(kind));
-        }
+        this.absent = absent;
+        this.typeVector = typeVector;
+        this.offsets = offsets;
+        this.data = data;
     }
 
     @Override
@@ -99,6 +76,30 @@ public final class EicfColumn implements SourceColumn {
     }
 
     // -------------------------------------------------------------------------
+    // Package-private field accessors (used by EicfLuceneColumns adapters)
+    // -------------------------------------------------------------------------
+
+    /** The column kind (see {@link EicfColumnKind}). */
+    byte kind() {
+        return kind;
+    }
+
+    /** The absent bitset, or {@code null} when every document is present (dense). */
+    BytesReference absentBitset() {
+        return absent;
+    }
+
+    /** The offset vector, or {@code null} for fixed-width (LONG/DOUBLE) and value-bitset (BOOL) kinds. */
+    BytesReference offsets() {
+        return offsets;
+    }
+
+    /** The value payload. */
+    BytesReference data() {
+        return data;
+    }
+
+    // -------------------------------------------------------------------------
     // Absent / null / type
     // -------------------------------------------------------------------------
 
@@ -107,11 +108,7 @@ public final class EicfColumn implements SourceColumn {
         if (d < 0 || d >= docCount) {
             return true;
         }
-        if (kind == EicfColumnKind.UNION) {
-            // The type vector carries ABSENT for absent rows — no separate bitset check needed.
-            return data.get(offA + d) == EirfType.ABSENT;
-        }
-        return isBitSet(0, d);
+        return absent != null && EicfColumnBuilder.isBitSet(absent, 0, d);
     }
 
     @Override
@@ -121,28 +118,19 @@ public final class EicfColumn implements SourceColumn {
 
     @Override
     public byte getTypeByte(int d) {
-        if (d < 0 || d >= docCount) {
+        if (d < 0 || d >= docCount || isAbsent(d)) {
             return EirfType.ABSENT;
         }
+        if (typeVector != null) {
+            return typeVector.get(d);
+        }
         return switch (kind) {
-            case EicfColumnKind.LONG -> isBitSet(0, d) ? EirfType.ABSENT : EirfType.LONG;
-            case EicfColumnKind.DOUBLE -> isBitSet(0, d) ? EirfType.ABSENT : EirfType.DOUBLE;
-            case EicfColumnKind.BOOL -> {
-                if (isBitSet(0, d)) yield EirfType.ABSENT;
-                yield isBitSet(offA, d) ? EirfType.TRUE : EirfType.FALSE;
-            }
-            case EicfColumnKind.STRING -> isBitSet(0, d) ? EirfType.ABSENT : EirfType.STRING;
-            case EicfColumnKind.BINARY -> isBitSet(0, d) ? EirfType.ABSENT : EirfType.BINARY;
-            case EicfColumnKind.ARRAY -> {
-                if (isBitSet(0, d)) yield EirfType.ABSENT;
-                yield data.get(offA + d);
-            }
-            case EicfColumnKind.NUMERIC_UNION -> {
-                if (isBitSet(0, d)) yield EirfType.ABSENT;
-                yield isBitSet(offA, d) ? EirfType.DOUBLE : EirfType.LONG;
-            }
-            case EicfColumnKind.UNION -> data.get(offA + d); // ABSENT stored in type vector
-            default -> throw new IllegalStateException("Unknown kind: " + EicfColumnKind.name(kind));
+            case EicfColumnKind.LONG -> EirfType.LONG;
+            case EicfColumnKind.DOUBLE -> EirfType.DOUBLE;
+            case EicfColumnKind.STRING -> EirfType.STRING;
+            case EicfColumnKind.BINARY -> EirfType.BINARY;
+            case EicfColumnKind.BOOL -> EicfColumnBuilder.isBitSet(data, 0, d) ? EirfType.TRUE : EirfType.FALSE;
+            default -> throw new IllegalStateException("Unexpected kind without type vector: " + EicfColumnKind.name(kind));
         };
     }
 
@@ -153,9 +141,9 @@ public final class EicfColumn implements SourceColumn {
     @Override
     public boolean getBooleanValue(int d) {
         return switch (kind) {
-            case EicfColumnKind.BOOL -> isBitSet(offA, d);
+            case EicfColumnKind.BOOL -> EicfColumnBuilder.isBitSet(data, 0, d);
             case EicfColumnKind.UNION -> {
-                byte t = data.get(offA + d);
+                byte t = typeVector.get(d);
                 if (t == EirfType.TRUE) yield true;
                 if (t == EirfType.FALSE) yield false;
                 throw new IllegalStateException("Column " + columnIndex + " doc " + d + " is not boolean, type=" + EirfType.name(t));
@@ -166,32 +154,12 @@ public final class EicfColumn implements SourceColumn {
 
     @Override
     public long getLongValue(int d) {
-        return switch (kind) {
-            case EicfColumnKind.LONG -> data.getLongLE(offA + d * 8);
-            case EicfColumnKind.NUMERIC_UNION -> data.getLongLE(offB + d * 8);
-            case EicfColumnKind.UNION -> {
-                int off0 = data.getIntLE(offB + d * 4);
-                yield data.getLongLE(offC + off0);
-            }
-            default -> throw new IllegalStateException(
-                "Column " + columnIndex + " kind=" + EicfColumnKind.name(kind) + " has no long values"
-            );
-        };
+        return data.getLongLE(valueOffset(d));
     }
 
     @Override
     public double getDoubleValue(int d) {
-        return switch (kind) {
-            case EicfColumnKind.DOUBLE -> Double.longBitsToDouble(data.getLongLE(offA + d * 8));
-            case EicfColumnKind.NUMERIC_UNION -> Double.longBitsToDouble(data.getLongLE(offB + d * 8));
-            case EicfColumnKind.UNION -> {
-                int off0 = data.getIntLE(offB + d * 4);
-                yield Double.longBitsToDouble(data.getLongLE(offC + off0));
-            }
-            default -> throw new IllegalStateException(
-                "Column " + columnIndex + " kind=" + EicfColumnKind.name(kind) + " has no double values"
-            );
-        };
+        return Double.longBitsToDouble(data.getLongLE(valueOffset(d)));
     }
 
     /**
@@ -229,61 +197,36 @@ public final class EicfColumn implements SourceColumn {
 
     @Override
     public EirfArrayReader getArrayValue(int d) {
-        BytesRef ref;
-        boolean fixed;
-        if (kind == EicfColumnKind.ARRAY) {
-            fixed = data.get(offA + d) == EirfType.FIXED_ARRAY;
-            int off0 = data.getIntLE(offB + d * 4);
-            int off1 = data.getIntLE(offB + (d + 1) * 4);
-            ref = data.slice(offC + off0, off1 - off0).toBytesRef();
-        } else if (kind == EicfColumnKind.UNION) {
-            byte t = data.get(offA + d);
-            fixed = t == EirfType.FIXED_ARRAY;
-            int off0 = data.getIntLE(offB + d * 4);
-            int off1 = data.getIntLE(offB + (d + 1) * 4);
-            ref = data.slice(offC + off0, off1 - off0).toBytesRef();
-        } else {
+        if (kind != EicfColumnKind.ARRAY && kind != EicfColumnKind.UNION) {
             throw new IllegalStateException("Column " + columnIndex + " kind=" + EicfColumnKind.name(kind) + " has no array values");
         }
+        boolean fixed = typeVector.get(d) == EirfType.FIXED_ARRAY;
+        BytesRef ref = varRef(d);
         return new EirfArrayReader(ref.bytes, ref.offset, ref.length, fixed);
     }
 
     @Override
     public EirfKeyValueReader getKeyValue(int d) {
-        if (kind == EicfColumnKind.UNION) {
-            int off0 = data.getIntLE(offB + d * 4);
-            int off1 = data.getIntLE(offB + (d + 1) * 4);
-            BytesRef ref = data.slice(offC + off0, off1 - off0).toBytesRef();
-            return new EirfKeyValueReader(ref.bytes, ref.offset, ref.length);
+        if (kind != EicfColumnKind.UNION) {
+            throw new IllegalStateException("Column " + columnIndex + " kind=" + EicfColumnKind.name(kind) + " has no key-value values");
         }
-        throw new IllegalStateException("Column " + columnIndex + " kind=" + EicfColumnKind.name(kind) + " has no key-value values");
+        BytesRef ref = varRef(d);
+        return new EirfKeyValueReader(ref.bytes, ref.offset, ref.length);
     }
 
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
-    /** Reads the variable-length value for doc {@code d} (STRING/BINARY or UNION). */
-    private BytesRef varRef(int d) {
-        if (kind == EicfColumnKind.STRING || kind == EicfColumnKind.BINARY) {
-            int off0 = data.getIntLE(offA + d * 4);
-            int off1 = data.getIntLE(offA + (d + 1) * 4);
-            return data.slice(offB + off0, off1 - off0).toBytesRef();
-        } else if (kind == EicfColumnKind.UNION) {
-            int off0 = data.getIntLE(offB + d * 4);
-            int off1 = data.getIntLE(offB + (d + 1) * 4);
-            return data.slice(offC + off0, off1 - off0).toBytesRef();
-        }
-        throw new IllegalStateException("Column " + columnIndex + " kind=" + EicfColumnKind.name(kind) + " has no variable-length value");
+    /** Byte offset of doc {@code d}'s fixed-width value: via the offset vector, else a fixed 8-byte slot. */
+    private int valueOffset(int d) {
+        return offsets != null ? offsets.getIntLE(d * 4) : d * 8;
     }
 
-    /**
-     * Returns true if bit {@code d} is set in the bitset stored at {@code bitsetOffset} in
-     * {@link #data}. Bitsets are serialised as little-endian longs: bit {@code d} is at word
-     * {@code d/64}, bit-position {@code d%64} within that word.
-     */
-    private boolean isBitSet(int bitsetOffset, int d) {
-        long word = data.getLongLE(bitsetOffset + (d / 64) * 8);
-        return ((word >>> (d & 63)) & 1L) != 0;
+    /** Reads the variable-length value for doc {@code d} via the offset vector. */
+    private BytesRef varRef(int d) {
+        int off0 = offsets.getIntLE(d * 4);
+        int off1 = offsets.getIntLE((d + 1) * 4);
+        return data.slice(off0, off1 - off0).toBytesRef();
     }
 }

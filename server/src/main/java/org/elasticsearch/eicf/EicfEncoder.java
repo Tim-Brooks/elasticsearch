@@ -10,32 +10,28 @@
 package org.elasticsearch.eicf;
 
 import org.apache.lucene.util.FixedBitSet;
-import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.core.Releasables;
 import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.eirf.EirfSchema;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
-import org.elasticsearch.xcontent.XContentString;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /**
  * Encodes JSON documents into an {@link EicfBatch} (Elastic Internal Column Format).
  *
- * <p>Unlike {@link EirfEncoder} which stores one blob per document, this encoder stores one
- * typed vector per leaf column. Numbers are upcast aggressively: JSON ints and longs both
- * become {@code long}, JSON floats and doubles both become {@code double}. Mixed-numeric
- * columns become {@link EicfColumnKind#NUMERIC_UNION}; other type conflicts or explicit nulls
- * produce {@link EicfColumnKind#UNION}.
+ * <p>Unlike {@link EirfEncoder} which stores one blob per document, this encoder accumulates one
+ * column per leaf field. Numbers are upcast aggressively: JSON ints and longs both become
+ * {@code long}, JSON floats and doubles both become {@code double}. A type conflict (including a
+ * long+double mix) or an explicit null promotes the column to {@link EicfColumnKind#UNION}; see
+ * {@link EicfColumnBuilder}.
  *
  * <p>Usage:
  * <pre>
@@ -103,23 +99,22 @@ public final class EicfEncoder implements Releasable {
     }
 
     /**
-     * Builds and returns the {@link EicfBatch}. Calling this method does not consume the encoder;
-     * additional documents may be added and a new batch built. The returned batch is independent
-     * of this encoder.
+     * Finalises the accumulated columns and returns the in-memory {@link EicfBatch}. This consumes
+     * the per-column data streams, so it must be called at most once. The returned batch owns the
+     * streams and releases them on {@link EicfBatch#close()}.
      */
     public EicfBatch build() {
         int colCount = schema.leafCount();
-        byte[] kindBytes = new byte[colCount];
-        byte[][] blobs = new byte[colCount][];
-
+        EicfColumnData[] columns = new EicfColumnData[colCount];
+        List<Releasable> releasables = new ArrayList<>(colCount);
         for (int c = 0; c < colCount; c++) {
-            byte[] finishResult = columnBuilders.get(c).finish(docCount);
-            kindBytes[c] = finishResult[0];
-            blobs[c] = Arrays.copyOfRange(finishResult, 1, finishResult.length);
+            EicfColumnData col = columnBuilders.get(c).finish(docCount);
+            columns[c] = col;
+            if (col.data() instanceof Releasable releasable) {
+                releasables.add(releasable);
+            }
         }
-
-        BytesReference batchBytes = buildBatchBytes(schema, docCount, kindBytes, blobs);
-        return new EicfBatch(batchBytes, () -> {});
+        return new EicfBatch(schema, docCount, columns, Releasables.wrap(releasables));
     }
 
     @Override
@@ -176,22 +171,16 @@ public final class EicfEncoder implements Releasable {
                     EirfEncoder.PackedArray arr = EirfEncoder.parseArray(parser, null);
                     builder.addArray(arr.arrayType(), arr.packed());
                 }
-                case VALUE_STRING -> {
-                    XContentString.UTF8Bytes str = parser.optimizedText().bytes();
-                    byte[] utf8 = Arrays.copyOfRange(str.bytes(), str.offset(), str.offset() + str.length());
-                    builder.addString(utf8);
-                }
+                // The UTF-8 slice points into the parser's reusable buffer; the builder writes it
+                // directly into the column data stream, so it does not outlive this call.
+                case VALUE_STRING -> builder.addString(parser.optimizedText().bytes());
                 case VALUE_NUMBER -> {
                     XContentParser.NumberType numType = parser.numberType();
                     switch (numType) {
                         case INT, LONG -> builder.addLong(parser.longValue());
                         case FLOAT, DOUBLE -> builder.addDouble(parser.doubleValue());
-                        default -> {
-                            // BIG_INTEGER / BIG_DECIMAL: fall back to string
-                            XContentString.UTF8Bytes str = parser.optimizedText().bytes();
-                            byte[] utf8 = Arrays.copyOfRange(str.bytes(), str.offset(), str.offset() + str.length());
-                            builder.addString(utf8);
-                        }
+                        // BIG_INTEGER / BIG_DECIMAL: fall back to the raw string representation
+                        default -> builder.addString(parser.optimizedText().bytes());
                     }
                 }
                 case VALUE_BOOLEAN -> builder.addBoolean(parser.booleanValue());
@@ -215,116 +204,5 @@ public final class EicfEncoder implements Releasable {
             }
             columnBuilders.add(builder);
         }
-    }
-
-    // -------------------------------------------------------------------------
-    // Batch serialisation
-    // -------------------------------------------------------------------------
-
-    /**
-     * Assembles the full EICF batch bytes from the schema, per-column kind codes and blobs.
-     *
-     * <p>Layout:
-     * <pre>
-     * header(32) | schema | column_index(colCount * 9) | column_blobs
-     * </pre>
-     */
-    static BytesReference buildBatchBytes(EirfSchema schema, int docCount, byte[] kindBytes, byte[][] blobs) {
-        int colCount = schema.leafCount();
-        int nonLeafCount = schema.nonLeafCount();
-
-        // --- schema section ---
-        byte[][] nonLeafNameBytes = new byte[nonLeafCount][];
-        int schemaSize = 2; // non_leaf_count u16
-        for (int i = 0; i < nonLeafCount; i++) {
-            nonLeafNameBytes[i] = schema.getNonLeafName(i).getBytes(StandardCharsets.UTF_8);
-            schemaSize += 2 + 2 + nonLeafNameBytes[i].length;
-        }
-        schemaSize += 2; // leaf_count u16
-        byte[][] leafNameBytes = new byte[colCount][];
-        for (int i = 0; i < colCount; i++) {
-            leafNameBytes[i] = schema.getLeafName(i).getBytes(StandardCharsets.UTF_8);
-            schemaSize += 2 + 2 + leafNameBytes[i].length;
-        }
-
-        // --- column index section: 9 bytes per column (kind u8 + offset i32 + length i32) ---
-        int columnIndexSize = colCount * 9;
-
-        // --- column data offsets ---
-        int[] dataOffsets = new int[colCount];
-        int[] dataLengths = new int[colCount];
-        int cumDataOffset = 0;
-        for (int c = 0; c < colCount; c++) {
-            dataOffsets[c] = cumDataOffset;
-            dataLengths[c] = blobs[c].length;
-            cumDataOffset += blobs[c].length;
-        }
-        int totalDataSize = cumDataOffset;
-
-        // --- assemble ---
-        int headerSize = 32;
-        int schemaOffset = headerSize;
-        int columnIndexOffset = schemaOffset + schemaSize;
-        int dataOffset = columnIndexOffset + columnIndexSize;
-        int totalSize = dataOffset + totalDataSize;
-
-        byte[] header = new byte[dataOffset]; // header + schema + column index
-
-        // Header (i32 LE)
-        ByteUtils.writeIntLE(EicfBatch.MAGIC_LE, header, 0);
-        ByteUtils.writeIntLE(EicfBatch.VERSION, header, 4);
-        ByteUtils.writeIntLE(0, header, 8); // flags
-        ByteUtils.writeIntLE(docCount, header, 12);
-        ByteUtils.writeIntLE(schemaOffset, header, 16);
-        ByteUtils.writeIntLE(columnIndexOffset, header, 20);
-        ByteUtils.writeIntLE(dataOffset, header, 24);
-        ByteUtils.writeIntLE(totalSize, header, 28);
-
-        // Schema section (u16 LE)
-        int pos = schemaOffset;
-        writeShortLE(header, pos, nonLeafCount);
-        pos += 2;
-        for (int i = 0; i < nonLeafCount; i++) {
-            writeShortLE(header, pos, schema.getNonLeafParent(i));
-            pos += 2;
-            writeShortLE(header, pos, nonLeafNameBytes[i].length);
-            pos += 2;
-            System.arraycopy(nonLeafNameBytes[i], 0, header, pos, nonLeafNameBytes[i].length);
-            pos += nonLeafNameBytes[i].length;
-        }
-        writeShortLE(header, pos, colCount);
-        pos += 2;
-        for (int i = 0; i < colCount; i++) {
-            writeShortLE(header, pos, schema.getLeafParent(i));
-            pos += 2;
-            writeShortLE(header, pos, leafNameBytes[i].length);
-            pos += 2;
-            System.arraycopy(leafNameBytes[i], 0, header, pos, leafNameBytes[i].length);
-            pos += leafNameBytes[i].length;
-        }
-
-        // Column index section (kind u8 + data_offset i32 + data_length i32 per column)
-        pos = columnIndexOffset;
-        for (int c = 0; c < colCount; c++) {
-            header[pos] = kindBytes[c];
-            pos += 1;
-            ByteUtils.writeIntLE(dataOffsets[c], header, pos);
-            pos += 4;
-            ByteUtils.writeIntLE(dataLengths[c], header, pos);
-            pos += 4;
-        }
-
-        // Concatenate header/schema/index with all column blobs
-        BytesReference[] parts = new BytesReference[1 + colCount];
-        parts[0] = new BytesArray(header);
-        for (int c = 0; c < colCount; c++) {
-            parts[c + 1] = new BytesArray(blobs[c]);
-        }
-        return org.elasticsearch.common.bytes.CompositeBytesReference.of(parts);
-    }
-
-    private static void writeShortLE(byte[] buf, int offset, int value) {
-        buf[offset] = (byte) value;
-        buf[offset + 1] = (byte) (value >>> 8);
     }
 }

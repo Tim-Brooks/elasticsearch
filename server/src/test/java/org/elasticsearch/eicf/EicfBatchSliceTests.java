@@ -152,7 +152,8 @@ public class EicfBatchSliceTests extends ESTestCase {
     // -------------------------------------------------------------------------
 
     public void testSliceAllColumnKinds() throws IOException {
-        // Build a batch that induces LONG, DOUBLE, BOOL, STRING, ARRAY, NUMERIC_UNION, UNION
+        // Build a batch that induces LONG, DOUBLE, BOOL, STRING, ARRAY, and two UNION columns
+        // ("nu" from a long+double mix, "u" from a string+long mix)
         List<BytesReference> sources = List.of(
             new BytesArray("{\"n\":10,\"f\":1.5,\"b\":true,\"s\":\"alpha\",\"arr\":[1],\"nu\":100,\"u\":\"x\"}"),
             new BytesArray("{\"n\":20,\"f\":2.5,\"b\":false,\"s\":\"beta\",\"arr\":[2,3],\"nu\":3.14,\"u\":42}"),
@@ -176,13 +177,13 @@ public class EicfBatchSliceTests extends ESTestCase {
                 assertEquals("b row " + i, pr.getBooleanValue(2), sr.getBooleanValue(2));
                 // STRING col
                 assertEquals("s row " + i, pr.getStringValue(3).string(), sr.getStringValue(3).string());
-                // NUMERIC_UNION col: type byte preserved
+                // UNION (numeric mix) col: type byte preserved
                 assertEquals("nu type row " + i, pr.getTypeByte(5), sr.getTypeByte(5));
                 // UNION col: type byte preserved
                 assertEquals("u type row " + i, pr.getTypeByte(6), sr.getTypeByte(6));
             }
 
-            // Spot-check NUMERIC_UNION: row 0 of slice = parent row 1 → double 3.14
+            // Spot-check the numeric-mix UNION: row 0 of slice = parent row 1 → double 3.14
             assertEquals(EirfType.DOUBLE, sliced.row(0).getTypeByte(5));
             assertEquals(3.14, sliced.row(0).getDoubleValue(5), 1e-10);
 

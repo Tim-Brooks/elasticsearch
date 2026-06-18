@@ -12,6 +12,7 @@ package org.elasticsearch.index.mapper;
 import org.apache.lucene.document.DoubleField;
 import org.apache.lucene.document.DoublePoint;
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.FloatField;
 import org.apache.lucene.document.FloatPoint;
 import org.apache.lucene.document.IntField;
@@ -19,7 +20,10 @@ import org.apache.lucene.document.IntPoint;
 import org.apache.lucene.document.LongField;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.StoredField;
+import org.apache.lucene.document.column.LongColumn;
+import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.sandbox.document.HalfFloatPoint;
 import org.apache.lucene.search.IndexOrDocValuesQuery;
@@ -34,6 +38,7 @@ import org.elasticsearch.common.Numbers;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
+import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
@@ -76,6 +81,7 @@ import org.elasticsearch.search.aggregations.support.ValuesSourceType;
 import org.elasticsearch.search.lookup.FieldValues;
 import org.elasticsearch.search.lookup.SearchLookup;
 import org.elasticsearch.search.lookup.SourceProvider;
+import org.elasticsearch.sourcebatch.SourceColumn;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParser.Token;
@@ -2547,6 +2553,45 @@ public class NumberFieldMapper extends FieldMapper {
             && copyTo().copyToFields().isEmpty()
             && multiFields().iterator().hasNext() == false
             && dimension == false;
+    }
+
+    @Override
+    public void mapColumnBatch(SourceColumn column, BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        // POC: only well-formed numeric EICF columns. Anything else (string-encoded numbers,
+        // ignore_malformed hits, null_value) throws to signal a fall back to the row-major path.
+        // TODO columnar: handle ignore_malformed / null_value / numeric-string columns.
+        final LongColumn.NumericKind kind = numericKind(type);
+        final LongColumn luceneColumn = EicfLuceneColumns.longColumn(column, fullPath(), columnFieldType(kind), kind);
+        out.addColumn(luceneColumn);
+    }
+
+    private static LongColumn.NumericKind numericKind(NumberType type) {
+        return switch (type) {
+            case BYTE, SHORT, INTEGER -> LongColumn.NumericKind.INT;
+            case LONG -> LongColumn.NumericKind.LONG;
+            case FLOAT -> LongColumn.NumericKind.FLOAT;
+            case DOUBLE -> LongColumn.NumericKind.DOUBLE;
+            // half_float has no LongColumn.NumericKind; not supported by the columnar path yet.
+            case HALF_FLOAT -> throw new UnsupportedOperationException("half_float is not supported by columnar batch indexing");
+        };
+    }
+
+    /**
+     * Builds the Lucene {@link IndexableFieldType} for this field's column, reflecting its doc-values,
+     * points and stored configuration so {@code addBatch} emits the same features as {@code parseCreateField}.
+     */
+    private IndexableFieldType columnFieldType(LongColumn.NumericKind kind) {
+        FieldType ft = new FieldType();
+        if (fieldType().hasDocValues()) {
+            ft.setDocValuesType(DocValuesType.NUMERIC);
+        }
+        if (indexed) {
+            int numBytes = (kind == LongColumn.NumericKind.INT || kind == LongColumn.NumericKind.FLOAT) ? Integer.BYTES : Long.BYTES;
+            ft.setDimensions(1, numBytes);
+        }
+        ft.setStored(stored);
+        ft.freeze();
+        return ft;
     }
 
     @Override

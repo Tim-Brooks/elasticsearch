@@ -261,6 +261,17 @@ public abstract class MetadataFieldMapper extends FieldMapper {
         // do nothing
     }
 
+    /**
+     * Attaches this metadata field's per-document values as Lucene column(s) to {@code out} for the
+     * columnar bulk batch path (see {@code ShardBatchMapper}). The metadata mapper reads the per-document
+     * data it needs from {@code out.contexts()} (id, routing, source, ...). Engine-assigned values
+     * ({@code _seq_no}/{@code _primary_term}/{@code _version}) register a mutable array-backed column the
+     * engine fills later. The default is a no-op (the metadata field contributes no column).
+     */
+    public void mapMetadataColumns(BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) throws IOException {
+        // do nothing
+    }
+
     @Override
     protected SyntheticSourceSupport syntheticSourceSupport() {
         return new SyntheticSourceSupport.Native(() -> SourceLoader.SyntheticFieldLoader.NOTHING);

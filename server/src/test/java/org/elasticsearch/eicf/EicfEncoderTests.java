@@ -30,7 +30,7 @@ import java.util.List;
  *   <li>JSON floats and doubles both produce columns with type byte {@code DOUBLE} (no FLOAT narrowing).
  *   <li>Absent fields are tracked in a per-column bitset rather than a per-row type-byte slot.
  *   <li>Explicit nulls, or any type conflict in a column, yield a {@code UNION} column.
- *   <li>An integer+float mix in one column yields a {@code NUMERIC_UNION} column.
+ *   <li>An integer+float mix in one column yields a {@code UNION} column (per-document LONG/DOUBLE type bytes).
  * </ul>
  */
 public class EicfEncoderTests extends ESTestCase {
@@ -170,8 +170,8 @@ public class EicfEncoderTests extends ESTestCase {
         }
     }
 
-    public void testNumericUnionIntAndFloat() throws IOException {
-        // int in one row + float in another → NUMERIC_UNION
+    public void testNumericMixProducesUnion() throws IOException {
+        // int in one row + float in another → UNION (per-document LONG / DOUBLE type bytes)
         List<BytesReference> sources = List.of(new BytesArray("{\"v\":10}"), new BytesArray("{\"v\":3.14}"), new BytesArray("{\"v\":20}"));
         try (EicfBatch batch = EicfEncoder.encode(sources, XContentType.JSON)) {
             SourceRow row0 = batch.row(0);

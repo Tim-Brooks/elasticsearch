@@ -18,14 +18,17 @@ package org.elasticsearch.eicf;
  *
  * <p>Binary layout per kind:
  * <pre>
- * LONG/DOUBLE:    absent_bitset | values[docCount * 8]
- * BOOL:           absent_bitset | value_bitset
- * STRING/BINARY:  absent_bitset | offsets[(docCount+1) * 4] | bytes
- * ARRAY:          absent_bitset | type_vec[docCount] | offsets[(docCount+1) * 4] | packed_bytes
- * NUMERIC_UNION:  absent_bitset | is_decimal_bitset | values[docCount * 8]
- * UNION:          absent_bitset | type_vec[docCount] | offsets[(docCount+1) * 4] | dense_values
+ * LONG/DOUBLE:    values[docCount * 8]
+ * BOOL:           value_bitset
+ * STRING/BINARY:  offsets[(docCount+1) * 4] | bytes
+ * ARRAY:          type_vec[docCount] | offsets[(docCount+1) * 4] | packed_bytes
+ * UNION:          type_vec[docCount] | offsets[(docCount+1) * 4] | dense_values
  * </pre>
- * where {@code absent_bitset = ((docCount + 63) / 64) * 8} bytes (LE longs, bit set = absent).
+ * Each kind's serialized blob is the concatenation of up to four optional fields — an absent
+ * bitset, a type vector, an offset vector, and a data payload — as described per column in the
+ * batch's column index (see {@link EicfBatch}). The table above lists the non-absent fields each
+ * kind carries; an absent bitset (LE longs, {@code ((docCount + 63) / 64) * 8} bytes, bit set =
+ * absent) is added to any kind only when at least one document is absent.
  */
 public final class EicfColumnKind {
 
@@ -71,21 +74,15 @@ public final class EicfColumnKind {
     public static final byte ARRAY = 0x06;
 
     /**
-     * A mix of long and double values. No variable-length offsets are needed — each slot is a
-     * fixed 8 bytes — with an is-decimal bitset distinguishing longs from doubles.
-     * Layout: {@code absent_bitset | is_decimal_bitset | values[docCount * 8]}.
-     */
-    public static final byte NUMERIC_UNION = 0x07;
-
-    /**
      * A heterogeneous column. A per-row type vector determines the EirfType for each row, and a
-     * dense value buffer holds the payload. Handles any type combination including explicit null.
-     * Layout: {@code absent_bitset | type_vec[docCount] | offsets[(docCount+1) * 4] | dense_values}.
+     * dense value buffer holds the payload. Handles any type combination including explicit null
+     * and a mix of long and double values.
+     * Layout: {@code type_vec[docCount] | offsets[(docCount+1) * 4] | dense_values}.
      * Zero-byte types (ABSENT, NULL, TRUE, FALSE) contribute 0 bytes to {@code dense_values}.
      * Fixed-size numerics (LONG, DOUBLE) contribute 8 bytes. Variable types contribute raw bytes
      * (length determined by the offset delta).
      */
-    public static final byte UNION = 0x08;
+    public static final byte UNION = 0x07;
 
     private EicfColumnKind() {}
 
@@ -99,7 +96,6 @@ public final class EicfColumnKind {
             case STRING -> "STRING";
             case BINARY -> "BINARY";
             case ARRAY -> "ARRAY";
-            case NUMERIC_UNION -> "NUMERIC_UNION";
             case UNION -> "UNION";
             default -> "UNKNOWN(0x" + Integer.toHexString(kind & 0xFF) + ")";
         };

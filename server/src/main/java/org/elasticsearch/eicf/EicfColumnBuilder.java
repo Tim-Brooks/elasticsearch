@@ -9,376 +9,639 @@
 
 package org.elasticsearch.eicf;
 
+import org.apache.lucene.util.FixedBitSet;
+import org.elasticsearch.common.bytes.BytesArray;
+import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.eirf.EirfType;
+import org.elasticsearch.transport.BytesRefRecycler;
+import org.elasticsearch.xcontent.XContentString;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Arrays;
 
 /**
- * Accumulates per-document values for a single leaf column and serialises them into a typed
- * column blob when {@link #finish(int)} is called.
+ * Accumulates the per-document values of a single leaf column and serialises them into an
+ * {@link EicfColumnData} (four optional fields — absent bitset, type vector, offset vector, and a
+ * data payload) when {@link #finish(int)} is called.
  *
- * <p>Type promotion is resolved lazily at {@code finish()} time by scanning the per-doc type
- * bytes. Promotion rules:
- * <ul>
- *   <li>All long → {@link EicfColumnKind#LONG}</li>
- *   <li>All double → {@link EicfColumnKind#DOUBLE}</li>
- *   <li>Long + double mix → {@link EicfColumnKind#NUMERIC_UNION}</li>
- *   <li>All boolean → {@link EicfColumnKind#BOOL}</li>
- *   <li>All string → {@link EicfColumnKind#STRING}</li>
- *   <li>All binary → {@link EicfColumnKind#BINARY}</li>
- *   <li>All array → {@link EicfColumnKind#ARRAY}</li>
- *   <li>Any explicit null, or any other type mix → {@link EicfColumnKind#UNION}</li>
- * </ul>
- * Absent (missing) values do not affect kind selection. A column whose every doc is absent
- * defaults to {@link EicfColumnKind#LONG}.
+ * <p>This class is a thin <b>facade</b>: it dispatches each {@code add*} call to a dedicated
+ * {@link TypedBuilder} for the column's current type. Values are written <b>directly</b> into a
+ * {@link RecyclerBytesStreamOutput} as they arrive — no per-value boxing — and the auxiliary
+ * vectors are materialized lazily, only for the kinds that need them.
  *
- * <p>Usage: call one of the {@code add*} methods exactly once per document in document order.
- * Call {@link #addAbsent()} for documents where this column is not present.
+ * <p><b>Promotion.</b> The first non-absent value selects the typed builder. If a later value has a
+ * different base type, or an explicit {@code null} arrives, the accumulated builder is
+ * <b>promoted</b> to a {@link UnionBuilder} by replaying its values; the {@link UnionBuilder}
+ * thereafter accepts any type. (There is no numeric-union: a long+double mix promotes straight to
+ * {@link EicfColumnKind#UNION}.)
+ *
+ * <p>Usage: call exactly one {@code add*} method per document, in document order; call
+ * {@link #addAbsent()} for documents where this column is not present.
  */
 final class EicfColumnBuilder {
 
-    private static final int INITIAL_CAPACITY = 16;
-
-    /** EirfType byte per document (ABSENT = 0 by default). */
-    private byte[] typeBytes;
-    /** Raw 8-byte values for LONG (raw long) and DOUBLE (raw double bits). */
-    private long[] numerics;
-    /**
-     * Variable-length payloads: UTF-8 bytes for STRING, raw bytes for BINARY,
-     * packed array bytes for FIXED_ARRAY/UNION_ARRAY. {@code null} for fixed-size types.
-     */
-    private byte[][] varBytes;
-    /** Number of {@code add*} calls made so far (== current doc index). */
-    private int count;
-
-    EicfColumnBuilder() {
-        typeBytes = new byte[INITIAL_CAPACITY]; // zero = ABSENT
-        numerics = new long[INITIAL_CAPACITY];
-        varBytes = new byte[INITIAL_CAPACITY][];
-    }
-
-    // -------------------------------------------------------------------------
-    // Per-doc setters
-    // -------------------------------------------------------------------------
+    /** The active typed builder, or {@code null} until the first value (or {@link #finish}). */
+    private TypedBuilder current;
+    /** Absent documents seen before the first value, backfilled when a typed builder is created. */
+    private int leadingAbsents;
 
     void addAbsent() {
-        ensureCapacity();
-        // typeBytes[count] stays 0 (ABSENT)
-        count++;
+        if (current == null) {
+            leadingAbsents++;
+        } else {
+            current.addAbsent();
+        }
     }
 
-    void addLong(long val) {
-        ensureCapacity();
-        typeBytes[count] = EirfType.LONG;
-        numerics[count] = val;
-        count++;
+    void addLong(long value) {
+        ensure(EicfColumnKind.LONG);
+        current.addLong(value);
     }
 
-    void addDouble(double val) {
-        ensureCapacity();
-        typeBytes[count] = EirfType.DOUBLE;
-        numerics[count] = Double.doubleToRawLongBits(val);
-        count++;
+    void addDouble(double value) {
+        ensure(EicfColumnKind.DOUBLE);
+        current.addDouble(value);
     }
 
-    void addBoolean(boolean val) {
-        ensureCapacity();
-        typeBytes[count] = val ? EirfType.TRUE : EirfType.FALSE;
-        count++;
-    }
-
-    void addNull() {
-        ensureCapacity();
-        typeBytes[count] = EirfType.NULL;
-        count++;
+    void addBoolean(boolean value) {
+        ensure(EicfColumnKind.BOOL);
+        current.addBoolean(value);
     }
 
     /**
-     * Adds a UTF-8 string value. The provided byte array is stored directly; callers must ensure
-     * it is not mutated after this call.
+     * Adds a UTF-8 string value. The slice is written directly into the data stream; it is not
+     * retained, so the backing buffer may be reused immediately after this call returns.
      */
-    void addString(byte[] utf8) {
-        ensureCapacity();
-        typeBytes[count] = EirfType.STRING;
-        varBytes[count] = utf8;
-        count++;
+    void addString(XContentString.UTF8Bytes utf8) {
+        ensure(EicfColumnKind.STRING);
+        current.addString(utf8);
     }
 
     /**
-     * Adds a raw binary value. The provided byte array is stored directly; callers must ensure
-     * it is not mutated after this call.
+     * Adds a raw binary value. The slice is written directly into the data stream and is not
+     * retained.
      */
-    void addBinary(byte[] bytes) {
-        ensureCapacity();
-        typeBytes[count] = EirfType.BINARY;
-        varBytes[count] = bytes;
-        count++;
+    void addBinary(XContentString.UTF8Bytes bytes) {
+        ensure(EicfColumnKind.BINARY);
+        current.addBinary(bytes);
     }
 
     /**
      * Adds an array value. {@code arrayType} must be {@code EirfType.FIXED_ARRAY} or
-     * {@code EirfType.UNION_ARRAY}. The {@code packed} byte array is stored directly; callers
-     * must ensure it is not mutated after this call.
+     * {@code EirfType.UNION_ARRAY}. The {@code packed} bytes are written directly into the data
+     * stream and are not retained.
      */
     void addArray(byte arrayType, byte[] packed) {
         assert arrayType == EirfType.FIXED_ARRAY || arrayType == EirfType.UNION_ARRAY : "arrayType must be FIXED_ARRAY or UNION_ARRAY";
-        ensureCapacity();
-        typeBytes[count] = arrayType;
-        varBytes[count] = packed;
-        count++;
+        ensure(EicfColumnKind.ARRAY);
+        current.addArray(arrayType, packed);
     }
 
-    // -------------------------------------------------------------------------
-    // Serialisation
-    // -------------------------------------------------------------------------
+    void addNull() {
+        // An explicit null always forces a union column.
+        promoteToUnion();
+        current.addNull();
+    }
 
     /**
-     * Determines the column kind from the accumulated type bytes and serialises the column blob.
-     *
-     * @param docCount total number of documents in the batch (must equal {@link #count})
-     * @return the kind byte (see {@link EicfColumnKind}) in index 0 of the result, immediately
-     *         followed by the column blob bytes starting at index 1
+     * Determines the column kind and serialises it. A column whose every document is absent (or an
+     * empty column) finishes as {@link EicfColumnKind#LONG} with an all-absent bitset.
      */
-    byte[] finish(int docCount) {
-        assert count == docCount : "builder count " + count + " != docCount " + docCount;
-        byte kind = determineKind(docCount);
-        byte[] blob = buildBlob(kind, docCount);
-        // Prepend kind byte so callers can read it from index 0
-        byte[] result = new byte[1 + blob.length];
-        result[0] = kind;
-        System.arraycopy(blob, 0, result, 1, blob.length);
-        return result;
+    EicfColumnData finish(int docCount) {
+        if (current == null) {
+            FixedNumericBuilder allAbsent = new FixedNumericBuilder(EicfColumnKind.LONG);
+            for (int i = 0; i < leadingAbsents; i++) {
+                allAbsent.addAbsent();
+            }
+            current = allAbsent;
+        }
+        return current.finish(docCount);
     }
 
-    private byte determineKind(int docCount) {
-        byte kind = EicfColumnKind.NONE;
-        for (int d = 0; d < docCount; d++) {
-            byte t = typeBytes[d];
-            if (t == EirfType.ABSENT) {
-                continue;
+    private void ensure(byte kind) {
+        if (current == null) {
+            current = newTyped(kind);
+            for (int i = 0; i < leadingAbsents; i++) {
+                current.addAbsent();
             }
-            if (t == EirfType.NULL) {
-                return EicfColumnKind.UNION;
-            }
-            byte valueKind = kindForType(t);
-            if (kind == EicfColumnKind.NONE) {
-                kind = valueKind;
-            } else if (kind != valueKind) {
-                // Numeric promotion: long + double → numeric union
-                if (isNumeric(kind) && isNumeric(valueKind)) {
-                    kind = EicfColumnKind.NUMERIC_UNION;
-                } else if (kind == EicfColumnKind.NUMERIC_UNION && isNumeric(valueKind)) {
-                    // already numeric union; stay
-                } else {
-                    return EicfColumnKind.UNION;
-                }
+            leadingAbsents = 0;
+        } else if (current.kind() != kind && current.kind() != EicfColumnKind.UNION) {
+            promoteToUnion();
+        }
+    }
+
+    private void promoteToUnion() {
+        if (current != null && current.kind() == EicfColumnKind.UNION) {
+            return;
+        }
+        UnionBuilder union = new UnionBuilder();
+        if (current != null) {
+            current.replayInto(union);
+            current.discard();
+        } else {
+            for (int i = 0; i < leadingAbsents; i++) {
+                union.addAbsent();
             }
         }
-        return kind == EicfColumnKind.NONE ? EicfColumnKind.LONG : kind;
+        leadingAbsents = 0;
+        current = union;
     }
 
-    private static byte kindForType(byte t) {
-        return switch (t) {
-            case EirfType.LONG -> EicfColumnKind.LONG;
-            case EirfType.DOUBLE -> EicfColumnKind.DOUBLE;
-            case EirfType.TRUE, EirfType.FALSE -> EicfColumnKind.BOOL;
-            case EirfType.STRING -> EicfColumnKind.STRING;
-            case EirfType.BINARY -> EicfColumnKind.BINARY;
-            case EirfType.FIXED_ARRAY, EirfType.UNION_ARRAY -> EicfColumnKind.ARRAY;
-            default -> EicfColumnKind.UNION;
-        };
-    }
-
-    private static boolean isNumeric(byte kind) {
-        return kind == EicfColumnKind.LONG || kind == EicfColumnKind.DOUBLE || kind == EicfColumnKind.NUMERIC_UNION;
-    }
-
-    // -------------------------------------------------------------------------
-    // Blob builders per kind
-    // -------------------------------------------------------------------------
-
-    private byte[] buildBlob(byte kind, int docCount) {
+    private static TypedBuilder newTyped(byte kind) {
         return switch (kind) {
-            case EicfColumnKind.LONG, EicfColumnKind.DOUBLE -> buildLongOrDoubleBlob(docCount);
-            case EicfColumnKind.BOOL -> buildBoolBlob(docCount);
-            case EicfColumnKind.STRING, EicfColumnKind.BINARY -> buildStringOrBinaryBlob(docCount);
-            case EicfColumnKind.ARRAY -> buildArrayBlob(docCount);
-            case EicfColumnKind.NUMERIC_UNION -> buildNumericUnionBlob(docCount);
-            case EicfColumnKind.UNION -> buildUnionBlob(docCount);
-            default -> throw new IllegalStateException("Unknown kind: " + EicfColumnKind.name(kind));
+            case EicfColumnKind.LONG, EicfColumnKind.DOUBLE -> new FixedNumericBuilder(kind);
+            case EicfColumnKind.BOOL -> new BoolBuilder();
+            case EicfColumnKind.STRING, EicfColumnKind.BINARY -> new VarBuilder(kind);
+            case EicfColumnKind.ARRAY -> new ArrayBuilder();
+            default -> throw new IllegalArgumentException("No typed builder for kind " + EicfColumnKind.name(kind));
         };
     }
 
-    /** LONG / DOUBLE: {@code absent_bitset | values[docCount * 8]}. */
-    private byte[] buildLongOrDoubleBlob(int docCount) {
-        int bsBytes = bitsetBytes(docCount);
-        byte[] out = new byte[bsBytes + docCount * 8];
-        for (int d = 0; d < docCount; d++) {
-            if (typeBytes[d] == EirfType.ABSENT) {
-                setBit(out, 0, d);
-            } else {
-                ByteUtils.writeLongLE(numerics[d], out, bsBytes + d * 8);
-            }
-        }
-        return out;
+    /**
+     * A dedicated accumulator for one column kind. The facade guarantees that only the
+     * type-appropriate {@code add*} methods are invoked on a given implementation; the unsupported
+     * ones throw {@link AssertionError} via {@link BaseBuilder}.
+     */
+    private interface TypedBuilder {
+        byte kind();
+
+        void addLong(long value);
+
+        void addDouble(double value);
+
+        void addBoolean(boolean value);
+
+        void addString(XContentString.UTF8Bytes utf8);
+
+        void addBinary(XContentString.UTF8Bytes bytes);
+
+        void addArray(byte arrayType, byte[] packed);
+
+        void addNull();
+
+        void addAbsent();
+
+        /** Re-emits every accumulated document into {@code union} (used during promotion). */
+        void replayInto(UnionBuilder union);
+
+        /** Serialises the accumulated column into its four-field form. */
+        EicfColumnData finish(int docCount);
+
+        /** Releases any held resources without producing a column (used for a promoted-away builder). */
+        void discard();
     }
 
-    /** BOOL: {@code absent_bitset | value_bitset}. */
-    private byte[] buildBoolBlob(int docCount) {
-        int bsBytes = bitsetBytes(docCount);
-        byte[] out = new byte[2 * bsBytes];
-        for (int d = 0; d < docCount; d++) {
-            if (typeBytes[d] == EirfType.ABSENT) {
-                setBit(out, 0, d);
-            } else if (typeBytes[d] == EirfType.TRUE) {
-                setBit(out, bsBytes, d);
-            }
+    private abstract static class BaseBuilder implements TypedBuilder {
+        /** Number of {@code add*} calls so far (== current document index). */
+        int count;
+        /** Lazily created; bit set = absent. {@code null} while no document is absent. */
+        FixedBitSet absent;
+
+        /** Records the current document index as absent. Call before incrementing {@link #count}. */
+        final void markAbsent() {
+            absent = absent == null ? new FixedBitSet(Math.max(64, count + 1)) : FixedBitSet.ensureCapacity(absent, count + 1);
+            absent.set(count);
         }
-        return out;
+
+        final boolean isAbsentAt(int d) {
+            return absent != null && absent.get(d);
+        }
+
+        final BytesReference absentRef(int docCount) {
+            return absent == null ? null : bitsetToRef(absent, docCount);
+        }
+
+        @Override
+        public void addLong(long value) {
+            throw unsupported("long");
+        }
+
+        @Override
+        public void addDouble(double value) {
+            throw unsupported("double");
+        }
+
+        @Override
+        public void addBoolean(boolean value) {
+            throw unsupported("boolean");
+        }
+
+        @Override
+        public void addString(XContentString.UTF8Bytes utf8) {
+            throw unsupported("string");
+        }
+
+        @Override
+        public void addBinary(XContentString.UTF8Bytes bytes) {
+            throw unsupported("binary");
+        }
+
+        @Override
+        public void addArray(byte arrayType, byte[] packed) {
+            throw unsupported("array");
+        }
+
+        @Override
+        public void addNull() {
+            throw unsupported("null");
+        }
+
+        @Override
+        public void discard() {}
+
+        private AssertionError unsupported(String type) {
+            return new AssertionError("column kind " + EicfColumnKind.name(kind()) + " cannot accept a " + type + " value");
+        }
     }
 
-    /** STRING / BINARY: {@code absent_bitset | offsets[(docCount+1)*4] | bytes}. */
-    private byte[] buildStringOrBinaryBlob(int docCount) {
-        int bsBytes = bitsetBytes(docCount);
-        int dataLen = 0;
-        for (int d = 0; d < docCount; d++) {
-            if (typeBytes[d] != EirfType.ABSENT && varBytes[d] != null) {
-                dataLen += varBytes[d].length;
-            }
+    /** LONG / DOUBLE: 8-byte slots (LE), one per document; absent slots are written as zero. */
+    private static final class FixedNumericBuilder extends BaseBuilder {
+
+        private final byte kind;
+        private final RecyclerBytesStreamOutput data = newStream();
+
+        FixedNumericBuilder(byte kind) {
+            this.kind = kind;
         }
-        int offsetsSize = (docCount + 1) * 4;
-        byte[] out = new byte[bsBytes + offsetsSize + dataLen];
-        int cumOffset = 0;
-        int writePos = bsBytes + offsetsSize;
-        ByteUtils.writeIntLE(0, out, bsBytes);
-        for (int d = 0; d < docCount; d++) {
-            if (typeBytes[d] == EirfType.ABSENT) {
-                setBit(out, 0, d);
-                // offset unchanged
-            } else {
-                byte[] vb = varBytes[d];
-                int len = vb != null ? vb.length : 0;
-                if (len > 0) {
-                    System.arraycopy(vb, 0, out, writePos, len);
-                    writePos += len;
-                    cumOffset += len;
+
+        @Override
+        public byte kind() {
+            return kind;
+        }
+
+        @Override
+        public void addLong(long value) {
+            writeLongLE(data, value);
+            count++;
+        }
+
+        @Override
+        public void addDouble(double value) {
+            writeLongLE(data, Double.doubleToRawLongBits(value));
+            count++;
+        }
+
+        @Override
+        public void addAbsent() {
+            markAbsent();
+            writeLongLE(data, 0L);
+            count++;
+        }
+
+        @Override
+        public void replayInto(UnionBuilder union) {
+            BytesReference d = data.bytes();
+            for (int i = 0; i < count; i++) {
+                if (isAbsentAt(i)) {
+                    union.addAbsent();
+                } else if (kind == EicfColumnKind.LONG) {
+                    union.addLong(d.getLongLE(i * 8));
+                } else {
+                    union.addDouble(Double.longBitsToDouble(d.getLongLE(i * 8)));
                 }
             }
-            ByteUtils.writeIntLE(cumOffset, out, bsBytes + (d + 1) * 4);
         }
-        return out;
+
+        @Override
+        public EicfColumnData finish(int docCount) {
+            assert count == docCount : "builder count " + count + " != docCount " + docCount;
+            return new EicfColumnData(kind, docCount, absentRef(docCount), null, null, data.moveToBytesReference());
+        }
+
+        @Override
+        public void discard() {
+            data.close();
+        }
     }
 
-    /**
-     * ARRAY: {@code absent_bitset | type_vec[docCount] | offsets[(docCount+1)*4] | packed_bytes}.
-     */
-    private byte[] buildArrayBlob(int docCount) {
-        int bsBytes = bitsetBytes(docCount);
-        int dataLen = 0;
-        for (int d = 0; d < docCount; d++) {
-            if (typeBytes[d] != EirfType.ABSENT && varBytes[d] != null) {
-                dataLen += varBytes[d].length;
-            }
+    /** BOOL: a value bitset (bit set = true) as the data field. */
+    private static final class BoolBuilder extends BaseBuilder {
+        /** Lazily created; bit set = {@code true}. {@code null} while every value seen is {@code false}/absent. */
+        private FixedBitSet values;
+
+        @Override
+        public byte kind() {
+            return EicfColumnKind.BOOL;
         }
-        int typeVecSize = docCount;
-        int offsetsSize = (docCount + 1) * 4;
-        byte[] out = new byte[bsBytes + typeVecSize + offsetsSize + dataLen];
-        int typeVecOffset = bsBytes;
-        int offsetsStart = typeVecOffset + typeVecSize;
-        int cumOffset = 0;
-        int writePos = offsetsStart + offsetsSize;
-        ByteUtils.writeIntLE(0, out, offsetsStart);
-        for (int d = 0; d < docCount; d++) {
-            if (typeBytes[d] == EirfType.ABSENT) {
-                setBit(out, 0, d);
-                // typeVec[d] stays 0; offset unchanged
-            } else {
-                out[typeVecOffset + d] = typeBytes[d]; // FIXED_ARRAY or UNION_ARRAY
-                byte[] vb = varBytes[d];
-                int len = vb != null ? vb.length : 0;
-                if (len > 0) {
-                    System.arraycopy(vb, 0, out, writePos, len);
-                    writePos += len;
-                    cumOffset += len;
+
+        @Override
+        public void addBoolean(boolean value) {
+            if (value) {
+                values = values == null ? new FixedBitSet(Math.max(64, count + 1)) : FixedBitSet.ensureCapacity(values, count + 1);
+                values.set(count);
+            }
+            count++;
+        }
+
+        @Override
+        public void addAbsent() {
+            markAbsent();
+            count++;
+        }
+
+        @Override
+        public void replayInto(UnionBuilder union) {
+            for (int i = 0; i < count; i++) {
+                if (isAbsentAt(i)) {
+                    union.addAbsent();
+                } else {
+                    union.addBoolean(values != null && values.get(i));
                 }
             }
-            ByteUtils.writeIntLE(cumOffset, out, offsetsStart + (d + 1) * 4);
         }
-        return out;
+
+        @Override
+        public EicfColumnData finish(int docCount) {
+            assert count == docCount : "builder count " + count + " != docCount " + docCount;
+            return new EicfColumnData(EicfColumnKind.BOOL, docCount, absentRef(docCount), null, null, bitsetToRef(values, docCount));
+        }
     }
 
-    /**
-     * NUMERIC_UNION: {@code absent_bitset | is_decimal_bitset | values[docCount * 8]}.
-     * The is-decimal bit is set when the value for that row is a double.
-     */
-    private byte[] buildNumericUnionBlob(int docCount) {
-        int bsBytes = bitsetBytes(docCount);
-        byte[] out = new byte[2 * bsBytes + docCount * 8];
-        for (int d = 0; d < docCount; d++) {
-            byte t = typeBytes[d];
-            if (t == EirfType.ABSENT) {
-                setBit(out, 0, d);
-            } else {
-                if (t == EirfType.DOUBLE) {
-                    setBit(out, bsBytes, d);
+    /** STRING / BINARY: raw bytes plus an offset vector. */
+    private static final class VarBuilder extends BaseBuilder {
+        private final byte kind;
+        private final RecyclerBytesStreamOutput data = newStream();
+        private int[] offsets = new int[16];
+        private int dataLen;
+
+        VarBuilder(byte kind) {
+            this.kind = kind;
+        }
+
+        @Override
+        public byte kind() {
+            return kind;
+        }
+
+        @Override
+        public void addString(XContentString.UTF8Bytes utf8) {
+            addBytes(utf8);
+        }
+
+        @Override
+        public void addBinary(XContentString.UTF8Bytes bytes) {
+            addBytes(bytes);
+        }
+
+        private void addBytes(XContentString.UTF8Bytes value) {
+            recordOffset();
+            writeBytes(data, value.bytes(), value.offset(), value.length());
+            dataLen += value.length();
+            count++;
+        }
+
+        @Override
+        public void addAbsent() {
+            recordOffset();
+            markAbsent();
+            count++;
+        }
+
+        private void recordOffset() {
+            offsets = ensureIntCapacity(offsets, count + 1);
+            offsets[count] = dataLen;
+        }
+
+        @Override
+        public void replayInto(UnionBuilder union) {
+            BytesReference d = data.bytes();
+            offsets[count] = dataLen;
+            for (int i = 0; i < count; i++) {
+                if (isAbsentAt(i)) {
+                    union.addAbsent();
+                    continue;
                 }
-                ByteUtils.writeLongLE(numerics[d], out, 2 * bsBytes + d * 8);
+                int len = offsets[i + 1] - offsets[i];
+                var ref = d.slice(offsets[i], len).toBytesRef();
+                XContentString.UTF8Bytes slice = new XContentString.UTF8Bytes(ref.bytes, ref.offset, ref.length);
+                if (kind == EicfColumnKind.STRING) {
+                    union.addString(slice);
+                } else {
+                    union.addBinary(slice);
+                }
             }
         }
-        return out;
+
+        @Override
+        public EicfColumnData finish(int docCount) {
+            assert count == docCount : "builder count " + count + " != docCount " + docCount;
+            offsets[count] = dataLen;
+            return new EicfColumnData(
+                kind,
+                docCount,
+                absentRef(docCount),
+                null,
+                intArrayToRef(offsets, docCount + 1),
+                data.moveToBytesReference()
+            );
+        }
+
+        @Override
+        public void discard() {
+            data.close();
+        }
     }
 
-    /**
-     * UNION: {@code absent_bitset | type_vec[docCount] | offsets[(docCount+1)*4] | dense_values}.
-     * Dense values: 0 bytes for ABSENT/NULL/TRUE/FALSE, 8 bytes for LONG/DOUBLE,
-     * raw bytes for STRING/BINARY/arrays.
-     */
-    private byte[] buildUnionBlob(int docCount) {
-        int bsBytes = bitsetBytes(docCount);
-        // Compute total dense data size
-        int dataLen = 0;
-        for (int d = 0; d < docCount; d++) {
-            dataLen += unionValueSize(d);
+    /** ARRAY: packed bytes plus a per-document array-type vector and an offset vector. */
+    private static final class ArrayBuilder extends BaseBuilder {
+        private final RecyclerBytesStreamOutput data = newStream();
+        private int[] offsets = new int[16];
+        private byte[] typeVec = new byte[16];
+        private int dataLen;
+
+        @Override
+        public byte kind() {
+            return EicfColumnKind.ARRAY;
         }
-        int typeVecSize = docCount;
-        int offsetsSize = (docCount + 1) * 4;
-        byte[] out = new byte[bsBytes + typeVecSize + offsetsSize + dataLen];
-        int typeVecOffset = bsBytes;
-        int offsetsStart = typeVecOffset + typeVecSize;
-        int denseStart = offsetsStart + offsetsSize;
-        int cumOffset = 0;
-        int writePos = denseStart;
-        ByteUtils.writeIntLE(0, out, offsetsStart);
-        for (int d = 0; d < docCount; d++) {
-            byte t = typeBytes[d];
-            // Write absent bitset even for union (consistent across all kinds)
-            if (t == EirfType.ABSENT) {
-                setBit(out, 0, d);
-            }
-            out[typeVecOffset + d] = t;
-            int size = unionValueSize(d);
-            if (size == 8) {
-                ByteUtils.writeLongLE(numerics[d], out, writePos);
-                writePos += 8;
-                cumOffset += 8;
-            } else if (size > 0) {
-                byte[] vb = varBytes[d];
-                System.arraycopy(vb, 0, out, writePos, size);
-                writePos += size;
-                cumOffset += size;
-            }
-            ByteUtils.writeIntLE(cumOffset, out, offsetsStart + (d + 1) * 4);
+
+        @Override
+        public void addArray(byte arrayType, byte[] packed) {
+            ensureCap();
+            typeVec[count] = arrayType;
+            offsets[count] = dataLen;
+            writeBytes(data, packed, 0, packed.length);
+            dataLen += packed.length;
+            count++;
         }
-        return out;
+
+        @Override
+        public void addAbsent() {
+            ensureCap();
+            typeVec[count] = EirfType.ABSENT;
+            offsets[count] = dataLen;
+            markAbsent();
+            count++;
+        }
+
+        private void ensureCap() {
+            offsets = ensureIntCapacity(offsets, count + 1);
+            typeVec = ensureByteCapacity(typeVec, count + 1);
+        }
+
+        @Override
+        public void replayInto(UnionBuilder union) {
+            BytesReference d = data.bytes();
+            offsets[count] = dataLen;
+            for (int i = 0; i < count; i++) {
+                if (isAbsentAt(i)) {
+                    union.addAbsent();
+                    continue;
+                }
+                int len = offsets[i + 1] - offsets[i];
+                var ref = d.slice(offsets[i], len).toBytesRef();
+                union.addArray(typeVec[i], Arrays.copyOfRange(ref.bytes, ref.offset, ref.offset + len));
+            }
+        }
+
+        @Override
+        public EicfColumnData finish(int docCount) {
+            assert count == docCount : "builder count " + count + " != docCount " + docCount;
+            offsets[count] = dataLen;
+            return new EicfColumnData(
+                EicfColumnKind.ARRAY,
+                docCount,
+                absentRef(docCount),
+                byteArrayToRef(typeVec, docCount),
+                intArrayToRef(offsets, docCount + 1),
+                data.moveToBytesReference()
+            );
+        }
+
+        @Override
+        public void discard() {
+            data.close();
+        }
     }
 
-    private int unionValueSize(int d) {
-        return switch (typeBytes[d]) {
-            case EirfType.ABSENT, EirfType.NULL, EirfType.TRUE, EirfType.FALSE -> 0;
-            case EirfType.LONG, EirfType.DOUBLE -> 8;
-            default -> varBytes[d] != null ? varBytes[d].length : 0;
-        };
+    /** UNION: a per-document {@link EirfType} vector, an offset vector, and a dense value buffer. */
+    private static final class UnionBuilder extends BaseBuilder {
+        private final RecyclerBytesStreamOutput data = newStream();
+        private int[] offsets = new int[16];
+        private byte[] typeVec = new byte[16];
+        private int dataLen;
+
+        @Override
+        public byte kind() {
+            return EicfColumnKind.UNION;
+        }
+
+        @Override
+        public void addLong(long value) {
+            prep(EirfType.LONG);
+            writeLongLE(data, value);
+            dataLen += 8;
+            count++;
+        }
+
+        @Override
+        public void addDouble(double value) {
+            prep(EirfType.DOUBLE);
+            writeLongLE(data, Double.doubleToRawLongBits(value));
+            dataLen += 8;
+            count++;
+        }
+
+        @Override
+        public void addBoolean(boolean value) {
+            prep(value ? EirfType.TRUE : EirfType.FALSE);
+            count++;
+        }
+
+        @Override
+        public void addString(XContentString.UTF8Bytes utf8) {
+            prep(EirfType.STRING);
+            writeBytes(data, utf8.bytes(), utf8.offset(), utf8.length());
+            dataLen += utf8.length();
+            count++;
+        }
+
+        @Override
+        public void addBinary(XContentString.UTF8Bytes bytes) {
+            prep(EirfType.BINARY);
+            writeBytes(data, bytes.bytes(), bytes.offset(), bytes.length());
+            dataLen += bytes.length();
+            count++;
+        }
+
+        @Override
+        public void addArray(byte arrayType, byte[] packed) {
+            prep(arrayType);
+            writeBytes(data, packed, 0, packed.length);
+            dataLen += packed.length;
+            count++;
+        }
+
+        @Override
+        public void addNull() {
+            prep(EirfType.NULL);
+            count++;
+        }
+
+        @Override
+        public void addAbsent() {
+            prep(EirfType.ABSENT);
+            markAbsent();
+            count++;
+        }
+
+        /** Records the type byte and start offset for the current document (before its payload is written). */
+        private void prep(byte type) {
+            offsets = ensureIntCapacity(offsets, count + 1);
+            typeVec = ensureByteCapacity(typeVec, count + 1);
+            typeVec[count] = type;
+            offsets[count] = dataLen;
+        }
+
+        @Override
+        public void replayInto(UnionBuilder union) {
+            throw new AssertionError("a union builder is terminal and is never replayed");
+        }
+
+        @Override
+        public EicfColumnData finish(int docCount) {
+            assert count == docCount : "builder count " + count + " != docCount " + docCount;
+            offsets[count] = dataLen;
+            return new EicfColumnData(
+                EicfColumnKind.UNION,
+                docCount,
+                absentRef(docCount),
+                byteArrayToRef(typeVec, docCount),
+                intArrayToRef(offsets, docCount + 1),
+                data.moveToBytesReference()
+            );
+        }
+
+        @Override
+        public void discard() {
+            data.close();
+        }
+    }
+
+    private static RecyclerBytesStreamOutput newStream() {
+        return new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE);
+    }
+
+    private static void writeLongLE(RecyclerBytesStreamOutput out, long value) {
+        try {
+            out.writeLongLE(value);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e); // in-memory stream never actually performs IO
+        }
+    }
+
+    private static void writeBytes(RecyclerBytesStreamOutput out, byte[] bytes, int offset, int length) {
+        out.writeBytes(bytes, offset, length); // RecyclerBytesStreamOutput#writeBytes does not perform IO
+    }
+
+    private static int[] ensureIntCapacity(int[] array, int minSize) {
+        return array.length >= minSize ? array : Arrays.copyOf(array, Math.max(minSize, array.length * 2));
+    }
+
+    private static byte[] ensureByteCapacity(byte[] array, int minSize) {
+        return array.length >= minSize ? array : Arrays.copyOf(array, Math.max(minSize, array.length * 2));
     }
 
     /** Size of a bitset in bytes for {@code docCount} bits. */
@@ -386,25 +649,48 @@ final class EicfColumnBuilder {
         return ((docCount + 63) / 64) * 8;
     }
 
-    /** Sets bit {@code d} in a bitset stored at {@code bitsetOffset} within {@code buf}. */
+    /** Sets bit {@code d} in a bitset stored at {@code bitsetOffset} within {@code buf} (LE longs). */
     static void setBit(byte[] buf, int bitsetOffset, int d) {
         int wordIdx = d / 64;
         int bitIdx = d & 63;
-        // LE long: bit bitIdx is in byte wordIdx*8 + bitIdx/8, at position bitIdx%8
         int bytePos = bitsetOffset + wordIdx * 8 + bitIdx / 8;
         buf[bytePos] |= (byte) (1 << (bitIdx & 7));
     }
 
-    // -------------------------------------------------------------------------
-    // Capacity management
-    // -------------------------------------------------------------------------
+    /**
+     * Returns true if bit {@code d} is set in the bitset stored at {@code bitsetOffset} in
+     * {@code src}. Bitsets are serialised as little-endian longs: bit {@code d} is at word
+     * {@code d/64}, bit-position {@code d%64}.
+     */
+    static boolean isBitSet(BytesReference src, int bitsetOffset, int d) {
+        long word = src.getLongLE(bitsetOffset + (d / 64) * 8);
+        return ((word >>> (d & 63)) & 1L) != 0;
+    }
 
-    private void ensureCapacity() {
-        if (count >= typeBytes.length) {
-            int newCap = typeBytes.length * 2;
-            typeBytes = Arrays.copyOf(typeBytes, newCap);
-            numerics = Arrays.copyOf(numerics, newCap);
-            varBytes = Arrays.copyOf(varBytes, newCap);
+    /** Serialises {@code bs} (or an all-clear bitset when {@code bs == null}) to {@code bitsetBytes(docCount)} LE bytes. */
+    static BytesReference bitsetToRef(FixedBitSet bs, int docCount) {
+        int n = bitsetBytes(docCount);
+        byte[] out = new byte[n];
+        if (bs != null) {
+            long[] words = bs.getBits();
+            int wordCount = n / 8;
+            for (int w = 0; w < wordCount; w++) {
+                long value = w < words.length ? words[w] : 0L;
+                ByteUtils.writeLongLE(value, out, w * 8);
+            }
         }
+        return new BytesArray(out);
+    }
+
+    private static BytesReference intArrayToRef(int[] values, int length) {
+        byte[] out = new byte[length * 4];
+        for (int i = 0; i < length; i++) {
+            ByteUtils.writeIntLE(values[i], out, i * 4);
+        }
+        return new BytesArray(out);
+    }
+
+    private static BytesReference byteArrayToRef(byte[] values, int length) {
+        return new BytesArray(values, 0, length);
     }
 }

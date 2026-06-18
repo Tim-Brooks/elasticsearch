@@ -10,8 +10,13 @@
 package org.elasticsearch.index.mapper;
 
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.document.column.LongColumn;
+import org.apache.lucene.index.DocValuesType;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.search.Query;
+import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.index.fielddata.FieldDataContext;
 import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.fielddata.IndexNumericFieldData.NumericType;
@@ -91,6 +96,22 @@ public class VersionFieldMapper extends MetadataFieldMapper {
     public static Field versionField() {
         // see InternalEngine.updateVersion to see where the real version value is set
         return new NumericDocValuesField(NAME, -1L);
+    }
+
+    private static final IndexableFieldType VERSION_COLUMN_FIELD_TYPE = buildVersionColumnFieldType();
+
+    private static IndexableFieldType buildVersionColumnFieldType() {
+        FieldType ft = new FieldType();
+        ft.setDocValuesType(DocValuesType.NUMERIC);
+        ft.freeze();
+        return ft;
+    }
+
+    @Override
+    public void mapMetadataColumns(BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        // Engine-assigned: register an array-backed column over the builder's mutable version array;
+        // InternalEngine fills _version per document before addBatch.
+        out.addColumn(EicfLuceneColumns.arrayLongColumn(out.versionArray(), NAME, VERSION_COLUMN_FIELD_TYPE, LongColumn.NumericKind.LONG));
     }
 
     @Override

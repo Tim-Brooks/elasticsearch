@@ -9,12 +9,16 @@
 
 package org.elasticsearch.index.mapper;
 
+import org.apache.lucene.document.FieldType;
+import org.apache.lucene.index.IndexOptions;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.SortField;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.logging.DeprecationCategory;
 import org.elasticsearch.common.logging.DeprecationLogger;
 import org.elasticsearch.common.util.BigArrays;
+import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.index.fielddata.FieldData;
 import org.elasticsearch.index.fielddata.FieldDataContext;
 import org.elasticsearch.index.fielddata.IndexFieldData;
@@ -201,6 +205,33 @@ public class ProvidedIdFieldMapper extends IdFieldMapper {
         }
         context.id(context.sourceToParse().id());
         context.doc().add(standardIdField(context.id()));
+    }
+
+    private static final IndexableFieldType ID_COLUMN_FIELD_TYPE = buildIdColumnFieldType();
+
+    private static IndexableFieldType buildIdColumnFieldType() {
+        // Mirrors the standard _id field: indexed (DOCS), not tokenized, no norms, stored.
+        FieldType ft = new FieldType();
+        ft.setIndexOptions(IndexOptions.DOCS);
+        ft.setTokenized(false);
+        ft.setOmitNorms(true);
+        ft.setStored(true);
+        ft.freeze();
+        return ft;
+    }
+
+    @Override
+    public void mapMetadataColumns(BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        final BytesRef[] ids = new BytesRef[contexts.length];
+        for (int d = 0; d < contexts.length; d++) {
+            final String id = contexts[d].sourceToParse().id();
+            if (id == null) {
+                throw new IllegalStateException("_id should have been set on the coordinating node");
+            }
+            contexts[d].id(id);
+            ids[d] = Uid.encodeId(id);
+        }
+        out.addColumn(EicfLuceneColumns.arrayBinaryColumn(ids, NAME, ID_COLUMN_FIELD_TYPE));
     }
 
     @Override
