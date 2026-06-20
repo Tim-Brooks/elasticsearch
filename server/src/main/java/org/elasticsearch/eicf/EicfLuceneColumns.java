@@ -19,22 +19,24 @@ import org.apache.lucene.document.column.ObjectTupleCursor;
 import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.NumericUtils;
-import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.sourcebatch.SourceColumn;
 
 /**
- * Adapts EICF columns — and plain in-memory arrays (used for engine/metadata columns) — to Lucene's
- * column-oriented batch indexing API ({@link org.apache.lucene.document.column}). An EICF column
- * carries no field name or {@link IndexableFieldType}, so the caller supplies both.
+ * Adapts typed EICF columns — and plain in-memory arrays (used for engine/metadata columns) — to
+ * Lucene's column-oriented batch indexing API ({@link org.apache.lucene.document.column}). An EICF
+ * column carries no field name or {@link IndexableFieldType}, so the caller supplies both.
  *
- * <p>Supported EICF kinds (first cut):
+ * <p>Dispatch is on the concrete {@link EicfColumn} subtype, and the adapters read the column's
+ * already-unwrapped primitives ({@code byte[]} / {@code int[]} and a {@link FixedBitSet} absent set)
+ * directly — no {@link org.elasticsearch.common.bytes.BytesReference} indirection on the read path:
  * <ul>
- *   <li>{@link EicfColumnKind#LONG} / {@link EicfColumnKind#DOUBLE} → {@link LongColumn}.</li>
- *   <li>{@link EicfColumnKind#STRING} / {@link EicfColumnKind#BINARY} → {@link BinaryColumn}.</li>
+ *   <li>{@link EicfLongColumn} / {@link EicfDoubleColumn} → {@link LongColumn}.</li>
+ *   <li>{@link EicfStringColumn} / {@link EicfBinaryColumn} → {@link BinaryColumn}.</li>
  * </ul>
- * Other kinds (BOOL, ARRAY, UNION) are not yet adaptable and throw {@link UnsupportedOperationException}.
+ * Other kinds (BOOL, ARRAY, UNION) are not yet adaptable and throw.
  *
  * <p>The numeric interpretation of a long column can be selected explicitly with the
  * {@link LongColumn.NumericKind} overloads: an integral kind (INT/LONG) emits the EICF long value
@@ -51,44 +53,55 @@ public final class EicfLuceneColumns {
     private EicfLuceneColumns() {}
 
     /**
-     * Adapts {@code column} to the matching Lucene {@link Column} subtype, dispatching on its kind.
+     * Adapts {@code column} to the matching Lucene {@link Column} subtype, dispatching on its concrete
+     * type.
      *
      * @throws UnsupportedOperationException if the column's kind is not yet adaptable
      */
     public static Column of(EicfColumn column, String name, IndexableFieldType fieldType) {
-        return switch (column.kind()) {
-            case EicfColumnKind.LONG, EicfColumnKind.DOUBLE -> longColumn(column, name, fieldType);
-            case EicfColumnKind.STRING, EicfColumnKind.BINARY -> binaryColumn(column, name, fieldType);
-            default -> throw new UnsupportedOperationException(
-                "EICF column kind " + EicfColumnKind.name(column.kind()) + " is not adaptable to a Lucene column"
-            );
-        };
-    }
-
-    /**
-     * Adapts a {@link EicfColumnKind#LONG} or {@link EicfColumnKind#DOUBLE} column to a
-     * {@link LongColumn}, deriving the numeric kind from the EICF kind (LONG → LONG, DOUBLE → DOUBLE).
-     */
-    public static LongColumn longColumn(EicfColumn column, String name, IndexableFieldType fieldType) {
-        return longColumn(
-            column,
-            name,
-            fieldType,
-            column.kind() == EicfColumnKind.DOUBLE ? LongColumn.NumericKind.DOUBLE : LongColumn.NumericKind.LONG
+        if (column instanceof EicfLongColumn || column instanceof EicfDoubleColumn) {
+            return longColumn(column, name, fieldType);
+        }
+        if (column instanceof EicfStringColumn || column instanceof EicfBinaryColumn) {
+            return binaryColumn(column, name, fieldType);
+        }
+        throw new UnsupportedOperationException(
+            "EICF column kind " + EicfColumnKind.name(column.kind()) + " is not adaptable to a Lucene column"
         );
     }
 
     /**
+     * Adapts an {@link EicfLongColumn} or {@link EicfDoubleColumn} to a {@link LongColumn}, deriving the
+     * numeric kind from the column type (long → LONG, double → DOUBLE).
+     */
+    public static LongColumn longColumn(EicfColumn column, String name, IndexableFieldType fieldType) {
+        if (column instanceof EicfDoubleColumn) {
+            return longColumn(column, name, fieldType, LongColumn.NumericKind.DOUBLE);
+        }
+        if (column instanceof EicfLongColumn) {
+            return longColumn(column, name, fieldType, LongColumn.NumericKind.LONG);
+        }
+        throw new IllegalArgumentException("longColumn requires a LONG or DOUBLE column, got " + EicfColumnKind.name(column.kind()));
+    }
+
+    /**
      * Adapts a numeric EICF column to a {@link LongColumn} with an explicit {@link LongColumn.NumericKind}.
-     * Integral kinds (INT/LONG) require an EICF {@code LONG} column and emit the value unchanged; decimal
-     * kinds (FLOAT/DOUBLE) require an EICF {@code DOUBLE} column and emit the sortable encoding.
+     * Both {@link EicfLongColumn} and {@link EicfDoubleColumn} expose their raw 8-byte slot buffer; the
+     * kind drives how each slot is encoded for Lucene (see {@link #encode}).
      */
     public static LongColumn longColumn(EicfColumn column, String name, IndexableFieldType fieldType, LongColumn.NumericKind kind) {
-        byte eicfKind = column.kind();
-        if (eicfKind != EicfColumnKind.LONG && eicfKind != EicfColumnKind.DOUBLE) {
-            throw new IllegalArgumentException("longColumn requires a LONG or DOUBLE column, got " + EicfColumnKind.name(eicfKind));
+        final byte[] bytes;
+        final int base;
+        if (column instanceof EicfLongColumn l) {
+            bytes = l.valueBytes();
+            base = l.valueBase();
+        } else if (column instanceof EicfDoubleColumn d) {
+            bytes = d.valueBytes();
+            base = d.valueBase();
+        } else {
+            throw new IllegalArgumentException("longColumn requires a LONG or DOUBLE column, got " + EicfColumnKind.name(column.kind()));
         }
-        return new EicfLongColumnAdapter(column, name, fieldType, kind);
+        return new EicfLongColumnAdapter(name, fieldType, column.absentBits(), column.docCount(), bytes, base, kind);
     }
 
     /**
@@ -103,13 +116,25 @@ public final class EicfLuceneColumns {
         throw new IllegalArgumentException("columnar numeric indexing requires an EICF column, got " + column.getClass().getSimpleName());
     }
 
-    /** Adapts a {@link EicfColumnKind#STRING} or {@link EicfColumnKind#BINARY} column to a {@link BinaryColumn}. */
+    /** Adapts an {@link EicfStringColumn} or {@link EicfBinaryColumn} to a {@link BinaryColumn}. */
     public static BinaryColumn binaryColumn(EicfColumn column, String name, IndexableFieldType fieldType) {
-        byte kind = column.kind();
-        if (kind != EicfColumnKind.STRING && kind != EicfColumnKind.BINARY) {
-            throw new IllegalArgumentException("binaryColumn requires a STRING or BINARY column, got " + EicfColumnKind.name(kind));
+        final byte[] data;
+        final int dataBase;
+        final int[] offsets;
+        if (column instanceof EicfStringColumn s) {
+            data = s.dataBytes();
+            dataBase = s.dataBase();
+            offsets = s.offsets();
+        } else if (column instanceof EicfBinaryColumn b) {
+            data = b.dataBytes();
+            dataBase = b.dataBase();
+            offsets = b.offsets();
+        } else {
+            throw new IllegalArgumentException(
+                "binaryColumn requires a STRING or BINARY column, got " + EicfColumnKind.name(column.kind())
+            );
         }
-        return new EicfBinaryColumnAdapter(column, name, fieldType);
+        return new EicfBinaryColumnAdapter(name, fieldType, column.absentBits(), column.docCount(), data, dataBase, offsets);
     }
 
     /**
@@ -129,17 +154,11 @@ public final class EicfLuceneColumns {
         return new ArrayBinaryColumn(values, name, fieldType);
     }
 
-    private static Column.Density densityOf(EicfColumn column) {
-        return column.absentBitset() == null ? Column.Density.DENSE : Column.Density.SPARSE;
-    }
-
     /** Returns the next present (non-absent) batch-local doc-id strictly after {@code after}, or {@code docCount} if none. */
-    private static int nextPresent(EicfColumn column, int after) {
-        int docCount = column.docCount();
-        BytesReference absent = column.absentBitset();
+    private static int nextPresent(FixedBitSet absent, int docCount, int after) {
         int d = after + 1;
         if (absent != null) {
-            while (d < docCount && EicfColumnBuilder.isBitSet(absent, 0, d)) {
+            while (d < docCount && absent.get(d)) {
                 d++;
             }
         }
@@ -160,11 +179,25 @@ public final class EicfLuceneColumns {
     // -------------------------------------------------------------------------
 
     private static final class EicfLongColumnAdapter extends LongColumn {
-        private final EicfColumn column;
+        private final FixedBitSet absent;
+        private final int docCount;
+        private final byte[] bytes;
+        private final int base;
 
-        EicfLongColumnAdapter(EicfColumn column, String name, IndexableFieldType fieldType, NumericKind kind) {
-            super(name, fieldType, densityOf(column), kind);
-            this.column = column;
+        EicfLongColumnAdapter(
+            String name,
+            IndexableFieldType fieldType,
+            FixedBitSet absent,
+            int docCount,
+            byte[] bytes,
+            int base,
+            NumericKind kind
+        ) {
+            super(name, fieldType, absent == null ? Density.DENSE : Density.SPARSE, kind);
+            this.absent = absent;
+            this.docCount = docCount;
+            this.bytes = bytes;
+            this.base = base;
         }
 
         @Override
@@ -177,13 +210,13 @@ public final class EicfLuceneColumns {
                 public int nextDoc() {
                     final NumericKind kind = numericKind();
 
-                    int next = nextPresent(column, doc);
-                    if (next >= column.docCount()) {
-                        doc = column.docCount();
+                    int next = nextPresent(absent, docCount, doc);
+                    if (next >= docCount) {
+                        doc = docCount;
                         return DocIdSetIterator.NO_MORE_DOCS;
                     }
                     doc = next;
-                    value = encode(column.data().getLongLE(next * 8), kind);
+                    value = encode(ByteUtils.readLongLE(bytes, base + next * 8), kind);
                     return next;
                 }
 
@@ -199,7 +232,7 @@ public final class EicfLuceneColumns {
             if (density() != Density.DENSE) {
                 return super.values(); // throws; never consulted for SPARSE columns
             }
-            return new DenseEicfLongCursor(column, numericKind());
+            return new DenseEicfLongCursor(bytes, base, docCount, numericKind());
         }
     }
 
@@ -210,11 +243,10 @@ public final class EicfLuceneColumns {
         private final LongColumn.NumericKind kind;
         private int pos;
 
-        DenseEicfLongCursor(EicfColumn column, LongColumn.NumericKind kind) {
-            super(column.docCount());
-            BytesRef ref = column.data().toBytesRef();
-            this.bytes = ref.bytes;
-            this.base = ref.offset;
+        DenseEicfLongCursor(byte[] bytes, int base, int docCount, LongColumn.NumericKind kind) {
+            super(docCount);
+            this.bytes = bytes;
+            this.base = base;
             this.kind = kind;
         }
 
@@ -243,35 +275,47 @@ public final class EicfLuceneColumns {
     // -------------------------------------------------------------------------
 
     private static final class EicfBinaryColumnAdapter extends BinaryColumn {
-        private final EicfColumn column;
+        private final FixedBitSet absent;
+        private final int docCount;
+        private final byte[] data;
+        private final int dataBase;
+        private final int[] offsets;
 
-        EicfBinaryColumnAdapter(EicfColumn column, String name, IndexableFieldType fieldType) {
-            super(name, fieldType, densityOf(column));
-            this.column = column;
+        EicfBinaryColumnAdapter(
+            String name,
+            IndexableFieldType fieldType,
+            FixedBitSet absent,
+            int docCount,
+            byte[] data,
+            int dataBase,
+            int[] offsets
+        ) {
+            super(name, fieldType, absent == null ? Density.DENSE : Density.SPARSE);
+            this.absent = absent;
+            this.docCount = docCount;
+            this.data = data;
+            this.dataBase = dataBase;
+            this.offsets = offsets;
         }
 
         @Override
         public ObjectTupleCursor<BytesRef> tuples() {
             return new ObjectTupleCursor<>() {
-                private final BytesReference offsets = column.offsets();
-                private final BytesReference data = column.data();
                 private final BytesRef scratch = new BytesRef();
                 private int doc = -1;
 
                 @Override
                 public int nextDoc() {
-                    int next = nextPresent(column, doc);
-                    if (next >= column.docCount()) {
-                        doc = column.docCount();
+                    int next = nextPresent(absent, docCount, doc);
+                    if (next >= docCount) {
+                        doc = docCount;
                         return DocIdSetIterator.NO_MORE_DOCS;
                     }
                     doc = next;
-                    int off0 = offsets.getIntLE(next * 4);
-                    int off1 = offsets.getIntLE((next + 1) * 4);
-                    BytesRef ref = data.slice(off0, off1 - off0).toBytesRef();
-                    scratch.bytes = ref.bytes;
-                    scratch.offset = ref.offset;
-                    scratch.length = ref.length;
+                    int off0 = offsets[next];
+                    scratch.bytes = data;
+                    scratch.offset = dataBase + off0;
+                    scratch.length = offsets[next + 1] - off0;
                     return next;
                 }
 
@@ -287,24 +331,23 @@ public final class EicfLuceneColumns {
             if (density() != Density.DENSE) {
                 return super.values(); // throws; never consulted for SPARSE columns
             }
-            return new DenseEicfBytesCursor(column);
+            return new DenseEicfBytesCursor(data, dataBase, offsets, docCount);
         }
     }
 
     /** Dense bulk cursor over a STRING/BINARY column's offset-delimited values. */
     private static final class DenseEicfBytesCursor extends BytesRefValuesCursor {
-        private final BytesReference offsets;
-        private final byte[] dataBytes;
+        private final byte[] data;
         private final int dataBase;
+        private final int[] offsets;
         private final BytesRef scratch = new BytesRef();
         private int pos;
 
-        DenseEicfBytesCursor(EicfColumn column) {
-            super(column.docCount());
-            this.offsets = column.offsets();
-            BytesRef ref = column.data().toBytesRef();
-            this.dataBytes = ref.bytes;
-            this.dataBase = ref.offset;
+        DenseEicfBytesCursor(byte[] data, int dataBase, int[] offsets, int docCount) {
+            super(docCount);
+            this.data = data;
+            this.dataBase = dataBase;
+            this.offsets = offsets;
         }
 
         @Override
@@ -312,10 +355,10 @@ public final class EicfLuceneColumns {
             if (pos >= size()) {
                 throw new IllegalStateException("nextValue() called more than size()=" + size() + " times");
             }
-            int off0 = offsets.getIntLE(pos * 4);
-            int off1 = offsets.getIntLE((pos + 1) * 4);
+            int off0 = offsets[pos];
+            int off1 = offsets[pos + 1];
             pos++;
-            scratch.bytes = dataBytes;
+            scratch.bytes = data;
             scratch.offset = dataBase + off0;
             scratch.length = off1 - off0;
             return scratch;
@@ -327,13 +370,13 @@ public final class EicfLuceneColumns {
                 throw new IllegalStateException("fill of " + length + " from pos " + pos + " exceeds size()=" + size());
             }
             for (int i = 0; i < length; i++) {
-                int valueLen = offsets.getIntLE((pos + i + 1) * 4) - offsets.getIntLE((pos + i) * 4);
+                int valueLen = offsets[pos + i + 1] - offsets[pos + i];
                 if (valueLen != width) {
                     throw new IllegalArgumentException("dense point value has length=" + valueLen + " but should be " + width);
                 }
             }
-            int startByte = offsets.getIntLE(pos * 4);
-            System.arraycopy(dataBytes, dataBase + startByte, dst, offset, length * width);
+            int startByte = offsets[pos];
+            System.arraycopy(data, dataBase + startByte, dst, offset, length * width);
             pos += length;
         }
     }

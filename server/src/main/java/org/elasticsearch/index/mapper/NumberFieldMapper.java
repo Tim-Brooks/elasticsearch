@@ -38,6 +38,8 @@ import org.elasticsearch.common.Numbers;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
+import org.elasticsearch.eicf.EicfDoubleColumn;
+import org.elasticsearch.eicf.EicfLongColumn;
 import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
@@ -2557,12 +2559,23 @@ public class NumberFieldMapper extends FieldMapper {
 
     @Override
     public void mapColumnBatch(SourceColumn column, BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
-        // POC: only well-formed numeric EICF columns. Anything else (string-encoded numbers,
-        // ignore_malformed hits, null_value) throws to signal a fall back to the row-major path.
-        // TODO columnar: handle ignore_malformed / null_value / numeric-string columns.
+        // POC: only a well-formed numeric EICF column whose physical kind matches this field's numeric
+        // interpretation (long/int <- LONG column, float/double <- DOUBLE column) can be wrapped
+        // directly. Anything else (string-encoded numbers, ignore_malformed hits, null_value, a
+        // long/double mismatch) surfaces as a UNION or the other numeric kind; we throw to signal a
+        // fall back to the row-major path.
+        // TODO columnar: convert these (UNION -> typed) instead of falling back.
         final LongColumn.NumericKind kind = numericKind(type);
-        final LongColumn luceneColumn = EicfLuceneColumns.longColumn(column, fullPath(), columnFieldType(kind), kind);
-        out.addColumn(luceneColumn);
+        final boolean compatible = switch (kind) {
+            case INT, LONG -> column instanceof EicfLongColumn;
+            case FLOAT, DOUBLE -> column instanceof EicfDoubleColumn;
+        };
+        if (compatible == false) {
+            throw new UnsupportedOperationException(
+                "columnar batch indexing for field [" + fullPath() + "] requires a matching numeric EICF column"
+            );
+        }
+        out.addColumn(EicfLuceneColumns.longColumn(column, fullPath(), columnFieldType(kind), kind));
     }
 
     private static LongColumn.NumericKind numericKind(NumberType type) {

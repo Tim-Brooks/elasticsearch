@@ -67,6 +67,8 @@ public final class EicfBatch implements SourceBatch {
     private final EirfSchema schema;
     private final int docCount;
     private final EicfColumnData[] columns;
+    /** Lazily-built, cached typed column views — one slot per leaf column (see {@link #column(int)}). */
+    private final EicfColumn[] columnCache;
     private final Releasable releasable;
     /** The serialized blob: the original bytes (serialized path) or a lazily-built cache (in-memory path). */
     private BytesReference serialized;
@@ -78,6 +80,7 @@ public final class EicfBatch implements SourceBatch {
         this.schema = schema;
         this.docCount = docCount;
         this.columns = columns;
+        this.columnCache = new EicfColumn[columns.length];
         this.releasable = releasable;
         this.serialized = null;
     }
@@ -111,6 +114,7 @@ public final class EicfBatch implements SourceBatch {
 
         int colCount = schema.leafCount();
         this.columns = new EicfColumnData[colCount];
+        this.columnCache = new EicfColumn[colCount];
         for (int c = 0; c < colCount; c++) {
             int entryBase = columnIndexOffset + c * COLUMN_INDEX_ENTRY_SIZE;
             byte kind = data.get(entryBase);
@@ -192,8 +196,13 @@ public final class EicfBatch implements SourceBatch {
         if (columnIndex < 0 || columnIndex >= columns.length) {
             throw new IndexOutOfBoundsException("columnIndex " + columnIndex + " out of range [0, " + columns.length + ")");
         }
-        EicfColumnData col = columns[columnIndex];
-        return new EicfColumn(columnIndex, col.kind(), docCount, col.absentBitset(), col.typeVector(), col.offsets(), col.data());
+        EicfColumn cached = columnCache[columnIndex];
+        if (cached != null) {
+            return cached;
+        }
+        EicfColumn built = EicfColumn.from(columnIndex, columns[columnIndex]);
+        columnCache[columnIndex] = built;
+        return built;
     }
 
     /**

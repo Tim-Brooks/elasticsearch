@@ -359,4 +359,31 @@ public class EicfColumnTests extends ESTestCase {
             assertEquals(1.5f, col.getFloatValue(0), 0f);
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Typed subtype dispatch + caching
+    // -------------------------------------------------------------------------
+
+    /** Each kind resolves to its specialized {@link EicfColumn} subtype. */
+    public void testColumnDispatchesToTypedSubtype() throws IOException {
+        try (EicfBatch batch = buildAllKindsBatch()) {
+            assertTrue("\"n\" -> long", batch.column(0) instanceof EicfLongColumn);
+            assertTrue("\"f\" -> double", batch.column(1) instanceof EicfDoubleColumn);
+            assertTrue("\"b\" -> bool", batch.column(2) instanceof EicfBoolColumn);
+            assertTrue("\"s\" -> string", batch.column(3) instanceof EicfStringColumn);
+            assertTrue("\"arr\" -> array", batch.column(4) instanceof EicfArrayColumn);
+            assertTrue("\"nu\" -> union", batch.column(5) instanceof EicfUnionColumn);
+            assertTrue("\"u\" -> union", batch.column(6) instanceof EicfUnionColumn);
+            assertTrue("\"opt\" -> long (absent in doc 2)", batch.column(7) instanceof EicfLongColumn);
+        }
+    }
+
+    /** Repeated {@link EicfBatch#column(int)} calls return the same cached typed view. */
+    public void testColumnViewIsCached() throws IOException {
+        try (EicfBatch batch = buildAllKindsBatch()) {
+            for (int c = 0; c < batch.columnCount(); c++) {
+                assertSame("column(" + c + ") should be cached", batch.column(c), batch.column(c));
+            }
+        }
+    }
 }

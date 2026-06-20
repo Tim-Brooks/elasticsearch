@@ -22,7 +22,7 @@ import org.elasticsearch.test.ESTestCase;
 public class EicfColumnBuilderTests extends ESTestCase {
 
     private static EicfColumn read(EicfColumnData col) {
-        return new EicfColumn(0, col.kind(), col.docCount(), col.absentBitset(), col.typeVector(), col.offsets(), col.data());
+        return EicfColumn.from(0, col);
     }
 
     // -------------------------------------------------------------------------
