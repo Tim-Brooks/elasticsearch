@@ -9,6 +9,7 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.apache.logging.log4j.Level;
 import org.elasticsearch.Build;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.delete.DeleteRequest;
@@ -19,10 +20,12 @@ import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.mapper.FieldMapper;
+import org.elasticsearch.index.mapper.ShardBatchMapper;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.sort.SortOrder;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.elasticsearch.test.MockLog;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.json.JsonXContent;
@@ -1707,8 +1710,21 @@ public class BatchBulkIT extends ESIntegTestCase {
 
         BulkRequest bulkRequest = new BulkRequest();
         bulkRequest.add(new IndexRequest(index).id("hit-1").source(CLICKBENCH_DOC, XContentType.JSON));
-        BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
-        assertNoFailures(bulkResponse);
+        // The columnar path must run end-to-end: assert the EICF batch is mapped without the
+        // "failed to assemble column batch, falling back" warning that signals a row-major fallback.
+        try (var mockLog = MockLog.capture(ShardBatchMapper.class)) {
+            mockLog.addExpectation(
+                new MockLog.UnseenEventExpectation(
+                    "no columnar fallback",
+                    ShardBatchMapper.class.getCanonicalName(),
+                    Level.WARN,
+                    "*failed to assemble column batch*"
+                )
+            );
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+            assertNoFailures(bulkResponse);
+            mockLog.assertAllExpectationsMatched();
+        }
 
         refresh(index);
 

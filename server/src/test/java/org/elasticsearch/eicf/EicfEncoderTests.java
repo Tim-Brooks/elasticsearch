@@ -12,13 +12,17 @@ package org.elasticsearch.eicf;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.eirf.EirfArrayReader;
+import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.eirf.EirfSchema;
 import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.sourcebatch.SourceRow;
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.xcontent.XContentString;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -365,6 +369,127 @@ public class EicfEncoderTests extends ESTestCase {
             expectThrows(IndexOutOfBoundsException.class, () -> batch.row(1));
             expectThrows(IndexOutOfBoundsException.class, () -> batch.column(-1));
             expectThrows(IndexOutOfBoundsException.class, () -> batch.column(1));
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Multi-partition encoding (one partition per destination shard)
+    // -------------------------------------------------------------------------
+
+    public void testPartitionsRouteIndependently() throws IOException {
+        try (EicfEncoder encoder = new EicfEncoder()) {
+            // docs 0 and 2 route to partition 0, doc 1 routes to partition 1.
+            encoder.parseToScratch(new BytesArray("{\"name\":\"a\",\"n\":1}"), XContentType.JSON, EirfEncoder.LeafSink.NO_OP);
+            assertEquals(0, encoder.commitScratchTo(0));
+            encoder.parseToScratch(new BytesArray("{\"name\":\"b\",\"n\":2}"), XContentType.JSON, EirfEncoder.LeafSink.NO_OP);
+            assertEquals(0, encoder.commitScratchTo(1));
+            encoder.parseToScratch(new BytesArray("{\"name\":\"c\",\"n\":3}"), XContentType.JSON, EirfEncoder.LeafSink.NO_OP);
+            assertEquals(1, encoder.commitScratchTo(0));
+
+            try (EicfBatch p0 = encoder.buildPartition(0)) {
+                assertEquals(2, p0.docCount());
+                assertEquals("a", p0.row(0).getStringValue(0).string());
+                assertEquals(1L, p0.row(0).getLongValue(1));
+                assertEquals("c", p0.row(1).getStringValue(0).string());
+                assertEquals(3L, p0.row(1).getLongValue(1));
+            }
+            try (EicfBatch p1 = encoder.buildPartition(1)) {
+                assertEquals(1, p1.docCount());
+                assertEquals("b", p1.row(0).getStringValue(0).string());
+                assertEquals(2L, p1.row(0).getLongValue(1));
+            }
+        }
+    }
+
+    public void testPartitionSchemaGrowthBackfillsAbsent() throws IOException {
+        try (EicfEncoder encoder = new EicfEncoder()) {
+            // doc 0 (partition 0) only has "a"; doc 1 (partition 1) introduces column "b".
+            encoder.parseToScratch(new BytesArray("{\"a\":1}"), XContentType.JSON, EirfEncoder.LeafSink.NO_OP);
+            encoder.commitScratchTo(0);
+            encoder.parseToScratch(new BytesArray("{\"a\":2,\"b\":\"x\"}"), XContentType.JSON, EirfEncoder.LeafSink.NO_OP);
+            encoder.commitScratchTo(1);
+
+            try (EicfBatch p0 = encoder.buildPartition(0)) {
+                assertEquals(1, p0.docCount());
+                assertEquals(2, p0.columnCount()); // "b" exists in the shared schema, back-filled absent here
+                assertEquals(1L, p0.row(0).getLongValue(0));
+                assertTrue("column b is absent for the partition-0 document", p0.row(0).isAbsent(1));
+            }
+            try (EicfBatch p1 = encoder.buildPartition(1)) {
+                assertEquals(1, p1.docCount());
+                assertEquals(2L, p1.row(0).getLongValue(0));
+                assertEquals("x", p1.row(0).getStringValue(1).string());
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Routing parity: the LeafSink must fire identically to EirfEncoder
+    // -------------------------------------------------------------------------
+
+    public void testLeafSinkParityWithEirfEncoder() throws IOException {
+        List<BytesReference> docs = List.of(
+            new BytesArray(
+                "{\"s\":\"hello\",\"i\":42,\"big\":"
+                    + Long.MAX_VALUE
+                    + ",\"f\":3.5,"
+                    + "\"d\":3.14159265358979,\"b\":true,\"nil\":null,\"arr\":[1,2,3],\"obj\":{\"k\":7}}"
+            )
+        );
+        for (boolean rawText : new boolean[] { false, true }) {
+            RecordingSink eirfEvents = new RecordingSink(rawText);
+            RecordingSink eicfEvents = new RecordingSink(rawText);
+            try (EirfEncoder eirf = new EirfEncoder(); EicfEncoder eicf = new EicfEncoder()) {
+                for (BytesReference doc : docs) {
+                    eirf.parseToScratch(doc, XContentType.JSON, eirfEvents);
+                    eirf.commitScratchTo(0);
+                    eicf.parseToScratch(doc, XContentType.JSON, eicfEvents);
+                    eicf.commitScratchTo(0);
+                }
+            }
+            assertEquals("LeafSink callbacks must match (passRawText=" + rawText + ")", eirfEvents.events, eicfEvents.events);
+            assertFalse("sanity: some leaf callbacks were recorded", eirfEvents.events.isEmpty());
+        }
+    }
+
+    /** Records every {@link EirfEncoder.LeafSink} callback as a stable string, for cross-encoder comparison. */
+    private static final class RecordingSink implements EirfEncoder.LeafSink {
+        private final boolean rawText;
+        final List<String> events = new ArrayList<>();
+
+        RecordingSink(boolean rawText) {
+            this.rawText = rawText;
+        }
+
+        @Override
+        public boolean passRawText() {
+            return rawText;
+        }
+
+        @Override
+        public void onTextPrimitive(int columnIndex, String dottedPath, byte type, XContentString.UTF8Bytes textBytes) {
+            String text = new String(textBytes.bytes(), textBytes.offset(), textBytes.length(), StandardCharsets.UTF_8);
+            events.add("text c=" + columnIndex + " p=" + dottedPath + " t=" + EirfType.name(type) + " v=" + text);
+        }
+
+        @Override
+        public void onLongPrimitive(int columnIndex, String dottedPath, byte type, long value) {
+            events.add("long c=" + columnIndex + " p=" + dottedPath + " t=" + EirfType.name(type) + " v=" + value);
+        }
+
+        @Override
+        public void onDoublePrimitive(int columnIndex, String dottedPath, byte type, double value) {
+            events.add("double c=" + columnIndex + " p=" + dottedPath + " t=" + EirfType.name(type) + " v=" + value);
+        }
+
+        @Override
+        public void onBooleanPrimitive(int columnIndex, String dottedPath, boolean value) {
+            events.add("bool c=" + columnIndex + " p=" + dottedPath + " v=" + value);
+        }
+
+        @Override
+        public void onArrayLeaf(int columnIndex, String dottedPath) {
+            events.add("array c=" + columnIndex + " p=" + dottedPath);
         }
     }
 }

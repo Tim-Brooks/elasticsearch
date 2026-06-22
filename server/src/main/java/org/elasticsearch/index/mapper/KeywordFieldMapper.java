@@ -51,6 +51,7 @@ import org.elasticsearch.common.unit.Fuzziness;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.eicf.EicfStringColumn;
+import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexSortConfig;
@@ -100,6 +101,7 @@ import org.elasticsearch.search.runtime.StringScriptFieldRegexpQuery;
 import org.elasticsearch.search.runtime.StringScriptFieldTermQuery;
 import org.elasticsearch.search.runtime.StringScriptFieldWildcardQuery;
 import org.elasticsearch.sourcebatch.SourceColumn;
+import org.elasticsearch.sourcebatch.SourceColumnCursor;
 import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
@@ -1453,8 +1455,9 @@ public final class KeywordFieldMapper extends FieldMapper {
                 countColumnFieldType(),
                 LongColumn.NumericKind.LONG
             );
-            for (int d = 0; d < docCount; d++) {
-                if (stringColumn.isAbsent(d)) {
+            final SourceColumnCursor cursor = stringColumn.cursor();
+            while (cursor.advance()) {
+                if (cursor.type() == EirfType.ABSENT) {
                     counts.addAbsent();
                 } else {
                     counts.addLong(1L);

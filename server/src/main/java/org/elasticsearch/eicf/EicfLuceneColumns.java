@@ -24,6 +24,7 @@ import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.sourcebatch.SourceColumn;
+import org.elasticsearch.sourcebatch.SourceColumnCursor;
 
 /**
  * Adapts typed EICF columns — and plain in-memory arrays (used for engine/metadata columns) — to
@@ -135,30 +136,26 @@ public final class EicfLuceneColumns {
         final boolean wantDouble = kind == LongColumn.NumericKind.FLOAT || kind == LongColumn.NumericKind.DOUBLE;
         final int docCount = column.docCount();
         final EicfColumnBuilder builder = new EicfColumnBuilder();
-        for (int d = 0; d < docCount; d++) {
-            if (column.isAbsent(d)) {
-                builder.addAbsent();
-                continue;
-            }
-            final byte type = column.getTypeByte(d);
-            switch (type) {
+        final SourceColumnCursor cursor = column.cursor();
+        while (cursor.advance()) {
+            switch (cursor.type()) {
                 case EirfType.LONG -> {
                     if (wantDouble) {
-                        builder.addDouble((double) column.getLongValue(d));
+                        builder.addDouble((double) cursor.longValue());
                     } else {
-                        builder.addLong(column.getLongValue(d));
+                        builder.addLong(cursor.longValue());
                     }
                 }
                 case EirfType.DOUBLE -> {
                     if (wantDouble) {
-                        builder.addDouble(column.getDoubleValue(d));
+                        builder.addDouble(cursor.doubleValue());
                     } else {
-                        builder.addLong((long) column.getDoubleValue(d));
+                        builder.addLong((long) cursor.doubleValue());
                     }
                 }
                 case EirfType.STRING -> {
                     try {
-                        final String s = column.getStringValue(d).string();
+                        final String s = cursor.stringValue().string();
                         if (wantDouble) {
                             builder.addDouble(Double.parseDouble(s));
                         } else {
@@ -168,12 +165,12 @@ public final class EicfLuceneColumns {
                         builder.addAbsent();
                     }
                 }
-                // Booleans, explicit nulls, binary, arrays, and key-value objects have no numeric
-                // interpretation in this POC; leave the document without a value.
-                case EirfType.NULL, EirfType.TRUE, EirfType.FALSE, EirfType.BINARY, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY,
-                    EirfType.KEY_VALUE -> builder.addAbsent();
+                // Absent documents, booleans, explicit nulls, binary, arrays, and key-value objects have no
+                // numeric interpretation in this POC; leave the document without a value.
+                case EirfType.ABSENT, EirfType.NULL, EirfType.TRUE, EirfType.FALSE, EirfType.BINARY, EirfType.UNION_ARRAY,
+                    EirfType.FIXED_ARRAY, EirfType.KEY_VALUE -> builder.addAbsent();
                 default -> throw new IllegalStateException(
-                    "unexpected EIRF type [" + EirfType.name(type) + "] in column " + column.columnIndex()
+                    "unexpected EIRF type [" + EirfType.name(cursor.type()) + "] in column " + column.columnIndex()
                 );
             }
         }

@@ -16,16 +16,19 @@ import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
 import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.eirf.EirfSchema;
+import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
+import org.elasticsearch.xcontent.XContentString;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
- * Encodes JSON documents into an {@link EicfBatch} (Elastic Internal Column Format).
+ * Encodes JSON documents into {@link EicfBatch}es (Elastic Internal Column Format).
  *
  * <p>Unlike {@link EirfEncoder} which stores one blob per document, this encoder accumulates one
  * column per leaf field. Numbers are upcast aggressively: JSON ints and longs both become
@@ -33,108 +36,192 @@ import java.util.List;
  * long+double mix) or an explicit null promotes the column to {@link EicfColumnKind#UNION}; see
  * {@link EicfColumnBuilder}.
  *
- * <p>Usage:
- * <pre>
- * try (EicfEncoder enc = new EicfEncoder()) {
- *     enc.addDocument(source1, XContentType.JSON);
- *     enc.addDocument(source2, XContentType.JSON);
- *     EicfBatch batch = enc.build();
- * }
- * </pre>
+ * <p>Two usage modes are supported, both backed by a shared {@link EirfSchema}:
  *
- * <p>Or via the static convenience method:
+ * <p><b>Single partition</b> (tests / simple callers):
  * <pre>
  * EicfBatch batch = EicfEncoder.encode(List.of(source1, source2), XContentType.JSON);
  * </pre>
  *
- * <p><b>Limitations (prototype):</b> Top-level empty objects ({@code {}}) are not yet
- * supported and will throw {@link UnsupportedOperationException}. Arrays and objects nested
- * inside arrays are encoded using the existing EIRF array packing codec
- * ({@link EirfEncoder#parseArray}).
+ * <p><b>Multi-partition</b> (single parse pass per document, columns fanned out to one of several
+ * destination partitions — typically one per shard — after routing has been decided from the
+ * {@link EirfEncoder.LeafSink} fired during the parse):
+ * <pre>
+ * try (EicfEncoder enc = new EicfEncoder()) {
+ *     enc.parseToScratch(source, XContentType.JSON, leafSink);
+ *     int rowIndex = enc.commitScratchTo(shardId);
+ *     // ...repeat for additional documents...
+ *     EicfBatch shardBatch = enc.buildPartition(shardId);
+ * }
+ * </pre>
+ *
+ * <p><b>Limitations (prototype):</b> Empty objects ({@code {}}) and {@code KEY_VALUE} leaves are not
+ * supported and throw {@link UnsupportedOperationException}. Arrays and objects nested inside arrays
+ * are encoded using the existing EIRF array packing codec ({@link EirfEncoder#parseArray}).
  */
 public final class EicfEncoder implements Releasable {
 
     private static final int INITIAL_CAPACITY = 16;
+    private static final int INITIAL_PARTITION_CAPACITY = 4;
 
     private final EirfSchema schema;
-    /** One builder per leaf column, created lazily and backfilled with absent entries. */
-    private final List<EicfColumnBuilder> columnBuilders;
-    /** Tracks which columns have been set in the current document (for duplicate detection). */
+
+    /** Per-partition column builders (one per leaf) plus that partition's committed doc count. */
+    private Partition[] partitions;
+
+    // Per-document scratch, populated by parseToScratch and drained by commitScratchTo. Indexed by leaf
+    // column. scratchType holds the EIRF type byte (ABSENT == unset); scratchNumeric holds the long
+    // value (INT/LONG) or the raw double bits (FLOAT/DOUBLE); scratchVar holds the string UTF-8 slice
+    // (valid only until the next parse) or a packed array byte[].
+    private byte[] scratchType;
+    private long[] scratchNumeric;
+    private Object[] scratchVar;
+    /** Tracks which columns have been set in the staged document (duplicate detection). */
     private FixedBitSet columnsSet;
-    /** Number of documents added so far. */
-    private int docCount;
-    private boolean closed;
+    /** True after {@link #parseToScratch} returns and before {@link #commitScratchTo} is called. */
+    private boolean rowStaged;
+
+    /** Cached dotted path per leaf column index, for the {@link EirfEncoder.LeafSink} callbacks. */
+    private String[] cachedPath;
 
     public EicfEncoder() {
         this.schema = new EirfSchema();
-        this.columnBuilders = new ArrayList<>(INITIAL_CAPACITY);
-        this.columnsSet = new FixedBitSet(INITIAL_CAPACITY);
+        this.partitions = new Partition[INITIAL_PARTITION_CAPACITY];
+        this.scratchType = new byte[INITIAL_CAPACITY];
+        this.scratchNumeric = new long[INITIAL_CAPACITY];
+        this.scratchVar = new Object[INITIAL_CAPACITY];
+        this.columnsSet = new FixedBitSet(Math.max(INITIAL_CAPACITY, 64));
+        this.cachedPath = new String[INITIAL_CAPACITY];
     }
 
     /**
-     * Adds a single document to the encoder.
-     *
-     * @throws UnsupportedOperationException if the document contains a top-level empty object
+     * Adds a single document to the default partition (0). Equivalent to
+     * {@code parseToScratch(source, xContentType, LeafSink.NO_OP); commitScratchTo(0);}.
      */
     public void addDocument(BytesReference source, XContentType xContentType) throws IOException {
+        parseToScratch(source, xContentType, EirfEncoder.LeafSink.NO_OP);
+        commitScratchTo(0);
+    }
+
+    /**
+     * Parses {@code source} into the per-document scratch and fires {@code sink} for every primitive
+     * leaf value (string / number / boolean — null and array values are not forwarded as primitives;
+     * arrays are signalled via {@link EirfEncoder.LeafSink#onArrayLeaf}). The parsed row is held in
+     * scratch until the next {@link #commitScratchTo(int)} call.
+     *
+     * @throws UnsupportedOperationException if the document contains an empty object
+     */
+    public void parseToScratch(BytesReference source, XContentType xContentType, EirfEncoder.LeafSink sink) throws IOException {
+        int columnCountBefore = schema.leafCount();
+        Arrays.fill(scratchType, 0, Math.min(columnCountBefore, scratchType.length), (byte) 0);
+        Arrays.fill(scratchVar, 0, Math.min(columnCountBefore, scratchVar.length), null);
+        columnsSet.clear();
         try (XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)) {
             parser.allowDuplicateKeys(true);
             parser.nextToken(); // START_OBJECT
-            columnsSet.clear();
-            flattenObject(parser, 0, parser.nextToken());
+            flattenObject(parser, 0, parser.nextToken(), sink);
         }
-
-        // Back-fill absent for every column not set in this document.
-        // ensureBuilders before the loop so any new columns seen in this doc have builders.
-        // ensureCapacity before the loop so get(c) is valid up to leafCount-1.
-        int leafCount = schema.leafCount();
-        ensureBuilders(leafCount, docCount);
-        columnsSet = FixedBitSet.ensureCapacity(columnsSet, leafCount);
-        for (int c = 0; c < leafCount; c++) {
-            if (columnsSet.get(c) == false) {
-                columnBuilders.get(c).addAbsent();
-            }
-        }
-        docCount++;
+        rowStaged = true;
     }
 
     /**
-     * Finalises the accumulated columns and returns the in-memory {@link EicfBatch}. This consumes
-     * the per-column data streams, so it must be called at most once. The returned batch owns the
-     * streams and releases them on {@link EicfBatch#close()}.
+     * Flushes the row staged in scratch into the partition identified by {@code partitionKey},
+     * appending one value (or absent) to every leaf column builder. Returns the row's index within
+     * that partition.
+     *
+     * @throws IllegalStateException if no row is currently staged
      */
-    public EicfBatch build() {
-        int colCount = schema.leafCount();
-        EicfColumnData[] columns = new EicfColumnData[colCount];
-        List<Releasable> releasables = new ArrayList<>(colCount);
-        for (int c = 0; c < colCount; c++) {
-            EicfColumnData col = columnBuilders.get(c).finish(docCount);
+    public int commitScratchTo(int partitionKey) {
+        if (rowStaged == false) {
+            throw new IllegalStateException("commitScratchTo called without a staged row");
+        }
+        final Partition partition = getOrCreatePartition(partitionKey);
+        final int leafCount = schema.leafCount();
+        ensurePartitionBuilders(partition, leafCount);
+        for (int c = 0; c < leafCount; c++) {
+            appendScratchValue(partition.builders.get(c), c);
+        }
+        final int rowIndex = partition.docCount;
+        partition.docCount++;
+        rowStaged = false;
+        return rowIndex;
+    }
+
+    /**
+     * Builds an {@link EicfBatch} for the partition identified by {@code partitionKey}, consuming that
+     * partition's per-column data streams. Must be called at most once per partition.
+     */
+    public EicfBatch buildPartition(int partitionKey) {
+        final Partition partition = getOrCreatePartition(partitionKey);
+        final int leafCount = schema.leafCount();
+        // Columns may have been appended to the shared schema after this partition's last commit (by a
+        // document routed elsewhere); make sure every leaf has a builder back-filled to docCount.
+        ensurePartitionBuilders(partition, leafCount);
+        final EicfColumnData[] columns = new EicfColumnData[leafCount];
+        final List<Releasable> releasables = new ArrayList<>(leafCount);
+        for (int c = 0; c < leafCount; c++) {
+            final EicfColumnData col = partition.builders.get(c).finish(partition.docCount);
             columns[c] = col;
             if (col.data() instanceof Releasable releasable) {
                 releasables.add(releasable);
             }
         }
-        return new EicfBatch(schema, docCount, columns, Releasables.wrap(releasables));
+        return new EicfBatch(schema, partition.docCount, columns, Releasables.wrap(releasables));
+    }
+
+    /** Returns the {@link EicfBatch} for the single default partition (0); see {@link #encode}. */
+    public EicfBatch build() {
+        return buildPartition(0);
+    }
+
+    /**
+     * Returns the dotted path for the given leaf column, cached so callers can use the column index as
+     * a stable per-column key.
+     */
+    public String columnPath(int columnIndex) {
+        if (columnIndex >= cachedPath.length) {
+            cachedPath = Arrays.copyOf(cachedPath, Integer.highestOneBit(columnIndex) << 1);
+        }
+        String path = cachedPath[columnIndex];
+        if (path == null) {
+            path = schema.getFullPath(columnIndex);
+            cachedPath[columnIndex] = path;
+        }
+        return path;
     }
 
     @Override
     public void close() {
-        closed = true;
+        Arrays.fill(partitions, null);
     }
 
-    /**
-     * Convenience method: encodes all {@code sources} in a single batch.
-     */
+    /** Convenience method: encodes all {@code sources} into a single batch. */
     public static EicfBatch encode(List<BytesReference> sources, XContentType xContentType) throws IOException {
         try (EicfEncoder encoder = new EicfEncoder()) {
             for (BytesReference source : sources) {
                 encoder.addDocument(source, xContentType);
             }
-            return encoder.build();
+            return encoder.buildPartition(0);
         }
     }
 
-    private void flattenObject(XContentParser parser, int parentNonLeafIdx, XContentParser.Token firstToken) throws IOException {
+    private void appendScratchValue(EicfColumnBuilder builder, int columnIndex) {
+        final byte type = scratchType[columnIndex];
+        switch (type) {
+            case EirfType.ABSENT -> builder.addAbsent();
+            case EirfType.NULL -> builder.addNull();
+            case EirfType.TRUE -> builder.addBoolean(true);
+            case EirfType.FALSE -> builder.addBoolean(false);
+            case EirfType.INT, EirfType.LONG -> builder.addLong(scratchNumeric[columnIndex]);
+            case EirfType.FLOAT, EirfType.DOUBLE -> builder.addDouble(Double.longBitsToDouble(scratchNumeric[columnIndex]));
+            case EirfType.STRING -> builder.addString((XContentString.UTF8Bytes) scratchVar[columnIndex]);
+            case EirfType.FIXED_ARRAY, EirfType.UNION_ARRAY -> builder.addArray(type, (byte[]) scratchVar[columnIndex]);
+            default -> throw new IllegalStateException("unexpected scratch EIRF type [" + EirfType.name(type) + "]");
+        }
+    }
+
+    private void flattenObject(XContentParser parser, int parentNonLeafIdx, XContentParser.Token firstToken, EirfEncoder.LeafSink sink)
+        throws IOException {
         XContentParser.Token token = firstToken;
         while (token != XContentParser.Token.END_OBJECT) {
             if (token != XContentParser.Token.FIELD_NAME) {
@@ -146,63 +233,147 @@ public final class EicfEncoder implements Releasable {
             if (token == XContentParser.Token.START_OBJECT) {
                 XContentParser.Token inner = parser.nextToken();
                 if (inner == XContentParser.Token.END_OBJECT) {
-                    // Top-level empty objects are not yet supported as standalone KEY_VALUE columns
+                    // Top-level empty objects are not yet supported as standalone KEY_VALUE columns.
                     throw new UnsupportedOperationException(
                         "Empty objects as standalone columns are not yet supported in EICF (field: [" + fieldName + "])"
                     );
                 } else {
                     int nonLeafIdx = schema.appendNonLeaf(fieldName, parentNonLeafIdx);
-                    flattenObject(parser, nonLeafIdx, inner);
+                    flattenObject(parser, nonLeafIdx, inner, sink);
                 }
                 token = parser.nextToken();
                 continue;
             }
 
             int colIdx = schema.appendLeaf(fieldName, parentNonLeafIdx);
-            ensureBuilders(colIdx + 1, docCount);
-            columnsSet = FixedBitSet.ensureCapacity(columnsSet, colIdx + 1);
+            ensureScratchCapacity(colIdx + 1);
             if (columnsSet.getAndSet(colIdx)) {
                 throw new IllegalArgumentException("Duplicate field [" + fieldName + "]");
             }
 
-            EicfColumnBuilder builder = columnBuilders.get(colIdx);
+            final boolean firePathSink = sink != EirfEncoder.LeafSink.NO_OP;
+            final boolean rawTextMode = firePathSink && sink.passRawText();
             switch (token) {
                 case START_ARRAY -> {
                     EirfEncoder.PackedArray arr = EirfEncoder.parseArray(parser, null);
-                    builder.addArray(arr.arrayType(), arr.packed());
+                    scratchType[colIdx] = arr.arrayType();
+                    scratchVar[colIdx] = arr.packed();
+                    if (firePathSink) {
+                        sink.onArrayLeaf(colIdx, columnPath(colIdx));
+                    }
                 }
-                // The UTF-8 slice points into the parser's reusable buffer; the builder writes it
-                // directly into the column data stream, so it does not outlive this call.
-                case VALUE_STRING -> builder.addString(parser.optimizedText().bytes());
+                // The UTF-8 slice points into the parser's reusable buffer; it stays valid until the
+                // next parseToScratch, which always follows a commitScratchTo that drains it.
+                case VALUE_STRING -> {
+                    XContentString.UTF8Bytes str = parser.optimizedText().bytes();
+                    scratchType[colIdx] = EirfType.STRING;
+                    scratchVar[colIdx] = str;
+                    if (firePathSink) {
+                        sink.onTextPrimitive(colIdx, columnPath(colIdx), EirfType.STRING, str);
+                    }
+                }
                 case VALUE_NUMBER -> {
                     XContentParser.NumberType numType = parser.numberType();
                     switch (numType) {
-                        case INT, LONG -> builder.addLong(parser.longValue());
-                        case FLOAT, DOUBLE -> builder.addDouble(parser.doubleValue());
-                        // BIG_INTEGER / BIG_DECIMAL: fall back to the raw string representation
-                        default -> builder.addString(parser.optimizedText().bytes());
+                        case INT, LONG -> {
+                            long val = parser.longValue();
+                            byte type = (val >= Integer.MIN_VALUE && val <= Integer.MAX_VALUE) ? EirfType.INT : EirfType.LONG;
+                            scratchType[colIdx] = type;
+                            scratchNumeric[colIdx] = val;
+                            if (rawTextMode) {
+                                sink.onTextPrimitive(colIdx, columnPath(colIdx), type, parser.optimizedText().bytes());
+                            } else if (firePathSink) {
+                                sink.onLongPrimitive(colIdx, columnPath(colIdx), type, val);
+                            }
+                        }
+                        case FLOAT, DOUBLE -> {
+                            double val = parser.doubleValue();
+                            float fval = (float) val;
+                            byte type = ((double) fval == val) ? EirfType.FLOAT : EirfType.DOUBLE;
+                            scratchType[colIdx] = type;
+                            scratchNumeric[colIdx] = Double.doubleToRawLongBits(val);
+                            if (rawTextMode) {
+                                sink.onTextPrimitive(colIdx, columnPath(colIdx), type, parser.optimizedText().bytes());
+                            } else if (firePathSink) {
+                                sink.onDoublePrimitive(colIdx, columnPath(colIdx), type, val);
+                            }
+                        }
+                        // BIG_INTEGER / BIG_DECIMAL fall back to a string column, matching EirfEncoder.
+                        default -> {
+                            XContentString.UTF8Bytes str = parser.optimizedText().bytes();
+                            scratchType[colIdx] = EirfType.STRING;
+                            scratchVar[colIdx] = str;
+                            if (firePathSink) {
+                                sink.onTextPrimitive(colIdx, columnPath(colIdx), EirfType.STRING, str);
+                            }
+                        }
                     }
                 }
-                case VALUE_BOOLEAN -> builder.addBoolean(parser.booleanValue());
-                case VALUE_NULL -> builder.addNull();
+                case VALUE_BOOLEAN -> {
+                    boolean v = parser.booleanValue();
+                    byte type = v ? EirfType.TRUE : EirfType.FALSE;
+                    scratchType[colIdx] = type;
+                    if (rawTextMode) {
+                        sink.onTextPrimitive(colIdx, columnPath(colIdx), type, parser.optimizedText().bytes());
+                    } else if (firePathSink) {
+                        sink.onBooleanPrimitive(colIdx, columnPath(colIdx), v);
+                    }
+                }
+                case VALUE_NULL -> scratchType[colIdx] = EirfType.NULL;
                 default -> throw new IllegalStateException("Unexpected token: " + token);
             }
             token = parser.nextToken();
         }
     }
 
+    private void ensureScratchCapacity(int size) {
+        if (size <= scratchType.length) {
+            return;
+        }
+        int cap = scratchType.length;
+        while (cap < size) {
+            cap <<= 1;
+        }
+        scratchType = Arrays.copyOf(scratchType, cap);
+        scratchNumeric = Arrays.copyOf(scratchNumeric, cap);
+        scratchVar = Arrays.copyOf(scratchVar, cap);
+        columnsSet = FixedBitSet.ensureCapacity(columnsSet, cap);
+    }
+
+    private Partition getOrCreatePartition(int partitionKey) {
+        if (partitionKey >= partitions.length) {
+            int newCap = partitions.length;
+            while (partitionKey >= newCap) {
+                newCap <<= 1;
+            }
+            partitions = Arrays.copyOf(partitions, newCap);
+        }
+        Partition partition = partitions[partitionKey];
+        if (partition == null) {
+            partition = new Partition();
+            partitions[partitionKey] = partition;
+        }
+        return partition;
+    }
+
     /**
-     * Ensures {@code columnBuilders} has entries for indices {@code [0, size)}.
-     * Any newly created builder is pre-populated with {@code docsBefore} absent entries to
-     * account for documents processed before this column first appeared in the schema.
+     * Ensures {@code partition} has a builder for every leaf in {@code [0, size)}. A newly created
+     * builder is back-filled with {@code partition.docCount} absent entries to account for documents
+     * committed to this partition before the column first appeared in the schema.
      */
-    private void ensureBuilders(int size, int docsBefore) {
-        while (columnBuilders.size() < size) {
+    private static void ensurePartitionBuilders(Partition partition, int size) {
+        while (partition.builders.size() < size) {
             EicfColumnBuilder builder = new EicfColumnBuilder();
-            for (int i = 0; i < docsBefore; i++) {
+            for (int i = 0; i < partition.docCount; i++) {
                 builder.addAbsent();
             }
-            columnBuilders.add(builder);
+            partition.builders.add(builder);
         }
+    }
+
+    /** Per-partition column state: one builder per leaf column, plus that partition's committed doc count. */
+    private static final class Partition {
+        final List<EicfColumnBuilder> builders = new ArrayList<>(INITIAL_CAPACITY);
+        int docCount;
     }
 }

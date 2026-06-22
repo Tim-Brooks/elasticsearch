@@ -15,6 +15,8 @@ import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.eirf.EirfArrayReader;
 import org.elasticsearch.eirf.EirfKeyValueReader;
 import org.elasticsearch.eirf.EirfType;
+import org.elasticsearch.sourcebatch.AbstractSourceColumnCursor;
+import org.elasticsearch.sourcebatch.SourceColumnCursor;
 import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentString;
 
@@ -107,5 +109,38 @@ public final class EicfUnionColumn extends EicfColumn {
     public EirfKeyValueReader getKeyValue(int d) {
         int off0 = offsets[d];
         return new EirfKeyValueReader(data, base + off0, offsets[d + 1] - off0);
+    }
+
+    @Override
+    public SourceColumnCursor cursor() {
+        return new AbstractSourceColumnCursor() {
+            private int doc = -1;
+
+            @Override
+            public boolean advance() {
+                return ++doc < docCount;
+            }
+
+            @Override
+            public byte type() {
+                return absent != null && absent.get(doc) ? EirfType.ABSENT : typeVec[typeVecBase + doc];
+            }
+
+            @Override
+            public long longValue() {
+                return ByteUtils.readLongLE(data, base + offsets[doc]);
+            }
+
+            @Override
+            public double doubleValue() {
+                return Double.longBitsToDouble(ByteUtils.readLongLE(data, base + offsets[doc]));
+            }
+
+            @Override
+            public Text stringValue() {
+                int off0 = offsets[doc];
+                return new Text(new XContentString.UTF8Bytes(data, base + off0, offsets[doc + 1] - off0));
+            }
+        };
     }
 }

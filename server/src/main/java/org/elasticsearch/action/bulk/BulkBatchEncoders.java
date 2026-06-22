@@ -16,6 +16,7 @@ import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.routing.IndexRouting;
 import org.elasticsearch.cluster.routing.RoutingExtractor;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.eicf.EicfEncoder;
 import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.shard.ShardId;
@@ -29,10 +30,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Per-bulk helper that performs single-pass {@code XContent → EIRF} encoding while shard routing is
- * being computed, accumulating one row per item directly into the destination shard's row partition
- * inside an {@link EirfEncoder}. There is one encoder per concrete write index encountered in the
- * bulk; each encoder fans rows out to many partitions (one per destination shard).
+ * Per-bulk helper that performs single-pass {@code XContent → EICF} encoding while shard routing is
+ * being computed, accumulating one document per item directly into the destination shard's column
+ * partition inside an {@link EicfEncoder}. There is one encoder per concrete write index encountered
+ * in the bulk; each encoder fans documents out to many partitions (one per destination shard).
  *
  * <p>Lifecycle: created at the start of a {@link BulkOperation#doRun() bulk run} only when
  * {@link #isBulkBatchEligible} returns true (i.e. every item in the bulk is structurally eligible
@@ -64,11 +65,11 @@ final class BulkBatchEncoders implements Releasable {
     static final int NOT_BATCHABLE = -1;
 
     private static final class IndexState {
-        final EirfEncoder encoder;
+        final EicfEncoder encoder;
         final RoutingExtractor extractor;
         final Map<ShardId, List<PendingAttachment>> pendingByShard = new HashMap<>();
 
-        IndexState(EirfEncoder encoder, RoutingExtractor extractor) {
+        IndexState(EicfEncoder encoder, RoutingExtractor extractor) {
             this.encoder = encoder;
             this.extractor = extractor;
         }
@@ -136,7 +137,7 @@ final class BulkBatchEncoders implements Releasable {
         }
         IndexState state = indexStates.computeIfAbsent(
             concreteIndex,
-            idx -> new IndexState(new EirfEncoder(), indexRouting.newRoutingExtractor())
+            idx -> new IndexState(new EicfEncoder(), indexRouting.newRoutingExtractor())
         );
         if (state.extractor != null) {
             state.extractor.reset();

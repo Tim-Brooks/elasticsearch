@@ -57,4 +57,13 @@ public interface SourceColumn {
     EirfKeyValueReader getKeyValue(int docIndex);
 
     EirfArrayReader getArrayValue(int docIndex);
+
+    /**
+     * Returns a forward {@link SourceColumnCursor} over this column. The default delegates to the
+     * random-access getters; implementations with a directly iterable representation override this with
+     * a specialized cursor that decodes each document once without polymorphic per-value dispatch.
+     */
+    default SourceColumnCursor cursor() {
+        return new RandomAccessSourceColumnCursor(this);
+    }
 }

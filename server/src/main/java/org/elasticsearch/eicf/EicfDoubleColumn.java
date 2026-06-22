@@ -12,6 +12,8 @@ package org.elasticsearch.eicf;
 import org.apache.lucene.util.FixedBitSet;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.eirf.EirfType;
+import org.elasticsearch.sourcebatch.AbstractSourceColumnCursor;
+import org.elasticsearch.sourcebatch.SourceColumnCursor;
 
 /**
  * An EICF column whose values are all {@code double}s, stored as contiguous little-endian 8-byte
@@ -46,6 +48,28 @@ public final class EicfDoubleColumn extends EicfColumn {
     @Override
     public double getDoubleValue(int d) {
         return Double.longBitsToDouble(ByteUtils.readLongLE(data, base + d * 8));
+    }
+
+    @Override
+    public SourceColumnCursor cursor() {
+        return new AbstractSourceColumnCursor() {
+            private int doc = -1;
+
+            @Override
+            public boolean advance() {
+                return ++doc < docCount;
+            }
+
+            @Override
+            public byte type() {
+                return absent != null && absent.get(doc) ? EirfType.ABSENT : EirfType.DOUBLE;
+            }
+
+            @Override
+            public double doubleValue() {
+                return Double.longBitsToDouble(ByteUtils.readLongLE(data, base + doc * 8));
+            }
+        };
     }
 
     /** The raw 8-byte-slot buffer (double bits); slot {@code d} starts at {@code valueBase() + d * 8}. */

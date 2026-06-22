@@ -70,6 +70,7 @@ import org.elasticsearch.search.lookup.FieldValues;
 import org.elasticsearch.search.lookup.SearchLookup;
 import org.elasticsearch.search.runtime.LongScriptFieldDistanceFeatureQuery;
 import org.elasticsearch.sourcebatch.SourceColumn;
+import org.elasticsearch.sourcebatch.SourceColumnCursor;
 import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
@@ -1313,10 +1314,11 @@ public final class DateFieldMapper extends FieldMapper {
             columnFieldType(),
             LongColumn.NumericKind.LONG
         );
-        for (int d = 0; d < docCount; d++) {
-            if (column.isAbsent(d) == false && column.getTypeByte(d) == EirfType.STRING) {
+        final SourceColumnCursor cursor = column.cursor();
+        while (cursor.advance()) {
+            if (cursor.type() == EirfType.STRING) {
                 try {
-                    builder.addLong(fieldType().parse(column.getStringValue(d).string()));
+                    builder.addLong(fieldType().parse(cursor.stringValue().string()));
                     continue;
                 } catch (IllegalArgumentException | ElasticsearchParseException | DateTimeException | ArithmeticException e) {
                     // fall through to the null_value / absent handling below

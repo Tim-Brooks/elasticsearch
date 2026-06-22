@@ -12,6 +12,8 @@ package org.elasticsearch.eicf;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.elasticsearch.eirf.EirfType;
+import org.elasticsearch.sourcebatch.AbstractSourceColumnCursor;
+import org.elasticsearch.sourcebatch.SourceColumnCursor;
 import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentString;
 
@@ -56,6 +58,29 @@ public final class EicfStringColumn extends EicfColumn {
     public BytesRef getBinaryValue(int d) {
         int off0 = offsets[d];
         return new BytesRef(data, base + off0, offsets[d + 1] - off0);
+    }
+
+    @Override
+    public SourceColumnCursor cursor() {
+        return new AbstractSourceColumnCursor() {
+            private int doc = -1;
+
+            @Override
+            public boolean advance() {
+                return ++doc < docCount;
+            }
+
+            @Override
+            public byte type() {
+                return absent != null && absent.get(doc) ? EirfType.ABSENT : EirfType.STRING;
+            }
+
+            @Override
+            public Text stringValue() {
+                int off0 = offsets[doc];
+                return new Text(new XContentString.UTF8Bytes(data, base + off0, offsets[doc + 1] - off0));
+            }
+        };
     }
 
     /** The contiguous value payload; document {@code d}'s bytes start at {@code dataBase() + offsets()[d]}. */
