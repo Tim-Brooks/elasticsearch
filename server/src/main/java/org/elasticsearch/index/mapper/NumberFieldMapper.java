@@ -2559,23 +2559,23 @@ public class NumberFieldMapper extends FieldMapper {
 
     @Override
     public void mapColumnBatch(SourceColumn column, BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
-        // POC: only a well-formed numeric EICF column whose physical kind matches this field's numeric
-        // interpretation (long/int <- LONG column, float/double <- DOUBLE column) can be wrapped
-        // directly. Anything else (string-encoded numbers, ignore_malformed hits, null_value, a
-        // long/double mismatch) surfaces as a UNION or the other numeric kind; we throw to signal a
-        // fall back to the row-major path.
-        // TODO columnar: convert these (UNION -> typed) instead of falling back.
+        // Compute the numeric interpretation first; half_float has no LongColumn.NumericKind and throws,
+        // signaling a fall back to the row-major path.
         final LongColumn.NumericKind kind = numericKind(type);
         final boolean compatible = switch (kind) {
             case INT, LONG -> column instanceof EicfLongColumn;
             case FLOAT, DOUBLE -> column instanceof EicfDoubleColumn;
         };
-        if (compatible == false) {
-            throw new UnsupportedOperationException(
-                "columnar batch indexing for field [" + fullPath() + "] requires a matching numeric EICF column"
-            );
+        if (compatible) {
+            // Fast path: a homogeneous numeric EICF column whose physical kind already matches this
+            // field's numeric interpretation (long/int <- LONG column, float/double <- DOUBLE column).
+            out.addColumn(EicfLuceneColumns.longColumn(column, fullPath(), columnFieldType(kind), kind));
+        } else {
+            // Anything else (a heterogeneous UNION, string-encoded numbers, explicit nulls, or a
+            // long/double mismatch) is rebuilt into a homogeneous numeric EICF column document-by-document
+            // — numerics coerced, strings parsed best-effort, other types left absent — then wrapped.
+            out.addColumn(EicfLuceneColumns.convertToNumeric(column, fullPath(), columnFieldType(kind), kind));
         }
-        out.addColumn(EicfLuceneColumns.longColumn(column, fullPath(), columnFieldType(kind), kind));
     }
 
     private static LongColumn.NumericKind numericKind(NumberType type) {

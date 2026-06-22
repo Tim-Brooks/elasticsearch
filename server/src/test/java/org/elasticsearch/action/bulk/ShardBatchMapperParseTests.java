@@ -15,6 +15,8 @@ import org.apache.lucene.document.column.ColumnBatch;
 import org.apache.lucene.document.column.LongColumn;
 import org.apache.lucene.document.column.LongTupleCursor;
 import org.apache.lucene.document.column.ObjectTupleCursor;
+import org.apache.lucene.index.DocValuesType;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.action.index.IndexRequest;
@@ -26,6 +28,7 @@ import org.elasticsearch.eicf.EicfBatch;
 import org.elasticsearch.eicf.EicfEncoder;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.engine.Engine;
+import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.IdFieldMapper;
 import org.elasticsearch.index.mapper.SeqNoFieldMapper;
 import org.elasticsearch.index.mapper.ShardBatchMapper;
@@ -39,6 +42,7 @@ import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,7 +56,9 @@ import static org.hamcrest.Matchers.not;
  * Parse-time tests for the columnar batch-mapping fast path: drives {@link ShardBatchMapper#mapColumnBatch}
  * directly with an EICF batch and inspects the assembled Lucene {@link ColumnBatch} (field columns +
  * metadata columns). Only {@code NumberFieldMapper} (+ metadata) is supported for now; keyword/text/
- * boolean/ip/date and string-into-number cases are commented out until re-added.
+ * boolean/ip/date cases are commented out until re-added. Heterogeneous (UNION) numeric columns —
+ * string-into-number and explicit nulls — are converted on the columnar path (see
+ * {@link #testNumberColumnConvertsMixedTypes()}).
  */
 public class ShardBatchMapperParseTests extends IndexShardTestCase {
 
@@ -205,11 +211,136 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
         closeShards(shard);
     }
 
+    public void testNumberColumnConvertsMixedTypes() throws Exception {
+        String mapping = """
+            {
+              "properties": {
+                "value": { "type": "long" }
+              }
+            }""";
+        IndexShard shard = newShardWithMapping(mapping, SYNTHETIC_SOURCE_SETTINGS);
+
+        // A heterogeneous "value" column promotes to UNION: number, numeric string, explicit null,
+        // unparseable string. The batch must stay columnar — the convertible docs are indexed and the
+        // null / unparseable docs are left absent (rather than falling back to the row-major path).
+        List<BytesReference> sources = List.of(
+            new BytesArray("{\"value\":10}"),
+            new BytesArray("{\"value\":\"20\"}"),
+            new BytesArray("{\"value\":null}"),
+            new BytesArray("{\"value\":\"not-a-number\"}")
+        );
+        int numDocs = sources.size();
+
+        try (EicfBatch batch = EicfEncoder.encode(sources, XContentType.JSON)) {
+            ColumnBatch columnBatch = mapToColumnBatch(shard, batch, items(numDocs));
+            Map<String, Column> cols = columnsByName(columnBatch);
+
+            Column valueCol = cols.get("value");
+            assertNotNull("value column must be present (no fallback)", valueCol);
+            assertTrue(valueCol instanceof LongColumn);
+            assertEquals(Column.Density.SPARSE, valueCol.density());
+
+            LongTupleCursor cursor = ((LongColumn) valueCol).tuples();
+            assertEquals(0, cursor.nextDoc());
+            assertEquals(10L, cursor.longValue());
+            assertEquals("numeric string is parsed and indexed", 1, cursor.nextDoc());
+            assertEquals(20L, cursor.longValue());
+            assertEquals("null and unparseable string leave the field absent", DocIdSetIterator.NO_MORE_DOCS, cursor.nextDoc());
+        }
+
+        closeShards(shard);
+    }
+
+    public void testKeywordColumnIsSortedSet() throws Exception {
+        String mapping = """
+            {
+              "properties": {
+                "s": { "type": "keyword", "index": false }
+              }
+            }""";
+        IndexShard shard = newShardWithMapping(mapping, SYNTHETIC_SOURCE_SETTINGS);
+
+        List<BytesReference> sources = List.of(new BytesArray("{\"s\":\"alpha\"}"), new BytesArray("{\"s\":\"beta\"}"));
+        try (EicfBatch batch = EicfEncoder.encode(sources, XContentType.JSON)) {
+            ColumnBatch columnBatch = mapToColumnBatch(shard, batch, items(sources.size()));
+            Column s = columnsByName(columnBatch).get("s");
+            assertNotNull("keyword column must be present (no fallback)", s);
+            assertTrue(s instanceof BinaryColumn);
+            assertEquals(DocValuesType.SORTED_SET, s.fieldType().docValuesType());
+            BytesRef[] values = readBinaries((BinaryColumn) s, sources.size());
+            assertEquals("alpha", values[0].utf8ToString());
+            assertEquals("beta", values[1].utf8ToString());
+        }
+
+        closeShards(shard);
+    }
+
+    public void testKeywordHighCardinalityEmitsBinaryAndCounts() throws Exception {
+        assumeTrue(
+            "extended doc_values params feature flag must be enabled",
+            FieldMapper.DocValuesParameter.EXTENDED_DOC_VALUES_PARAMS_FF.isEnabled()
+        );
+        String mapping = """
+            {
+              "properties": {
+                "s": { "type": "keyword", "index": false, "doc_values": { "cardinality": "high" } }
+              }
+            }""";
+        IndexShard shard = newShardWithMapping(mapping, SYNTHETIC_SOURCE_SETTINGS);
+
+        List<BytesReference> sources = List.of(new BytesArray("{\"s\":\"alpha\"}"), new BytesArray("{\"s\":\"beta\"}"));
+        try (EicfBatch batch = EicfEncoder.encode(sources, XContentType.JSON)) {
+            ColumnBatch columnBatch = mapToColumnBatch(shard, batch, items(sources.size()));
+            Map<String, Column> cols = columnsByName(columnBatch);
+
+            // High-cardinality keyword stores the value as BINARY doc values...
+            Column value = cols.get("s");
+            assertNotNull("keyword value column must be present", value);
+            assertTrue(value instanceof BinaryColumn);
+            assertEquals(DocValuesType.BINARY, value.fieldType().docValuesType());
+            BytesRef[] values = readBinaries((BinaryColumn) value, sources.size());
+            assertEquals("alpha", values[0].utf8ToString());
+            assertEquals("beta", values[1].utf8ToString());
+
+            // ...plus a companion <name>.counts numeric field carrying the per-document value count.
+            Column counts = cols.get("s.counts");
+            assertNotNull("keyword counts column must be present", counts);
+            assertTrue(counts instanceof LongColumn);
+            assertEquals(DocValuesType.NUMERIC, counts.fieldType().docValuesType());
+            assertArrayEquals(new long[] { 1L, 1L }, readLongs((LongColumn) counts, sources.size()));
+        }
+
+        closeShards(shard);
+    }
+
+    public void testDateColumnParsesStrings() throws Exception {
+        String mapping = """
+            {
+              "properties": {
+                "d": { "type": "date", "format": "yyyy-MM-dd HH:mm:ss", "index": false }
+              }
+            }""";
+        IndexShard shard = newShardWithMapping(mapping, SYNTHETIC_SOURCE_SETTINGS);
+
+        List<BytesReference> sources = List.of(
+            new BytesArray("{\"d\":\"2013-07-15 03:39:17\"}"),
+            new BytesArray("{\"d\":\"2020-01-02 00:00:00\"}")
+        );
+        try (EicfBatch batch = EicfEncoder.encode(sources, XContentType.JSON)) {
+            Column d = columnsByName(mapToColumnBatch(shard, batch, items(sources.size()))).get("d");
+            assertNotNull("date column must be present (no fallback)", d);
+            assertTrue(d instanceof LongColumn);
+            assertEquals(LongColumn.NumericKind.LONG, ((LongColumn) d).numericKind());
+            assertEquals(DocValuesType.NUMERIC, d.fieldType().docValuesType());
+            long[] values = readLongs((LongColumn) d, sources.size());
+            assertEquals(Instant.parse("2013-07-15T03:39:17Z").toEpochMilli(), values[0]);
+            assertEquals(Instant.parse("2020-01-02T00:00:00Z").toEpochMilli(), values[1]);
+        }
+
+        closeShards(shard);
+    }
+
     // TODO columnar: re-enable / rewrite for the columnar path when these mappers support batch indexing.
-    // - testSupportedMapperTypes (date + keyword): keyword/date not supported yet.
-    // - testIgnoreAboveOnKeywordDoesNotFail, testKeyword*: keyword not supported.
-    // - testNumberMapperReceivesStringValue: string-into-long produces a UNION column -> fallback (not columnar).
     // - testBooleanMapper / testIpMapper / testIpMapperIgnoreMalformed / testTextMapper: types not supported.
-    // - testNullValuesAreSkipped: an explicit null promotes a numeric column to UNION -> fallback (not columnar).
     // - testParseMappingsSyntheticSourceAndIgnored: _ignored / synthetic ignore_above handling is a follow-up.
 }

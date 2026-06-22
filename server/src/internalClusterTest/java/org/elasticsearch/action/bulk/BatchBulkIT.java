@@ -18,6 +18,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
+import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.sort.SortOrder;
@@ -137,6 +138,52 @@ public class BatchBulkIT extends ESIntegTestCase {
         assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
             assertNoFailures(searchResponse);
             assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+    }
+
+    public void testMixedTypeNumericColumnStaysColumnar() throws IOException {
+        // A single batch where the "value" (long) field receives mixed types: a number, a numeric
+        // string, an explicit null, and another number. The heterogeneous column promotes to UNION on
+        // the EICF side and is converted document-by-document on the columnar path — numerics and
+        // parseable strings are indexed, the null leaves the field absent — without failing the batch.
+        String index = "test-batch-mixed-types";
+        createBatchIndex(index, 1, 0);
+        String coordinatingNode = findCoordinatingNode();
+
+        BulkRequest bulkRequest = new BulkRequest();
+        bulkRequest.add(new IndexRequest(index).id("id-0").source("{\"name\":\"a\",\"value\":10,\"message\":\"m0\"}", XContentType.JSON));
+        bulkRequest.add(
+            new IndexRequest(index).id("id-1").source("{\"name\":\"b\",\"value\":\"20\",\"message\":\"m1\"}", XContentType.JSON)
+        );
+        bulkRequest.add(new IndexRequest(index).id("id-2").source("{\"name\":\"c\",\"value\":null,\"message\":\"m2\"}", XContentType.JSON));
+        bulkRequest.add(new IndexRequest(index).id("id-3").source("{\"name\":\"d\",\"value\":30,\"message\":\"m3\"}", XContentType.JSON));
+
+        BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+        assertNoFailures(bulkResponse);
+        assertThat(bulkResponse.getItems().length, equalTo(4));
+
+        refresh(index);
+
+        // All four documents are indexed.
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo(4L));
+        });
+
+        // The numeric and numeric-string docs carry a value; the null doc does not match a range query.
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.rangeQuery("value").gte(0)).setSize(0).setTrackTotalHits(true),
+            searchResponse -> {
+                assertNoFailures(searchResponse);
+                assertThat(searchResponse.getHits().getTotalHits().value(), equalTo(3L));
+            }
+        );
+
+        // The numeric string "20" was parsed into the long value 20.
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.termQuery("value", 20)).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo(1L));
+            assertThat(searchResponse.getHits().getHits()[0].getId(), equalTo("id-1"));
         });
     }
 
@@ -1459,5 +1506,251 @@ public class BatchBulkIT extends ESIntegTestCase {
                 }
             }
         );
+    }
+
+    // ClickBench "hits" schema field groups (subset of types exercised by the columnar batch path).
+    private static final String[] CLICKBENCH_SHORT_FIELDS = {
+        "AdvEngineID",
+        "Age",
+        "ClientTimeZone",
+        "CookieEnable",
+        "CounterClass",
+        "DontCountHits",
+        "FlashMajor",
+        "FlashMinor",
+        "FlashMinor2",
+        "GoodEvent",
+        "HTTPError",
+        "HasGCLID",
+        "HistoryLength",
+        "Income",
+        "Interests",
+        "IsArtifical",
+        "IsDownload",
+        "IsEvent",
+        "IsLink",
+        "IsMobile",
+        "IsNotBounce",
+        "IsOldCounter",
+        "IsParameter",
+        "IsRefresh",
+        "JavaEnable",
+        "JavascriptEnable",
+        "MobilePhone",
+        "NetMajor",
+        "NetMinor",
+        "OS",
+        "ParamCurrencyID",
+        "RefererCategoryID",
+        "ResolutionDepth",
+        "ResolutionHeight",
+        "ResolutionWidth",
+        "Robotness",
+        "SearchEngineID",
+        "Sex",
+        "SilverlightVersion1",
+        "SilverlightVersion2",
+        "SilverlightVersion4",
+        "SocialSourceNetworkID",
+        "TraficSourceID",
+        "URLCategoryID",
+        "UserAgent",
+        "UserAgentMajor",
+        "WindowClientHeight",
+        "WindowClientWidth",
+        "WithHash" };
+
+    private static final String[] CLICKBENCH_INTEGER_FIELDS = {
+        "CLID",
+        "ClientIP",
+        "CodeVersion",
+        "ConnectTiming",
+        "CounterID",
+        "DNSTiming",
+        "FetchTiming",
+        "HID",
+        "IPNetworkID",
+        "OpenerName",
+        "RefererRegionID",
+        "RegionID",
+        "RemoteIP",
+        "ResponseEndTiming",
+        "ResponseStartTiming",
+        "SendTiming",
+        "SilverlightVersion3",
+        "URLRegionID",
+        "WindowName" };
+
+    private static final String[] CLICKBENCH_LONG_FIELDS = { "FUniqID", "ParamPrice", "RefererHash", "URLHash", "UserID", "WatchID" };
+
+    private static final String[] CLICKBENCH_KEYWORD_HIGH_FIELDS = { "OriginalURL", "Referer", "SearchPhrase", "Title", "URL" };
+
+    private static final String[] CLICKBENCH_KEYWORD_LOW_FIELDS = {
+        "BrowserCountry",
+        "BrowserLanguage",
+        "FromTag",
+        "HitColor",
+        "MobilePhoneModel",
+        "OpenstatAdID",
+        "OpenstatCampaignID",
+        "OpenstatServiceName",
+        "OpenstatSourceID",
+        "PageCharset",
+        "ParamCurrency",
+        "ParamOrderID",
+        "Params",
+        "SocialAction",
+        "SocialNetwork",
+        "SocialSourcePage",
+        "UTMCampaign",
+        "UTMContent",
+        "UTMMedium",
+        "UTMSource",
+        "UTMTerm",
+        "UserAgentMinor" };
+
+    private static final String[] CLICKBENCH_DATETIME_FIELDS = { "ClientEventTime", "EventTime", "LocalEventTime" };
+
+    private XContentBuilder getClickBenchMapping() throws IOException {
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            {
+                mapping.startObject("_source").field("mode", "synthetic").endObject();
+                mapping.field("dynamic", "strict");
+                mapping.startObject("properties");
+                {
+                    for (String f : CLICKBENCH_SHORT_FIELDS) {
+                        mapping.startObject(f).field("type", "short").field("index", false).endObject();
+                    }
+                    for (String f : CLICKBENCH_INTEGER_FIELDS) {
+                        mapping.startObject(f).field("type", "integer").field("index", false).endObject();
+                    }
+                    for (String f : CLICKBENCH_LONG_FIELDS) {
+                        mapping.startObject(f).field("type", "long").field("index", false).endObject();
+                    }
+                    for (String f : CLICKBENCH_KEYWORD_LOW_FIELDS) {
+                        mapping.startObject(f).field("type", "keyword").field("index", false).endObject();
+                    }
+                    for (String f : CLICKBENCH_KEYWORD_HIGH_FIELDS) {
+                        mapping.startObject(f)
+                            .field("type", "keyword")
+                            .field("index", false)
+                            .startObject("doc_values")
+                            .field("cardinality", "high")
+                            .endObject()
+                            .endObject();
+                    }
+                    for (String f : CLICKBENCH_DATETIME_FIELDS) {
+                        mapping.startObject(f)
+                            .field("type", "date")
+                            .field("format", "yyyy-MM-dd HH:mm:ss")
+                            .field("index", false)
+                            .endObject();
+                    }
+                    mapping.startObject("EventDate").field("type", "date").field("format", "yyyy-MM-dd").field("index", false).endObject();
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+        }
+        mapping.endObject();
+        return mapping;
+    }
+
+    // The example ClickBench document. URLHash is lowered to fit a signed long (the original value
+    // exceeds Long.MAX_VALUE, which is an unrelated source-data concern).
+    private static final String CLICKBENCH_DOC = """
+        {
+          "WatchID": 8940174697547602584, "JavaEnable": 1, "Title": "Example Page Title", "GoodEvent": 1,
+          "EventTime": "2013-07-15 03:39:17", "EventDate": "2013-07-15", "CounterID": 62290040, "ClientIP": 1701406667,
+          "RegionID": 229, "UserID": 1502176461422705501, "CounterClass": 0, "OS": 3, "UserAgent": 1,
+          "URL": "http://example.com/page?param=value", "Referer": "http://example.com/", "IsRefresh": 0,
+          "RefererCategoryID": 0, "RefererRegionID": 0, "URLCategoryID": 0, "URLRegionID": 0, "ResolutionWidth": 1920,
+          "ResolutionHeight": 1080, "ResolutionDepth": 24, "FlashMajor": 11, "FlashMinor": 7, "FlashMinor2": "700.169",
+          "NetMajor": 0, "NetMinor": 0, "UserAgentMajor": 37, "UserAgentMinor": "0", "CookieEnable": 1, "JavascriptEnable": 1,
+          "IsMobile": 0, "MobilePhone": 0, "MobilePhoneModel": "", "Params": "", "IPNetworkID": 0, "TraficSourceID": 0,
+          "SearchEngineID": 0, "SearchPhrase": "", "AdvEngineID": 0, "IsArtifical": 0, "WindowClientWidth": 1920,
+          "WindowClientHeight": 946, "ClientTimeZone": 180, "ClientEventTime": "2013-07-15 03:39:17", "SilverlightVersion1": 0,
+          "SilverlightVersion2": 0, "SilverlightVersion3": 0, "SilverlightVersion4": 0, "PageCharset": "UTF-8",
+          "CodeVersion": 1843712, "IsLink": 0, "IsDownload": 0, "IsNotBounce": 1, "FUniqID": 7842017605334151337,
+          "HID": 1140045505, "IsOldCounter": 0, "IsEvent": 0, "IsParameter": 0, "DontCountHits": 0, "WithHash": 0,
+          "HitColor": "W", "LocalEventTime": "2013-07-15 03:39:17", "Age": 0, "Sex": 0, "Income": 0, "Interests": 0,
+          "Robotness": 0, "RemoteIP": 1701406667, "WindowName": 1, "OpenerName": -1, "HistoryLength": 1,
+          "BrowserLanguage": "ru", "BrowserCountry": "RU", "SocialNetwork": "", "SocialAction": "", "HTTPError": 0,
+          "SendTiming": 0, "DNSTiming": 0, "ConnectTiming": 0, "ResponseStartTiming": 0, "ResponseEndTiming": 0,
+          "FetchTiming": 0, "SocialSourceNetworkID": 0, "SocialSourcePage": "", "ParamPrice": -1, "ParamOrderID": "",
+          "ParamCurrency": "", "ParamCurrencyID": 0, "OpenstatServiceName": "", "OpenstatCampaignID": "", "OpenstatAdID": "",
+          "OpenstatSourceID": "", "UTMSource": "", "UTMMedium": "", "UTMCampaign": "", "UTMContent": "", "UTMTerm": "",
+          "FromTag": "", "HasGCLID": 0, "RefererHash": 0, "URLHash": 1483649083867597302, "CLID": 0
+        }""";
+
+    public void testClickBenchDocumentViaBatchMode() throws IOException {
+        assumeTrue(
+            "extended doc_values params feature flag must be enabled",
+            FieldMapper.DocValuesParameter.EXTENDED_DOC_VALUES_PARAMS_FF.isEnabled()
+        );
+        String index = "hits-batch";
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put("index.mapping.source.mode", "synthetic")
+                )
+                .setMapping(getClickBenchMapping())
+        );
+        ensureGreen(index);
+        String coordinatingNode = findCoordinatingNode();
+
+        BulkRequest bulkRequest = new BulkRequest();
+        bulkRequest.add(new IndexRequest(index).id("hit-1").source(CLICKBENCH_DOC, XContentType.JSON));
+        BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+        assertNoFailures(bulkResponse);
+
+        refresh(index);
+
+        // The document is indexed.
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), r -> {
+            assertNoFailures(r);
+            assertThat(r.getHits().getTotalHits().value(), equalTo(1L));
+        });
+        // Low-cardinality keyword (SORTED_SET doc values).
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.termQuery("HitColor", "W")).setSize(0).setTrackTotalHits(true),
+            r -> assertThat(r.getHits().getTotalHits().value(), equalTo(1L))
+        );
+        // Numeric range.
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.rangeQuery("ResolutionWidth").gte(1920)).setSize(0).setTrackTotalHits(true),
+            r -> assertThat(r.getHits().getTotalHits().value(), equalTo(1L))
+        );
+        // High-cardinality keyword (BINARY doc values + counts).
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.termQuery("URL", "http://example.com/page?param=value"))
+                .setSize(0)
+                .setTrackTotalHits(true),
+            r -> assertThat(r.getHits().getTotalHits().value(), equalTo(1L))
+        );
+        // Date range.
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.rangeQuery("EventTime").gte("2013-07-15 00:00:00"))
+                .setSize(0)
+                .setTrackTotalHits(true),
+            r -> assertThat(r.getHits().getTotalHits().value(), equalTo(1L))
+        );
+
+        // Synthetic source is reconstructed from the columnar doc values.
+        var getResponse = client().get(new org.elasticsearch.action.get.GetRequest(index).id("hit-1")).actionGet();
+        assertTrue(getResponse.isExists());
+        Map<String, Object> source = getResponse.getSourceAsMap();
+        assertThat(source.get("WatchID"), equalTo(8940174697547602584L));   // long
+        assertThat(source.get("CounterID"), equalTo(62290040));              // integer
+        assertThat(source.get("HitColor"), equalTo("W"));                    // low-card keyword
+        assertThat(source.get("URL"), equalTo("http://example.com/page?param=value")); // high-card keyword
+        assertThat(source.get("EventDate"), equalTo("2013-07-15"));          // date (yyyy-MM-dd)
+        assertThat(source.get("EventTime"), equalTo("2013-07-15 03:39:17")); // date (yyyy-MM-dd HH:mm:ss)
     }
 }

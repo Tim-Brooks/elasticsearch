@@ -22,6 +22,7 @@ import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.common.util.ByteUtils;
+import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.sourcebatch.SourceColumn;
 
 /**
@@ -114,6 +115,123 @@ public final class EicfLuceneColumns {
             return longColumn(ec, name, fieldType, kind);
         }
         throw new IllegalArgumentException("columnar numeric indexing requires an EICF column, got " + column.getClass().getSimpleName());
+    }
+
+    /**
+     * Converts an arbitrary {@link SourceColumn} — typically a heterogeneous {@code UNION} column, or a
+     * numeric column whose physical kind does not match the field — into a homogeneous numeric Lucene
+     * {@link LongColumn} of the requested {@code kind}.
+     *
+     * <p>The column is rebuilt one document at a time through an {@link EicfColumnBuilder}: raw numerics
+     * are coerced to the target type (long↔double), strings are parsed best-effort, and every other type
+     * — along with unparseable strings — is skipped, leaving that document absent. The rebuilt typed
+     * {@link EicfColumn} is then wrapped via {@link #longColumn(EicfColumn, String, IndexableFieldType,
+     * LongColumn.NumericKind)}, which already honors the absent bitset.
+     *
+     * <p>This is the POC fallback for columns the fast path cannot wrap directly; string parsing is
+     * intentionally basic and can be made stricter (coerce/range checks) later.
+     */
+    public static LongColumn convertToNumeric(SourceColumn column, String name, IndexableFieldType fieldType, LongColumn.NumericKind kind) {
+        final boolean wantDouble = kind == LongColumn.NumericKind.FLOAT || kind == LongColumn.NumericKind.DOUBLE;
+        final int docCount = column.docCount();
+        final EicfColumnBuilder builder = new EicfColumnBuilder();
+        for (int d = 0; d < docCount; d++) {
+            if (column.isAbsent(d)) {
+                builder.addAbsent();
+                continue;
+            }
+            final byte type = column.getTypeByte(d);
+            switch (type) {
+                case EirfType.LONG -> {
+                    if (wantDouble) {
+                        builder.addDouble((double) column.getLongValue(d));
+                    } else {
+                        builder.addLong(column.getLongValue(d));
+                    }
+                }
+                case EirfType.DOUBLE -> {
+                    if (wantDouble) {
+                        builder.addDouble(column.getDoubleValue(d));
+                    } else {
+                        builder.addLong((long) column.getDoubleValue(d));
+                    }
+                }
+                case EirfType.STRING -> {
+                    try {
+                        final String s = column.getStringValue(d).string();
+                        if (wantDouble) {
+                            builder.addDouble(Double.parseDouble(s));
+                        } else {
+                            builder.addLong(Long.parseLong(s));
+                        }
+                    } catch (NumberFormatException e) {
+                        builder.addAbsent();
+                    }
+                }
+                // Booleans, explicit nulls, binary, arrays, and key-value objects have no numeric
+                // interpretation in this POC; leave the document without a value.
+                case EirfType.NULL, EirfType.TRUE, EirfType.FALSE, EirfType.BINARY, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY,
+                    EirfType.KEY_VALUE -> builder.addAbsent();
+                default -> throw new IllegalStateException(
+                    "unexpected EIRF type [" + EirfType.name(type) + "] in column " + column.columnIndex()
+                );
+            }
+        }
+        final EicfColumn converted = EicfColumn.from(column.columnIndex(), builder.finish(docCount));
+        return longColumn(converted, name, fieldType, kind);
+    }
+
+    /**
+     * Returns a builder that assembles a numeric {@link LongColumn} one document at a time, for mappers
+     * that must derive a new column rather than wrap an existing one (e.g. parsing date strings to
+     * epoch values, or emitting a per-document value count). The caller adds exactly one value per
+     * document in order — {@link LongColumnBuilder#addLong} for a present value or
+     * {@link LongColumnBuilder#addAbsent} to leave the document without one — then calls
+     * {@link LongColumnBuilder#build}. Skipped documents become the column's absent bitset.
+     */
+    public static LongColumnBuilder longColumnBuilder(
+        int docCount,
+        String name,
+        IndexableFieldType fieldType,
+        LongColumn.NumericKind kind
+    ) {
+        return new LongColumnBuilder(docCount, name, fieldType, kind);
+    }
+
+    /**
+     * Accumulates per-document {@code long} values (or absences) and finishes them into a homogeneous
+     * numeric {@link LongColumn} via an {@link EicfColumnBuilder}. One value must be added per document,
+     * in document order, before {@link #build()} is called.
+     */
+    public static final class LongColumnBuilder {
+        private final EicfColumnBuilder builder = new EicfColumnBuilder();
+        private final int docCount;
+        private final String name;
+        private final IndexableFieldType fieldType;
+        private final LongColumn.NumericKind kind;
+
+        LongColumnBuilder(int docCount, String name, IndexableFieldType fieldType, LongColumn.NumericKind kind) {
+            this.docCount = docCount;
+            this.name = name;
+            this.fieldType = fieldType;
+            this.kind = kind;
+        }
+
+        /** Adds the value for the next document. */
+        public void addLong(long value) {
+            builder.addLong(value);
+        }
+
+        /** Leaves the next document without a value (it becomes absent in the resulting column). */
+        public void addAbsent() {
+            builder.addAbsent();
+        }
+
+        /** Finishes the accumulated values into a {@link LongColumn}. Call exactly once. */
+        public LongColumn build() {
+            // The synthetic column carries no schema identity, so the column index is irrelevant here.
+            return longColumn(EicfColumn.from(0, builder.finish(docCount)), name, fieldType, kind);
+        }
     }
 
     /** Adapts an {@link EicfStringColumn} or {@link EicfBinaryColumn} to a {@link BinaryColumn}. */

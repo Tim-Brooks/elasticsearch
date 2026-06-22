@@ -19,10 +19,12 @@ import org.apache.lucene.document.InvertableType;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
+import org.apache.lucene.document.column.LongColumn;
 import org.apache.lucene.index.DocValuesSkipIndexType;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.MultiTerms;
 import org.apache.lucene.index.Term;
@@ -47,6 +49,8 @@ import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.lucene.search.AutomatonQueries;
 import org.elasticsearch.common.unit.Fuzziness;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.eicf.EicfLuceneColumns;
+import org.elasticsearch.eicf.EicfStringColumn;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexSortConfig;
@@ -95,6 +99,7 @@ import org.elasticsearch.search.runtime.StringScriptFieldRangeQuery;
 import org.elasticsearch.search.runtime.StringScriptFieldRegexpQuery;
 import org.elasticsearch.search.runtime.StringScriptFieldTermQuery;
 import org.elasticsearch.search.runtime.StringScriptFieldWildcardQuery;
+import org.elasticsearch.sourcebatch.SourceColumn;
 import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
@@ -1411,6 +1416,77 @@ public final class KeywordFieldMapper extends FieldMapper {
     @Override
     protected boolean isSingleValueEnforced() {
         return docValuesParameters.multiValue() == false;
+    }
+
+    @Override
+    public boolean supportsBatchIndexing() {
+        // Only plain keyword fields are eligible. Scripts, copy_to, multi-fields, dimensions, a custom
+        // normalizer, or an ignore_above limit all require per-value handling the columnar batch path
+        // does not reproduce, so those configurations fall back to the row-major path.
+        return hasScript() == false
+            && copyTo().copyToFields().isEmpty()
+            && multiFields().iterator().hasNext() == false
+            && fieldType().isDimension() == false
+            && fieldType().normalizer() == Lucene.KEYWORD_ANALYZER
+            && fieldType().ignoreAbove().valuesPotentiallyIgnored() == false;
+    }
+
+    @Override
+    public void mapColumnBatch(SourceColumn column, BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        if (column instanceof EicfStringColumn == false) {
+            // Non-string values (e.g. an explicit null promotes the column to UNION) are not handled by
+            // the POC columnar keyword path; signal a fall back to the row-major path.
+            throw new UnsupportedOperationException(
+                "columnar batch indexing for keyword field [" + fullPath() + "] requires a string EICF column"
+            );
+        }
+        final EicfStringColumn stringColumn = (EicfStringColumn) column;
+        if (fieldType().usesBinaryDocValues()) {
+            // High-cardinality keyword: the value lives in BINARY doc values (a single value is stored as
+            // its raw bytes, matching MultiValuedBinaryDocValuesField.SeparateCount), accompanied by a
+            // <name>.counts numeric field carrying the per-document value count (always 1, single-valued).
+            out.addColumn(EicfLuceneColumns.binaryColumn(stringColumn, fullPath(), binaryDocValuesColumnFieldType()));
+            final int docCount = stringColumn.docCount();
+            final EicfLuceneColumns.LongColumnBuilder counts = EicfLuceneColumns.longColumnBuilder(
+                docCount,
+                fullPath() + MultiValuedBinaryDocValuesField.SeparateCount.COUNT_FIELD_SUFFIX,
+                countColumnFieldType(),
+                LongColumn.NumericKind.LONG
+            );
+            for (int d = 0; d < docCount; d++) {
+                if (stringColumn.isAbsent(d)) {
+                    counts.addAbsent();
+                } else {
+                    counts.addLong(1L);
+                }
+            }
+            out.addColumn(counts.build());
+        } else {
+            // Low-cardinality keyword: SORTED/SORTED_SET doc values fed directly from the string column,
+            // reusing the field's own Lucene field type.
+            out.addColumn(EicfLuceneColumns.binaryColumn(stringColumn, fullPath(), fieldType));
+        }
+    }
+
+    /** BINARY doc-values field type used to carry high-cardinality keyword values on the columnar path. */
+    private IndexableFieldType binaryDocValuesColumnFieldType() {
+        FieldType ft = new FieldType();
+        ft.setDocValuesType(DocValuesType.BINARY);
+        ft.setStored(fieldType.stored());
+        ft.freeze();
+        return ft;
+    }
+
+    /**
+     * NUMERIC doc-values field type for the {@code <name>.counts} companion of a high-cardinality keyword,
+     * carrying a range skip index to match {@link org.apache.lucene.document.NumericDocValuesField#indexedField}.
+     */
+    private IndexableFieldType countColumnFieldType() {
+        FieldType ft = new FieldType();
+        ft.setDocValuesType(DocValuesType.NUMERIC);
+        ft.setDocValuesSkipIndexType(DocValuesSkipIndexType.RANGE);
+        ft.freeze();
+        return ft;
     }
 
     protected void parseCreateField(DocumentParserContext context) throws IOException {

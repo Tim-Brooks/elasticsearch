@@ -12,11 +12,15 @@ package org.elasticsearch.index.mapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.LongField;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.StoredField;
+import org.apache.lucene.document.column.LongColumn;
 import org.apache.lucene.index.DocValuesSkipper;
+import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.PointValues;
 import org.apache.lucene.search.IndexOrDocValuesQuery;
@@ -34,6 +38,8 @@ import org.elasticsearch.common.time.DateUtils;
 import org.elasticsearch.common.util.LocaleUtils;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.eicf.EicfLuceneColumns;
+import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
@@ -63,6 +69,7 @@ import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.lookup.FieldValues;
 import org.elasticsearch.search.lookup.SearchLookup;
 import org.elasticsearch.search.runtime.LongScriptFieldDistanceFeatureQuery;
+import org.elasticsearch.sourcebatch.SourceColumn;
 import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
@@ -1284,6 +1291,62 @@ public final class DateFieldMapper extends FieldMapper {
         if (FieldArrayContext.shouldRecordOffsets(context, offsetsFieldName, docValuesParameters.multiValue())) {
             context.getOffSetContext().recordOffset(offsetsFieldName, timestamp);
         }
+    }
+
+    @Override
+    public boolean supportsBatchIndexing() {
+        // Mirror NumberFieldMapper: scripts, copy_to and multi-fields pull in behavior the columnar
+        // batch path does not reproduce, so only plain date fields are eligible.
+        return hasScript() == false && copyTo().copyToFields().isEmpty() && multiFields().iterator().hasNext() == false;
+    }
+
+    @Override
+    public void mapColumnBatch(SourceColumn column, BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        // Dates arrive as an EICF string column; parse each value to the resolution's sortable long and
+        // build a homogeneous numeric column. Unparseable values fall back to null_value, or leave the
+        // document absent when no null_value is configured. POC: numeric epoch-millis inputs are not
+        // handled here (ClickBench dates are formatted strings).
+        final int docCount = column.docCount();
+        final EicfLuceneColumns.LongColumnBuilder builder = EicfLuceneColumns.longColumnBuilder(
+            docCount,
+            fullPath(),
+            columnFieldType(),
+            LongColumn.NumericKind.LONG
+        );
+        for (int d = 0; d < docCount; d++) {
+            if (column.isAbsent(d) == false && column.getTypeByte(d) == EirfType.STRING) {
+                try {
+                    builder.addLong(fieldType().parse(column.getStringValue(d).string()));
+                    continue;
+                } catch (IllegalArgumentException | ElasticsearchParseException | DateTimeException | ArithmeticException e) {
+                    // fall through to the null_value / absent handling below
+                }
+            }
+            if (nullValue != null) {
+                builder.addLong(nullValue);
+            } else {
+                builder.addAbsent();
+            }
+        }
+        out.addColumn(builder.build());
+    }
+
+    /**
+     * Builds the Lucene {@link IndexableFieldType} for this field's columnar values, reflecting its
+     * doc-values, points and stored configuration so {@code addBatch} emits the same features as
+     * {@code parseCreateField}. Dates are stored as sortable {@code long}s.
+     */
+    private IndexableFieldType columnFieldType() {
+        FieldType ft = new FieldType();
+        if (fieldType().hasDocValues()) {
+            ft.setDocValuesType(DocValuesType.NUMERIC);
+        }
+        if (indexed) {
+            ft.setDimensions(1, Long.BYTES);
+        }
+        ft.setStored(store);
+        ft.freeze();
+        return ft;
     }
 
     /*

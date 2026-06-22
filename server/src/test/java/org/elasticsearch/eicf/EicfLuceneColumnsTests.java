@@ -241,6 +241,91 @@ public class EicfLuceneColumnsTests extends ESTestCase {
     }
 
     // -------------------------------------------------------------------------
+    // convertToNumeric: UNION / mismatched columns rebuilt into a typed numeric column
+    // -------------------------------------------------------------------------
+
+    public void testConvertUnionToLongSkipsUnconvertible() throws IOException {
+        // A heterogeneous "v" column: long, numeric string, double, unparseable string, boolean, null.
+        try (
+            EicfBatch batch = EicfEncoder.encode(
+                List.of(
+                    new BytesArray("{\"v\":10}"),
+                    new BytesArray("{\"v\":\"123\"}"),
+                    new BytesArray("{\"v\":2.5}"),
+                    new BytesArray("{\"v\":\"oops\"}"),
+                    new BytesArray("{\"v\":true}"),
+                    new BytesArray("{\"v\":null}")
+                ),
+                XContentType.JSON
+            )
+        ) {
+            assertTrue("expected a UNION column", column(batch, 0) instanceof EicfUnionColumn);
+            LongColumn col = EicfLuceneColumns.convertToNumeric(column(batch, 0), "v", NUMERIC_FIELD_TYPE, LongColumn.NumericKind.LONG);
+            assertEquals(LongColumn.NumericKind.LONG, col.numericKind());
+            assertEquals(Column.Density.SPARSE, col.density());
+
+            LongTupleCursor tuples = col.tuples();
+            assertEquals(0, tuples.nextDoc());
+            assertEquals(10L, tuples.longValue());
+            assertEquals(1, tuples.nextDoc());
+            assertEquals("numeric string is parsed", 123L, tuples.longValue());
+            assertEquals(2, tuples.nextDoc());
+            assertEquals("double is truncated to long", 2L, tuples.longValue());
+            assertEquals("unparseable string / boolean / null are skipped", DocIdSetIterator.NO_MORE_DOCS, tuples.nextDoc());
+
+            // values() is not available for a sparse column
+            expectThrows(UnsupportedOperationException.class, col::values);
+        }
+    }
+
+    public void testConvertUnionToDoubleAppliesSortableEncoding() throws IOException {
+        try (
+            EicfBatch batch = EicfEncoder.encode(
+                List.of(
+                    new BytesArray("{\"v\":10}"),
+                    new BytesArray("{\"v\":\"1.5\"}"),
+                    new BytesArray("{\"v\":-2.25}"),
+                    new BytesArray("{\"v\":\"nope\"}")
+                ),
+                XContentType.JSON
+            )
+        ) {
+            assertTrue("expected a UNION column", column(batch, 0) instanceof EicfUnionColumn);
+            LongColumn col = EicfLuceneColumns.convertToNumeric(column(batch, 0), "v", NUMERIC_FIELD_TYPE, LongColumn.NumericKind.DOUBLE);
+            assertEquals(LongColumn.NumericKind.DOUBLE, col.numericKind());
+            assertEquals(Column.Density.SPARSE, col.density());
+
+            LongTupleCursor tuples = col.tuples();
+            assertEquals(0, tuples.nextDoc());
+            assertEquals(NumericUtils.doubleToSortableLong(10.0), tuples.longValue());
+            assertEquals(1, tuples.nextDoc());
+            assertEquals(NumericUtils.doubleToSortableLong(1.5), tuples.longValue());
+            assertEquals(2, tuples.nextDoc());
+            assertEquals(NumericUtils.doubleToSortableLong(-2.25), tuples.longValue());
+            assertEquals(DocIdSetIterator.NO_MORE_DOCS, tuples.nextDoc());
+        }
+    }
+
+    public void testConvertAllConvertibleIsDense() throws IOException {
+        // long, numeric string, double — all convertible, so the rebuilt column is dense.
+        try (
+            EicfBatch batch = EicfEncoder.encode(
+                List.of(new BytesArray("{\"v\":1}"), new BytesArray("{\"v\":\"2\"}"), new BytesArray("{\"v\":3.0}")),
+                XContentType.JSON
+            )
+        ) {
+            LongColumn col = EicfLuceneColumns.convertToNumeric(column(batch, 0), "v", NUMERIC_FIELD_TYPE, LongColumn.NumericKind.LONG);
+            assertEquals(Column.Density.DENSE, col.density());
+
+            LongValuesCursor values = col.values();
+            assertEquals(3, values.size());
+            assertEquals(1L, values.nextLong());
+            assertEquals(2L, values.nextLong());
+            assertEquals(3L, values.nextLong());
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Dispatch + unsupported kinds
     // -------------------------------------------------------------------------
 
