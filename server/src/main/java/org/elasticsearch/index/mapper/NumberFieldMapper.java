@@ -21,6 +21,7 @@ import org.apache.lucene.document.LongField;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.column.LongColumn;
+import org.apache.lucene.index.DocValuesSkipIndexType;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.IndexableFieldType;
@@ -2595,10 +2596,19 @@ public class NumberFieldMapper extends FieldMapper {
      */
     private IndexableFieldType columnFieldType(LongColumn.NumericKind kind) {
         FieldType ft = new FieldType();
+        final boolean hasSkipper = fieldType.indexType.hasDocValuesSkipper();
         if (fieldType().hasDocValues()) {
-            ft.setDocValuesType(DocValuesType.NUMERIC);
+            // Mirror parseCreateField: multi-value-capable fields (the default) use SORTED_NUMERIC — which
+            // is also what field data and index sorting (SortedNumericSortField) expect — while
+            // single-value fields use NUMERIC. The doc-values skipper, when enabled, must be reflected here
+            // too so the FieldInfo matches what the row path would write.
+            ft.setDocValuesType(docValuesParameters.multiValue() ? DocValuesType.SORTED_NUMERIC : DocValuesType.NUMERIC);
+            if (hasSkipper) {
+                ft.setDocValuesSkipIndexType(DocValuesSkipIndexType.RANGE);
+            }
         }
-        if (indexed) {
+        // The doc-values-skipper path indexes values through the skip index instead of points (see indexValue).
+        if (indexed && hasSkipper == false) {
             int numBytes = (kind == LongColumn.NumericKind.INT || kind == LongColumn.NumericKind.FLOAT) ? Integer.BYTES : Long.BYTES;
             ft.setDimensions(1, numBytes);
         }

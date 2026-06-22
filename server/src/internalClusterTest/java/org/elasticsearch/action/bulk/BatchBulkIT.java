@@ -144,6 +144,86 @@ public class BatchBulkIT extends ESIntegTestCase {
         });
     }
 
+    public void testBatchIndexingWithIndexSorting() throws IOException {
+        // Reproduces the production failure: with index sorting on numeric/date fields (and the
+        // doc-values skipper), the columnar path must write SORTED_NUMERIC doc values — matching the
+        // SortedNumericSortField the index sort builds — or segment flush fails the shard.
+        String index = "test-batch-index-sort";
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            mapping.startObject("_source").field("mode", "synthetic").endObject();
+            mapping.field("dynamic", "strict");
+            mapping.startObject("properties");
+            {
+                mapping.startObject("name").field("type", "keyword").field("index", false).endObject();
+                mapping.startObject("value").field("type", "long").field("index", false).endObject();
+                mapping.startObject("ts").field("type", "date").field("format", "yyyy-MM-dd HH:mm:ss").field("index", false).endObject();
+            }
+            mapping.endObject();
+            mapping.endObject();
+        }
+        mapping.endObject();
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put("index.mapping.source.mode", "synthetic")
+                        .put("index.mapping.use_doc_values_skipper", true)
+                        .putList("index.sort.field", "value", "ts")
+                        .putList("index.sort.order", "desc", "asc")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+        String coordinatingNode = findCoordinatingNode();
+
+        int numDocs = 50;
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int i = 0; i < numDocs; i++) {
+            bulkRequest.add(
+                new IndexRequest(index).id("d-" + i)
+                    .source(
+                        "{\"name\":\"n-" + i + "\",\"value\":" + i + ",\"ts\":\"2013-07-15 03:39:" + String.format("%02d", i % 60) + "\"}",
+                        XContentType.JSON
+                    )
+            );
+        }
+        try (var mockLog = MockLog.capture(ShardBatchMapper.class)) {
+            mockLog.addExpectation(
+                new MockLog.UnseenEventExpectation(
+                    "no columnar fallback",
+                    ShardBatchMapper.class.getCanonicalName(),
+                    Level.WARN,
+                    "*failed to assemble column batch*"
+                )
+            );
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+            assertNoFailures(bulkResponse);
+            mockLog.assertAllExpectationsMatched();
+        }
+        refresh(index);
+
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), r -> {
+            assertNoFailures(r);
+            assertThat(r.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+        // Sanity-check the values round-trip (the index-sorted segment is still queryable).
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).addSort("value", SortOrder.DESC).setSize(numDocs),
+            r -> {
+                assertNoFailures(r);
+                SearchHit[] hits = r.getHits().getHits();
+                for (int i = 0; i < numDocs; i++) {
+                    assertThat(((Number) hits[i].getSourceAsMap().get("value")).longValue(), equalTo((long) (numDocs - 1 - i)));
+                }
+            }
+        );
+    }
+
     public void testMixedTypeNumericColumnStaysColumnar() throws IOException {
         // A single batch where the "value" (long) field receives mixed types: a number, a numeric
         // string, an explicit null, and another number. The heterogeneous column promotes to UNION on

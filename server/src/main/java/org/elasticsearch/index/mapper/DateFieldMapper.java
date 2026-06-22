@@ -17,6 +17,7 @@ import org.apache.lucene.document.LongField;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.column.LongColumn;
+import org.apache.lucene.index.DocValuesSkipIndexType;
 import org.apache.lucene.index.DocValuesSkipper;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexReader;
@@ -1340,10 +1341,18 @@ public final class DateFieldMapper extends FieldMapper {
      */
     private IndexableFieldType columnFieldType() {
         FieldType ft = new FieldType();
+        final boolean hasSkipper = fieldType().hasDocValuesSkipper();
         if (fieldType().hasDocValues()) {
-            ft.setDocValuesType(DocValuesType.NUMERIC);
+            // Multi-value-capable fields (the default) use SORTED_NUMERIC — what field data and index
+            // sorting (SortedNumericSortField) expect; single-value fields use NUMERIC. Reflect the
+            // doc-values skipper when enabled so the FieldInfo matches the row path.
+            ft.setDocValuesType(docValuesParameters.multiValue() ? DocValuesType.SORTED_NUMERIC : DocValuesType.NUMERIC);
+            if (hasSkipper) {
+                ft.setDocValuesSkipIndexType(DocValuesSkipIndexType.RANGE);
+            }
         }
-        if (indexed) {
+        // The doc-values-skipper path indexes values through the skip index instead of points (see indexValue).
+        if (indexed && hasSkipper == false) {
             ft.setDimensions(1, Long.BYTES);
         }
         ft.setStored(store);

@@ -331,7 +331,8 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
             assertNotNull("date column must be present (no fallback)", d);
             assertTrue(d instanceof LongColumn);
             assertEquals(LongColumn.NumericKind.LONG, ((LongColumn) d).numericKind());
-            assertEquals(DocValuesType.NUMERIC, d.fieldType().docValuesType());
+            // multi-value default → SORTED_NUMERIC (matches the row path and index sorting)
+            assertEquals(DocValuesType.SORTED_NUMERIC, d.fieldType().docValuesType());
             long[] values = readLongs((LongColumn) d, sources.size());
             assertEquals(Instant.parse("2013-07-15T03:39:17Z").toEpochMilli(), values[0]);
             assertEquals(Instant.parse("2020-01-02T00:00:00Z").toEpochMilli(), values[1]);
