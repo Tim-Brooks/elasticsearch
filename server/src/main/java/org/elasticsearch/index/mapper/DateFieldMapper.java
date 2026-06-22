@@ -12,14 +12,12 @@ package org.elasticsearch.index.mapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.document.Field;
-import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.LongField;
 import org.apache.lucene.document.LongPoint;
+import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.column.LongColumn;
-import org.apache.lucene.index.DocValuesSkipIndexType;
 import org.apache.lucene.index.DocValuesSkipper;
-import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.LeafReaderContext;
@@ -1339,26 +1337,34 @@ public final class DateFieldMapper extends FieldMapper {
      * doc-values, points and stored configuration so {@code addBatch} emits the same features as
      * {@code parseCreateField}. Dates are stored as sortable {@code long}s.
      */
+    // Field-type singletons captured once from the document-path field classes, so the date column reuses
+    // the exact same IndexableFieldType (and thus FieldInfo) the row path writes (dates index as longs).
+    // ES numeric/date field data and index sorting are always SortedNumeric and the index sorter strictly
+    // requires SORTED_NUMERIC doc values, so the column uses the multi-valued (SORTED_NUMERIC) variant.
+    private static final IndexableFieldType SORTED_NUMERIC_DV_SKIP_TYPE = SortedNumericDocValuesField.indexedField("f", 0L).fieldType();
+    private static final IndexableFieldType LONG_FIELD_TYPE = new LongField("f", 0L, Field.Store.NO).fieldType();
+    private static final IndexableFieldType LONG_POINT_TYPE = new LongPoint("f", 0L).fieldType();
+
+    /**
+     * Returns the Lucene {@link IndexableFieldType} for this date field's column, reusing the document
+     * path's SORTED_NUMERIC field-type singletons (dates index as longs; ES date field data and index
+     * sorting are always SortedNumeric).
+     */
     private IndexableFieldType columnFieldType() {
-        FieldType ft = new FieldType();
-        final boolean hasSkipper = fieldType().hasDocValuesSkipper();
+        if (fieldType().hasDocValuesSkipper()) {
+            // doc-values + range skip index, no points (see indexValue)
+            return SORTED_NUMERIC_DV_SKIP_TYPE;
+        }
+        if (indexed && fieldType().hasDocValues()) {
+            return LONG_FIELD_TYPE; // points + SORTED_NUMERIC
+        }
         if (fieldType().hasDocValues()) {
-            // ES date/numeric field data and index sorting are always SortedNumeric (a SortedNumericSortField),
-            // and the flush-time sorter strictly requires SORTED_NUMERIC doc values — so emit SORTED_NUMERIC
-            // regardless of the single-value optimization. Reflect the doc-values skipper when enabled so the
-            // FieldInfo matches the row path.
-            ft.setDocValuesType(DocValuesType.SORTED_NUMERIC);
-            if (hasSkipper) {
-                ft.setDocValuesSkipIndexType(DocValuesSkipIndexType.RANGE);
-            }
+            return SortedNumericDocValuesField.TYPE; // doc values only
         }
-        // The doc-values-skipper path indexes values through the skip index instead of points (see indexValue).
-        if (indexed && hasSkipper == false) {
-            ft.setDimensions(1, Long.BYTES);
+        if (indexed) {
+            return LONG_POINT_TYPE; // points only
         }
-        ft.setStored(store);
-        ft.freeze();
-        return ft;
+        throw new IllegalStateException("date column for [" + fullPath() + "] has neither doc values nor points");
     }
 
     /*

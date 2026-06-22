@@ -12,17 +12,15 @@ package org.elasticsearch.index.mapper;
 import org.apache.lucene.document.DoubleField;
 import org.apache.lucene.document.DoublePoint;
 import org.apache.lucene.document.Field;
-import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.FloatField;
 import org.apache.lucene.document.FloatPoint;
 import org.apache.lucene.document.IntField;
 import org.apache.lucene.document.IntPoint;
 import org.apache.lucene.document.LongField;
 import org.apache.lucene.document.LongPoint;
+import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.column.LongColumn;
-import org.apache.lucene.index.DocValuesSkipIndexType;
-import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.LeafReaderContext;
@@ -2590,31 +2588,61 @@ public class NumberFieldMapper extends FieldMapper {
         };
     }
 
+    // Field-type singletons captured once from the document-path field classes, so columnar columns reuse
+    // the exact same IndexableFieldType (and thus FieldInfo) the row path writes. ES numeric field data and
+    // index sorting are always SortedNumeric, and the flush-time index sorter strictly requires
+    // SORTED_NUMERIC doc values (the single-valued NUMERIC variant is incompatible with index sorting), so
+    // the columnar path uses the multi-valued (SORTED_NUMERIC) doc-path field types.
+    private static final IndexableFieldType SORTED_NUMERIC_DV_SKIP_TYPE = SortedNumericDocValuesField.indexedField("f", 0L).fieldType();
+    private static final IndexableFieldType INT_FIELD_TYPE = new IntField("f", 0, Field.Store.NO).fieldType();
+    private static final IndexableFieldType LONG_FIELD_TYPE = new LongField("f", 0L, Field.Store.NO).fieldType();
+    private static final IndexableFieldType FLOAT_FIELD_TYPE = new FloatField("f", 0f, Field.Store.NO).fieldType();
+    private static final IndexableFieldType DOUBLE_FIELD_TYPE = new DoubleField("f", 0d, Field.Store.NO).fieldType();
+    private static final IndexableFieldType INT_POINT_TYPE = new IntPoint("f", 0).fieldType();
+    private static final IndexableFieldType LONG_POINT_TYPE = new LongPoint("f", 0L).fieldType();
+    private static final IndexableFieldType FLOAT_POINT_TYPE = new FloatPoint("f", 0f).fieldType();
+    private static final IndexableFieldType DOUBLE_POINT_TYPE = new DoublePoint("f", 0d).fieldType();
+
     /**
-     * Builds the Lucene {@link IndexableFieldType} for this field's column, reflecting its doc-values,
-     * points and stored configuration so {@code addBatch} emits the same features as {@code parseCreateField}.
+     * Returns the Lucene {@link IndexableFieldType} for this field's column, reusing the document path's
+     * field-type singletons. ES numeric field data and index sorting are always SortedNumeric, so the
+     * column uses the multi-valued (SORTED_NUMERIC) variant — the single-valued NUMERIC representation is
+     * rejected by the index sorter (`validateIndexSortDVType`).
      */
     private IndexableFieldType columnFieldType(LongColumn.NumericKind kind) {
-        FieldType ft = new FieldType();
-        final boolean hasSkipper = fieldType.indexType.hasDocValuesSkipper();
-        if (fieldType().hasDocValues()) {
-            // ES numeric field data and index sorting are always SortedNumeric (a SortedNumericSortField),
-            // and the flush-time sorter strictly requires SORTED_NUMERIC doc values — so the columnar path
-            // must emit SORTED_NUMERIC regardless of the single-value optimization. The doc-values skipper,
-            // when enabled, must be reflected here too so the FieldInfo matches what the row path writes.
-            ft.setDocValuesType(DocValuesType.SORTED_NUMERIC);
-            if (hasSkipper) {
-                ft.setDocValuesSkipIndexType(DocValuesSkipIndexType.RANGE);
-            }
+        final IndexType it = fieldType.indexType;
+        if (it.hasDocValues() && it.hasPoints()) {
+            return pointsAndDocValuesFieldType();
         }
-        // The doc-values-skipper path indexes values through the skip index instead of points (see indexValue).
-        if (indexed && hasSkipper == false) {
-            int numBytes = (kind == LongColumn.NumericKind.INT || kind == LongColumn.NumericKind.FLOAT) ? Integer.BYTES : Long.BYTES;
-            ft.setDimensions(1, numBytes);
+        if (it.hasDocValues()) {
+            return it.hasDocValuesSkipper() ? SORTED_NUMERIC_DV_SKIP_TYPE : SortedNumericDocValuesField.TYPE;
         }
-        ft.setStored(stored);
-        ft.freeze();
-        return ft;
+        if (it.hasPoints()) {
+            return pointOnlyFieldType();
+        }
+        throw new IllegalStateException("numeric column for [" + fullPath() + "] has neither doc values nor points");
+    }
+
+    /** The doc-path field type for an indexed (points + SORTED_NUMERIC doc values) numeric of this type. */
+    private IndexableFieldType pointsAndDocValuesFieldType() {
+        return switch (type) {
+            case BYTE, SHORT, INTEGER -> INT_FIELD_TYPE;
+            case LONG -> LONG_FIELD_TYPE;
+            case FLOAT -> FLOAT_FIELD_TYPE;
+            case DOUBLE -> DOUBLE_FIELD_TYPE;
+            case HALF_FLOAT -> throw new UnsupportedOperationException("half_float is not supported by columnar batch indexing");
+        };
+    }
+
+    /** The doc-path field type for a points-only (no doc values) numeric of this type. */
+    private IndexableFieldType pointOnlyFieldType() {
+        return switch (type) {
+            case BYTE, SHORT, INTEGER -> INT_POINT_TYPE;
+            case LONG -> LONG_POINT_TYPE;
+            case FLOAT -> FLOAT_POINT_TYPE;
+            case DOUBLE -> DOUBLE_POINT_TYPE;
+            case HALF_FLOAT -> throw new UnsupportedOperationException("half_float is not supported by columnar batch indexing");
+        };
     }
 
     @Override

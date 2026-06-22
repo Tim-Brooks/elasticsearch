@@ -213,7 +213,8 @@ public class BatchBulkIT extends ESIntegTestCase {
             assertNoFailures(r);
             assertThat(r.getHits().getTotalHits().value(), equalTo((long) numDocs));
         });
-        // Sanity-check the values round-trip (the index-sorted segment is still queryable).
+        // Sanity-check the values round-trip (the index-sorted segment is still queryable). The fetch on an
+        // index-sorted segment reads _id field data, exercising the columnar _id binary doc values too.
         assertResponse(
             prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).addSort("value", SortOrder.DESC).setSize(numDocs),
             r -> {
@@ -224,6 +225,14 @@ public class BatchBulkIT extends ESIntegTestCase {
                 }
             }
         );
+        // GET reconstructs synthetic source, reading the high-cardinality keyword (BINARY doc values, columnar
+        // default), the numeric and date columns, and _id — confirming all column field types round-trip.
+        var getResponse = client().get(new org.elasticsearch.action.get.GetRequest(index).id("d-7")).actionGet();
+        assertTrue(getResponse.isExists());
+        Map<String, Object> source = getResponse.getSourceAsMap();
+        assertThat(source.get("name"), equalTo("n-7"));
+        assertThat(((Number) source.get("value")).longValue(), equalTo(7L));
+        assertThat(source.get("ts"), equalTo("2013-07-15 03:39:07"));
     }
 
     public void testMixedTypeNumericColumnStaysColumnar() throws IOException {

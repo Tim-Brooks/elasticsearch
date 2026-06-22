@@ -13,9 +13,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
+import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.InvertableType;
+import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
@@ -1497,26 +1499,39 @@ public final class KeywordFieldMapper extends FieldMapper {
         }
         final EicfStringColumn stringColumn = (EicfStringColumn) column;
         if (fieldType().usesBinaryDocValues()) {
-            // High-cardinality keyword: the value lives in BINARY doc values (a single value is stored as
-            // its raw bytes, matching MultiValuedBinaryDocValuesField.SeparateCount), accompanied by a
-            // <name>.counts numeric field carrying the per-document value count (always 1, single-valued).
-            out.addColumn(EicfLuceneColumns.binaryColumn(stringColumn, fullPath(), binaryDocValuesColumnFieldType()));
-            final int docCount = stringColumn.docCount();
-            final EicfLuceneColumns.LongColumnBuilder counts = EicfLuceneColumns.longColumnBuilder(
-                docCount,
-                fullPath() + MultiValuedBinaryDocValuesField.SeparateCount.COUNT_FIELD_SUFFIX,
-                countColumnFieldType(),
-                LongColumn.NumericKind.LONG
-            );
-            final SourceColumnCursor cursor = stringColumn.cursor();
-            while (cursor.advance()) {
-                if (cursor.type() == EirfType.ABSENT) {
-                    counts.addAbsent();
-                } else {
-                    counts.addLong(1L);
+            // High-cardinality keyword: values live in BINARY doc values. Reuse the document path's field
+            // type (see DocValuesFieldFactory.addBinaryField) so the columnar FieldInfo matches exactly.
+            if (dvFactory.isSingleValued()) {
+                // Single value per document → a plain BinaryDocValuesField holding the raw value bytes; no
+                // companion .counts field (matches addBinaryField for single-valued fields).
+                out.addColumn(EicfLuceneColumns.binaryColumn(stringColumn, fullPath(), BinaryDocValuesField.TYPE));
+            } else if (fieldType().usesArrayOrderBinaryDocValues()) {
+                // Multi-valued columnar keyword stores values via MultiValuedBinaryDocValuesField.ArrayOrderInlineNull,
+                // an in-document-order binary encoding the columnar path does not reproduce yet — fall back.
+                throw new UnsupportedOperationException(
+                    "columnar batch indexing for multi-valued high-cardinality keyword [" + fullPath() + "] is not supported"
+                );
+            } else {
+                // Multi-valued (non-columnar) MultiValuedBinaryDocValuesField.SeparateCount: BINARY values plus
+                // a <name>.counts numeric field carrying the per-document value count (1 here — single value per row).
+                out.addColumn(EicfLuceneColumns.binaryColumn(stringColumn, fullPath(), BinaryDocValuesField.TYPE));
+                final int docCount = stringColumn.docCount();
+                final EicfLuceneColumns.LongColumnBuilder counts = EicfLuceneColumns.longColumnBuilder(
+                    docCount,
+                    fullPath() + MultiValuedBinaryDocValuesField.SeparateCount.COUNT_FIELD_SUFFIX,
+                    COUNTS_FIELD_TYPE,
+                    LongColumn.NumericKind.LONG
+                );
+                final SourceColumnCursor cursor = stringColumn.cursor();
+                while (cursor.advance()) {
+                    if (cursor.type() == EirfType.ABSENT) {
+                        counts.addAbsent();
+                    } else {
+                        counts.addLong(1L);
+                    }
                 }
+                out.addColumn(counts.build());
             }
-            out.addColumn(counts.build());
         } else {
             // Low-cardinality keyword: SORTED/SORTED_SET doc values fed directly from the string column,
             // reusing the field's own Lucene field type.
@@ -1524,26 +1539,9 @@ public final class KeywordFieldMapper extends FieldMapper {
         }
     }
 
-    /** BINARY doc-values field type used to carry high-cardinality keyword values on the columnar path. */
-    private IndexableFieldType binaryDocValuesColumnFieldType() {
-        FieldType ft = new FieldType();
-        ft.setDocValuesType(DocValuesType.BINARY);
-        ft.setStored(fieldType.stored());
-        ft.freeze();
-        return ft;
-    }
-
-    /**
-     * NUMERIC doc-values field type for the {@code <name>.counts} companion of a high-cardinality keyword,
-     * carrying a range skip index to match {@link org.apache.lucene.document.NumericDocValuesField#indexedField}.
-     */
-    private IndexableFieldType countColumnFieldType() {
-        FieldType ft = new FieldType();
-        ft.setDocValuesType(DocValuesType.NUMERIC);
-        ft.setDocValuesSkipIndexType(DocValuesSkipIndexType.RANGE);
-        ft.freeze();
-        return ft;
-    }
+    // The <name>.counts companion field type for a multi-valued high-cardinality keyword, reusing the exact
+    // singleton the document path writes (NumericDocValuesField.indexedField — NUMERIC + range skip index).
+    private static final IndexableFieldType COUNTS_FIELD_TYPE = NumericDocValuesField.indexedField("f", 0L).fieldType();
 
     protected void parseCreateField(DocumentParserContext context) throws IOException {
         var value = context.parser().optimizedTextOrNull();
