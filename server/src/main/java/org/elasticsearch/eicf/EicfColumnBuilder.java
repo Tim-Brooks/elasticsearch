@@ -408,6 +408,7 @@ final class EicfColumnBuilder {
         @Override
         public void replayInto(UnionBuilder union) {
             BytesReference d = data.bytes();
+            offsets = ensureIntCapacity(offsets, count + 1);
             offsets[count] = dataLen;
             for (int i = 0; i < count; i++) {
                 if (isAbsentAt(i)) {
@@ -428,6 +429,9 @@ final class EicfColumnBuilder {
         @Override
         public EicfColumnData finish(int docCount) {
             assert count == docCount : "builder count " + count + " != docCount " + docCount;
+            // The trailing offset (index docCount) closes the last value; grow if docCount lands exactly
+            // on the current capacity (the per-add recordOffset only ensures capacity up to docCount).
+            offsets = ensureIntCapacity(offsets, count + 1);
             offsets[count] = dataLen;
             return new EicfColumnData(
                 kind,
@@ -484,6 +488,7 @@ final class EicfColumnBuilder {
         @Override
         public void replayInto(UnionBuilder union) {
             BytesReference d = data.bytes();
+            offsets = ensureIntCapacity(offsets, count + 1);
             offsets[count] = dataLen;
             for (int i = 0; i < count; i++) {
                 if (isAbsentAt(i)) {
@@ -499,6 +504,9 @@ final class EicfColumnBuilder {
         @Override
         public EicfColumnData finish(int docCount) {
             assert count == docCount : "builder count " + count + " != docCount " + docCount;
+            // The trailing offset (index docCount) closes the last value; grow if docCount lands exactly
+            // on the current capacity (the per-add recordOffset only ensures capacity up to docCount).
+            offsets = ensureIntCapacity(offsets, count + 1);
             offsets[count] = dataLen;
             return new EicfColumnData(
                 EicfColumnKind.ARRAY,
@@ -603,6 +611,9 @@ final class EicfColumnBuilder {
         @Override
         public EicfColumnData finish(int docCount) {
             assert count == docCount : "builder count " + count + " != docCount " + docCount;
+            // The trailing offset (index docCount) closes the last value; grow if docCount lands exactly
+            // on the current capacity (the per-add recordOffset only ensures capacity up to docCount).
+            offsets = ensureIntCapacity(offsets, count + 1);
             offsets[count] = dataLen;
             return new EicfColumnData(
                 EicfColumnKind.UNION,

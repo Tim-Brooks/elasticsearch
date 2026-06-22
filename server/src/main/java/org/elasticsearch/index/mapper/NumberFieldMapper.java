@@ -2598,11 +2598,11 @@ public class NumberFieldMapper extends FieldMapper {
         FieldType ft = new FieldType();
         final boolean hasSkipper = fieldType.indexType.hasDocValuesSkipper();
         if (fieldType().hasDocValues()) {
-            // Mirror parseCreateField: multi-value-capable fields (the default) use SORTED_NUMERIC — which
-            // is also what field data and index sorting (SortedNumericSortField) expect — while
-            // single-value fields use NUMERIC. The doc-values skipper, when enabled, must be reflected here
-            // too so the FieldInfo matches what the row path would write.
-            ft.setDocValuesType(docValuesParameters.multiValue() ? DocValuesType.SORTED_NUMERIC : DocValuesType.NUMERIC);
+            // ES numeric field data and index sorting are always SortedNumeric (a SortedNumericSortField),
+            // and the flush-time sorter strictly requires SORTED_NUMERIC doc values — so the columnar path
+            // must emit SORTED_NUMERIC regardless of the single-value optimization. The doc-values skipper,
+            // when enabled, must be reflected here too so the FieldInfo matches what the row path writes.
+            ft.setDocValuesType(DocValuesType.SORTED_NUMERIC);
             if (hasSkipper) {
                 ft.setDocValuesSkipIndexType(DocValuesSkipIndexType.RANGE);
             }

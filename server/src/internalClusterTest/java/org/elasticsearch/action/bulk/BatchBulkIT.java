@@ -145,21 +145,22 @@ public class BatchBulkIT extends ESIntegTestCase {
     }
 
     public void testBatchIndexingWithIndexSorting() throws IOException {
-        // Reproduces the production failure: with index sorting on numeric/date fields (and the
-        // doc-values skipper), the columnar path must write SORTED_NUMERIC doc values — matching the
-        // SortedNumericSortField the index sort builds — or segment flush fails the shard.
+        // Reproduces the production ClickBench failure: a columnar-mode index with index sorting on
+        // numeric/date fields and single-value doc values. ES numeric index sort is a
+        // SortedNumericSortField, so the columnar path must write SORTED_NUMERIC doc values — even when
+        // doc_values.multi_value is false — or segment flush fails the shard.
+        assumeTrue("columnar index mode feature flag must be enabled", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
         String index = "test-batch-index-sort";
         XContentBuilder mapping = JsonXContent.contentBuilder();
         mapping.startObject();
         {
             mapping.startObject("_doc");
-            mapping.startObject("_source").field("mode", "synthetic").endObject();
             mapping.field("dynamic", "strict");
             mapping.startObject("properties");
             {
-                mapping.startObject("name").field("type", "keyword").field("index", false).endObject();
-                mapping.startObject("value").field("type", "long").field("index", false).endObject();
-                mapping.startObject("ts").field("type", "date").field("format", "yyyy-MM-dd HH:mm:ss").field("index", false).endObject();
+                mapping.startObject("name").field("type", "keyword").endObject();
+                mapping.startObject("value").field("type", "long").endObject();
+                mapping.startObject("ts").field("type", "date").field("format", "yyyy-MM-dd HH:mm:ss").endObject();
             }
             mapping.endObject();
             mapping.endObject();
@@ -171,8 +172,9 @@ public class BatchBulkIT extends ESIntegTestCase {
                     Settings.builder()
                         .put("index.number_of_shards", 1)
                         .put("index.number_of_replicas", 0)
-                        .put("index.mapping.source.mode", "synthetic")
-                        .put("index.mapping.use_doc_values_skipper", true)
+                        .put("index.mode", "columnar")
+                        .put("index.mapping.doc_values.multi_value", false)
+                        .put("index.seq_no.index_options", "doc_values_only")
                         .putList("index.sort.field", "value", "ts")
                         .putList("index.sort.order", "desc", "asc")
                 )

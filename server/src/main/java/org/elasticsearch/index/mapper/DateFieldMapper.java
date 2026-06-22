@@ -1343,10 +1343,11 @@ public final class DateFieldMapper extends FieldMapper {
         FieldType ft = new FieldType();
         final boolean hasSkipper = fieldType().hasDocValuesSkipper();
         if (fieldType().hasDocValues()) {
-            // Multi-value-capable fields (the default) use SORTED_NUMERIC — what field data and index
-            // sorting (SortedNumericSortField) expect; single-value fields use NUMERIC. Reflect the
-            // doc-values skipper when enabled so the FieldInfo matches the row path.
-            ft.setDocValuesType(docValuesParameters.multiValue() ? DocValuesType.SORTED_NUMERIC : DocValuesType.NUMERIC);
+            // ES date/numeric field data and index sorting are always SortedNumeric (a SortedNumericSortField),
+            // and the flush-time sorter strictly requires SORTED_NUMERIC doc values — so emit SORTED_NUMERIC
+            // regardless of the single-value optimization. Reflect the doc-values skipper when enabled so the
+            // FieldInfo matches the row path.
+            ft.setDocValuesType(DocValuesType.SORTED_NUMERIC);
             if (hasSkipper) {
                 ft.setDocValuesSkipIndexType(DocValuesSkipIndexType.RANGE);
             }
