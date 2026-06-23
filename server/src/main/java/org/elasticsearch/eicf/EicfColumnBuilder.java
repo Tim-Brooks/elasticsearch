@@ -261,10 +261,11 @@ final class EicfColumnBuilder {
     private static final class FixedNumericBuilder extends BaseBuilder {
 
         private final byte kind;
-        private final RecyclerBytesStreamOutput data = newStream();
+        private final RecyclerBytesStreamOutput data;
 
         FixedNumericBuilder(byte kind) {
             this.kind = kind;
+            this.data = newStream();
         }
 
         @Override

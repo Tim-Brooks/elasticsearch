@@ -23,6 +23,8 @@ import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.eirf.EirfType;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.sourcebatch.SourceColumn;
 import org.elasticsearch.sourcebatch.SourceColumnCursor;
 import org.elasticsearch.xcontent.XContentString;
@@ -54,6 +56,8 @@ import java.util.Arrays;
  * fill mutable seq-no/version values from the engine.
  */
 public final class EicfLuceneColumns {
+
+    private static final Logger logger = LogManager.getLogger(EicfLuceneColumns.class);
 
     private EicfLuceneColumns() {}
 
@@ -157,14 +161,15 @@ public final class EicfLuceneColumns {
                     }
                 }
                 case EirfType.STRING -> {
+                    final String s = cursor.stringValue().string();
                     try {
-                        final String s = cursor.stringValue().string();
                         if (wantDouble) {
                             builder.addDouble(Double.parseDouble(s));
                         } else {
                             builder.addLong(Long.parseLong(s));
                         }
                     } catch (NumberFormatException e) {
+                        logger.info("failed to parse string [{}] as number", s, e);
                         builder.addAbsent();
                     }
                 }
