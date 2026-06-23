@@ -154,7 +154,17 @@ final class BulkBatchEncoders implements Releasable {
             // empty, and subsequent items skip encoding (see the disabled check above). The
             // encoder's scratch will be reset at the start of the next parseToScratch call, so we
             // don't need to clean up here.
-            logger.debug("EIRF encoding / routing extraction failed; abandoning batch for the rest of this bulk", e);
+            // Logged at WARN (not DEBUG) so columnar-indexing benchmarks can detect that the fast path was
+            // abandoned: a fallback here re-indexes the whole bulk via the row path, which is exactly what a
+            // columnar benchmark wants to know about (and avoid). Includes the index and the triggering item
+            // so the offending document/field can be identified.
+            logger.warn(
+                "columnar batch indexing: EIRF encoding / routing extraction failed for index [{}] item id [{}]; "
+                    + "abandoning the column batch and falling back to row-major for the rest of this bulk",
+                concreteIndex.getName(),
+                request.id(),
+                e
+            );
             disabled = true;
             return NOT_BATCHABLE;
         }

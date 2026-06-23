@@ -684,6 +684,105 @@ public class BatchBulkIT extends ESIntegTestCase {
         assertThat(((Number) source.get("CounterID")).intValue(), equalTo(3));
     }
 
+    // The exact document the user reported as still failing in the prod benchmark. Notable values:
+    // URLHash overflows signed long (unsigned 64-bit hash), FlashMinor2 is mapped `short` but carries the
+    // decimal string "700.169", and many keywords are empty strings.
+    private static final String CLICKBENCH_REAL_DOC = """
+        {
+          "WatchID": 8940174697547602584, "JavaEnable": 1, "Title": "Example Page Title", "GoodEvent": 1,
+          "EventTime": "2013-07-15 03:39:17", "EventDate": "2013-07-15", "CounterID": __CID__,
+          "ClientIP": 1701406667, "RegionID": 229, "UserID": 1502176461422705501, "CounterClass": 0,
+          "OS": 3, "UserAgent": 1, "URL": "http://example.com/page?param=value", "Referer": "http://example.com/",
+          "IsRefresh": 0, "RefererCategoryID": 0, "RefererRegionID": 0, "URLCategoryID": 0, "URLRegionID": 0,
+          "ResolutionWidth": 1920, "ResolutionHeight": 1080, "ResolutionDepth": 24, "FlashMajor": 11,
+          "FlashMinor": 7, "FlashMinor2": "700.169", "NetMajor": 0, "NetMinor": 0, "UserAgentMajor": 37,
+          "UserAgentMinor": "0", "CookieEnable": 1, "JavascriptEnable": 1, "IsMobile": 0, "MobilePhone": 0,
+          "MobilePhoneModel": "", "Params": "", "IPNetworkID": 0, "TraficSourceID": 0, "SearchEngineID": 0,
+          "SearchPhrase": "", "AdvEngineID": 0, "IsArtifical": 0, "WindowClientWidth": 1920,
+          "WindowClientHeight": 946, "ClientTimeZone": 180, "ClientEventTime": "2013-07-15 03:39:17",
+          "SilverlightVersion1": 0, "SilverlightVersion2": 0, "SilverlightVersion3": 0, "SilverlightVersion4": 0,
+          "PageCharset": "UTF-8", "CodeVersion": 1843712, "IsLink": 0, "IsDownload": 0, "IsNotBounce": 1,
+          "FUniqID": 7842017605334151337, "HID": 1140045505, "IsOldCounter": 0, "IsEvent": 0, "IsParameter": 0,
+          "DontCountHits": 0, "WithHash": 0, "HitColor": "W", "LocalEventTime": "2013-07-15 03:39:17", "Age": 0,
+          "Sex": 0, "Income": 0, "Interests": 0, "Robotness": 0, "RemoteIP": 1701406667, "WindowName": 1,
+          "OpenerName": -1, "HistoryLength": 1, "BrowserLanguage": "ru", "BrowserCountry": "RU",
+          "SocialNetwork": "", "SocialAction": "", "HTTPError": 0, "SendTiming": 0, "DNSTiming": 0,
+          "ConnectTiming": 0, "ResponseStartTiming": 0, "ResponseEndTiming": 0, "FetchTiming": 0,
+          "SocialSourceNetworkID": 0, "SocialSourcePage": "", "ParamPrice": -1, "ParamOrderID": "",
+          "ParamCurrency": "", "ParamCurrencyID": 0, "OpenstatServiceName": "", "OpenstatCampaignID": "",
+          "OpenstatAdID": "", "OpenstatSourceID": "", "UTMSource": "", "UTMMedium": "", "UTMCampaign": "",
+          "UTMContent": "", "UTMTerm": "", "FromTag": "", "HasGCLID": 0, "RefererHash": 0,
+          "URLHash": 14836490838675973022, "CLID": 0
+        }""";
+
+    public void testClickBenchRealDocumentViaBatchMode() throws IOException {
+        // Reproduces the still-failing prod benchmark using the user's exact document, indexed via the
+        // columnar batch path with the exact ClickBench mapping/settings/sort.
+        assumeTrue("columnar index mode feature flag must be enabled", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
+        String index = "hits-real";
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            mapping.field("dynamic", "strict");
+            mapping.startObject("properties");
+            for (String[] f : CLICKBENCH_FIELDS) {
+                mapping.startObject(f[0]).field("type", f[1]);
+                if (f[2].isEmpty() == false) {
+                    mapping.field("format", f[2]);
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+            mapping.endObject();
+        }
+        mapping.endObject();
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put("index.mode", "columnar")
+                        .put("index.mapping.doc_values.multi_value", false)
+                        .put("index.seq_no.index_options", "doc_values_only")
+                        .put("index.merge.policy.type", "time_based")
+                        .putList("index.sort.field", "CounterID", "EventDate", "UserID", "EventTime", "WatchID")
+                        .putList("index.sort.order", "desc", "desc", "desc", "desc", "desc")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+        String coordinatingNode = findCoordinatingNode();
+
+        int numDocs = 10;
+        try (var mockLog = MockLog.capture(ShardBatchMapper.class)) {
+            mockLog.addExpectation(
+                new MockLog.UnseenEventExpectation(
+                    "no columnar fallback",
+                    ShardBatchMapper.class.getCanonicalName(),
+                    Level.WARN,
+                    "*failed to assemble column batch*"
+                )
+            );
+            BulkRequest bulkRequest = new BulkRequest();
+            for (int i = 0; i < numDocs; i++) {
+                bulkRequest.add(
+                    new IndexRequest(index).id("d-" + i)
+                        .source(CLICKBENCH_REAL_DOC.replace("__CID__", Integer.toString(62290040 + i)), XContentType.JSON)
+                );
+            }
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+            assertNoFailures(bulkResponse);
+            mockLog.assertAllExpectationsMatched();
+        }
+        refresh(index);
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), r -> {
+            assertNoFailures(r);
+            assertThat(r.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+    }
+
     private static String clickBenchMessyDoc(int i) {
         StringBuilder sb = new StringBuilder("{");
         boolean first = true;

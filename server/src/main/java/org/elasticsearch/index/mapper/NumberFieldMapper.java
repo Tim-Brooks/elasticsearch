@@ -2604,10 +2604,17 @@ public class NumberFieldMapper extends FieldMapper {
     private static final IndexableFieldType DOUBLE_POINT_TYPE = new DoublePoint("f", 0d).fieldType();
 
     /**
-     * Returns the Lucene {@link IndexableFieldType} for this field's column, reusing the document path's
-     * field-type singletons. ES numeric field data and index sorting are always SortedNumeric, so the
-     * column uses the multi-valued (SORTED_NUMERIC) variant — the single-valued NUMERIC representation is
-     * rejected by the index sorter (`validateIndexSortDVType`).
+     * Returns the Lucene {@link IndexableFieldType} for this field's column. ES builds a
+     * {@link org.apache.lucene.search.SortedNumericSortField} for every numeric index sort
+     * ({@code IndexNumericFieldData.sortField}), which Lucene requires be backed by SORTED_NUMERIC doc
+     * values, so the column uses the multi-valued (SORTED_NUMERIC) variant.
+     *
+     * <p>NOTE: with the {@code extended_doc_values_options} feature flag enabled and
+     * {@code index.mapping.doc_values.multi_value: false}, the row/document path instead writes
+     * single-valued NUMERIC doc values — which is itself incompatible with that SortedNumericSortField
+     * index sort (it fails on the pure row path too, independent of batch indexing). See
+     * {@code ColumnarIndexSortRowPathIT}. Matching the column path to NUMERIC there does not help; the
+     * mismatch is between the row path and the index-sort field type and must be fixed in core.
      */
     private IndexableFieldType columnFieldType(LongColumn.NumericKind kind) {
         final IndexType it = fieldType.indexType;
