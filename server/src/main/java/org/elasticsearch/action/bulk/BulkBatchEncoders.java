@@ -11,11 +11,14 @@ package org.elasticsearch.action.bulk;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.routing.IndexRouting;
 import org.elasticsearch.cluster.routing.RoutingExtractor;
+import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.core.Releasables;
 import org.elasticsearch.eicf.EicfEncoder;
 import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.index.Index;
@@ -78,8 +81,21 @@ final class BulkBatchEncoders implements Releasable {
     private record PendingAttachment(IndexRequest indexRequest, int rowIndex) {}
 
     private final Map<Index, IndexState> indexStates = new HashMap<>();
+    /** Recycler backing every encoder's column data streams; pages return here when batches are released. */
+    private final Recycler<BytesRef> recycler;
+    /**
+     * Batches produced by {@link #finalizeBatches}, each owning the recycled pages moved out of its column
+     * builders. They back the {@link SourceBatch}es attached to in-flight {@link BulkShardRequest}s, so they
+     * are released only once the bulk completes (see {@link #releaseFinalizedBatches}) rather than in
+     * {@link #close}.
+     */
+    private final List<SourceBatch> finalizedBatches = new ArrayList<>();
     private boolean disabled;
     private boolean closed;
+
+    BulkBatchEncoders(Recycler<BytesRef> recycler) {
+        this.recycler = recycler;
+    }
 
     /**
      * Returns true if every item in {@code bulkRequest} is structurally eligible to be EIRF-encoded:
@@ -137,7 +153,7 @@ final class BulkBatchEncoders implements Releasable {
         }
         IndexState state = indexStates.computeIfAbsent(
             concreteIndex,
-            idx -> new IndexState(new EicfEncoder(), indexRouting.newRoutingExtractor())
+            idx -> new IndexState(new EicfEncoder(recycler), indexRouting.newRoutingExtractor())
         );
         if (state.extractor != null) {
             state.extractor.reset();
@@ -200,6 +216,7 @@ final class BulkBatchEncoders implements Releasable {
                 }
                 ShardId shardId = entry.getKey();
                 SourceBatch batch = state.encoder.buildPartition(shardId.getId());
+                finalizedBatches.add(batch);
                 batchesByShard.put(shardId, batch);
                 for (PendingAttachment attachment : pending) {
                     attachment.indexRequest.indexSource().setEirfRow(batch, attachment.rowIndex);
@@ -209,6 +226,13 @@ final class BulkBatchEncoders implements Releasable {
         return batchesByShard;
     }
 
+    /**
+     * Releases the column builders whose bytes were never moved out into a batch (partitions for
+     * non-batchable shards, or columns left behind when encoding was {@link #disabled()} mid-bulk),
+     * returning their pages to the recycler. This is safe to call while finalized batches are still in
+     * flight: those batches own their own moved-out pages and are released separately via
+     * {@link #releaseFinalizedBatches}. Idempotent.
+     */
     @Override
     public void close() {
         if (closed) {
@@ -219,5 +243,16 @@ final class BulkBatchEncoders implements Releasable {
             state.encoder.close();
         }
         indexStates.clear();
+    }
+
+    /**
+     * Releases the batches produced by {@link #finalizeBatches}, returning the recycled pages they own to
+     * the recycler. Must be called only once the bulk has completed — i.e. after every {@link BulkShardRequest}
+     * that references one of these batches has finished — since a co-located shard indexes directly from the
+     * batch. Idempotent.
+     */
+    void releaseFinalizedBatches() {
+        Releasables.close(finalizedBatches);
+        finalizedBatches.clear();
     }
 }

@@ -45,6 +45,7 @@ import org.elasticsearch.cluster.routing.SplitShardCountSummary;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
 import org.elasticsearch.common.collect.Iterators;
+import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.common.util.concurrent.AtomicArray;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
@@ -61,6 +62,7 @@ import org.elasticsearch.node.NodeClosedException;
 import org.elasticsearch.sourcebatch.SourceBatch;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.transport.BytesRefRecycler;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -126,7 +128,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         ActionListener<BulkResponse> listener,
         FailureStoreMetrics failureStoreMetrics,
         DataStreamFailureStoreSettings dataStreamFailureStoreSettings,
-        boolean clusterHasFailureStoreFeature
+        boolean clusterHasFailureStoreFeature,
+        PageCacheRecycler pageCacheRecycler
     ) {
         this(
             task,
@@ -145,7 +148,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             new FailureStoreDocumentConverter(),
             failureStoreMetrics,
             dataStreamFailureStoreSettings,
-            clusterHasFailureStoreFeature
+            clusterHasFailureStoreFeature,
+            pageCacheRecycler
         );
     }
 
@@ -166,7 +170,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         FailureStoreDocumentConverter failureStoreDocumentConverter,
         FailureStoreMetrics failureStoreMetrics,
         DataStreamFailureStoreSettings dataStreamFailureStoreSettings,
-        boolean clusterHasFailureStoreFeature
+        boolean clusterHasFailureStoreFeature,
+        PageCacheRecycler pageCacheRecycler
     ) {
         super(listener);
         this.task = task;
@@ -174,7 +179,6 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
         this.clusterService = clusterService;
         this.responses = responses;
         this.bulkRequest = bulkRequest;
-        this.listener = listener;
         this.startTimeNanos = startTimeNanos;
         this.executor = executor;
         this.relativeTimeProvider = relativeTimeProvider;
@@ -196,10 +200,31 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             && clusterService.state().getMinTransportVersion().supports(BulkShardRequest.BULK_SHARD_BATCH)
             && ShardBatchIndexer.BATCH_INDEXING_FEATURE_FLAG.isEnabled()
             && BulkBatchEncoders.isBulkBatchEligible(bulkRequest)) {
-            batchEncoders = new BulkBatchEncoders();
+            final BulkBatchEncoders encoders = new BulkBatchEncoders(new BytesRefRecycler(pageCacheRecycler));
+            this.batchEncoders = encoders;
+            // Return the recycled pages backing the column batches to the recycler once the bulk completes,
+            // on both the success and failure paths. releaseFinalizedBatches() frees the pages owned by the
+            // per-shard batches (which stay alive until every referencing BulkShardRequest has finished), and
+            // close() frees any column builders whose bytes were never moved into a batch (idempotent with the
+            // eager closeBatchEncoders() calls during shard execution).
+            this.listener = ActionListener.releaseAfter(listener, () -> {
+                encoders.releaseFinalizedBatches();
+                encoders.close();
+            });
         } else {
-            batchEncoders = null;
+            this.batchEncoders = null;
+            this.listener = listener;
         }
+    }
+
+    /**
+     * Routes failures through {@link #listener}, which (when batch encoding is active) is wrapped to return
+     * recycled pages to the recycler on completion. {@link ActionRunnable}'s default would instead use the
+     * raw listener passed to {@code super}, bypassing that release.
+     */
+    @Override
+    public void onFailure(Exception e) {
+        listener.onFailure(e);
     }
 
     @Override

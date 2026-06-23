@@ -9,10 +9,12 @@
 
 package org.elasticsearch.eicf;
 
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
+import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.transport.BytesRefRecycler;
@@ -43,10 +45,20 @@ import java.util.Arrays;
  */
 final class EicfColumnBuilder {
 
+    /** Recycler backing the per-column data streams; pages are returned when a builder is finished or discarded. */
+    private final Recycler<BytesRef> recycler;
     /** The active typed builder, or {@code null} until the first value (or {@link #finish}). */
     private TypedBuilder current;
     /** Absent documents seen before the first value, backfilled when a typed builder is created. */
     private int leadingAbsents;
+
+    EicfColumnBuilder() {
+        this(BytesRefRecycler.NON_RECYCLING_8K_INSTANCE);
+    }
+
+    EicfColumnBuilder(Recycler<BytesRef> recycler) {
+        this.recycler = recycler;
+    }
 
     void addAbsent() {
         if (current == null) {
@@ -112,7 +124,7 @@ final class EicfColumnBuilder {
      */
     EicfColumnData finish(int docCount) {
         if (current == null) {
-            FixedNumericBuilder allAbsent = new FixedNumericBuilder(EicfColumnKind.LONG);
+            FixedNumericBuilder allAbsent = new FixedNumericBuilder(EicfColumnKind.LONG, recycler);
             for (int i = 0; i < leadingAbsents; i++) {
                 allAbsent.addAbsent();
             }
@@ -121,9 +133,21 @@ final class EicfColumnBuilder {
         return current.finish(docCount);
     }
 
+    /**
+     * Releases the active typed builder's data stream without producing a column, returning its pages to
+     * the recycler. Safe to call on a builder that was already {@link #finish finished} (its pages have
+     * been moved out, so the underlying {@code close()} is a no-op) and on a builder that never received a
+     * value ({@code current == null}).
+     */
+    void discard() {
+        if (current != null) {
+            current.discard();
+        }
+    }
+
     private void ensure(byte kind) {
         if (current == null) {
-            current = newTyped(kind);
+            current = newTyped(kind, recycler);
             for (int i = 0; i < leadingAbsents; i++) {
                 current.addAbsent();
             }
@@ -137,7 +161,7 @@ final class EicfColumnBuilder {
         if (current != null && current.kind() == EicfColumnKind.UNION) {
             return;
         }
-        UnionBuilder union = new UnionBuilder();
+        UnionBuilder union = new UnionBuilder(recycler);
         if (current != null) {
             current.replayInto(union);
             current.discard();
@@ -150,12 +174,12 @@ final class EicfColumnBuilder {
         current = union;
     }
 
-    private static TypedBuilder newTyped(byte kind) {
+    private static TypedBuilder newTyped(byte kind, Recycler<BytesRef> recycler) {
         return switch (kind) {
-            case EicfColumnKind.LONG, EicfColumnKind.DOUBLE -> new FixedNumericBuilder(kind);
+            case EicfColumnKind.LONG, EicfColumnKind.DOUBLE -> new FixedNumericBuilder(kind, recycler);
             case EicfColumnKind.BOOL -> new BoolBuilder();
-            case EicfColumnKind.STRING, EicfColumnKind.BINARY -> new VarBuilder(kind);
-            case EicfColumnKind.ARRAY -> new ArrayBuilder();
+            case EicfColumnKind.STRING, EicfColumnKind.BINARY -> new VarBuilder(kind, recycler);
+            case EicfColumnKind.ARRAY -> new ArrayBuilder(recycler);
             default -> throw new IllegalArgumentException("No typed builder for kind " + EicfColumnKind.name(kind));
         };
     }
@@ -263,9 +287,9 @@ final class EicfColumnBuilder {
         private final byte kind;
         private final RecyclerBytesStreamOutput data;
 
-        FixedNumericBuilder(byte kind) {
+        FixedNumericBuilder(byte kind, Recycler<BytesRef> recycler) {
             this.kind = kind;
-            this.data = newStream();
+            this.data = newStream(recycler);
         }
 
         @Override
@@ -364,12 +388,13 @@ final class EicfColumnBuilder {
     /** STRING / BINARY: raw bytes plus an offset vector. */
     private static final class VarBuilder extends BaseBuilder {
         private final byte kind;
-        private final RecyclerBytesStreamOutput data = newStream();
+        private final RecyclerBytesStreamOutput data;
         private int[] offsets = new int[16];
         private int dataLen;
 
-        VarBuilder(byte kind) {
+        VarBuilder(byte kind, Recycler<BytesRef> recycler) {
             this.kind = kind;
+            this.data = newStream(recycler);
         }
 
         @Override
@@ -452,10 +477,14 @@ final class EicfColumnBuilder {
 
     /** ARRAY: packed bytes plus a per-document array-type vector and an offset vector. */
     private static final class ArrayBuilder extends BaseBuilder {
-        private final RecyclerBytesStreamOutput data = newStream();
+        private final RecyclerBytesStreamOutput data;
         private int[] offsets = new int[16];
         private byte[] typeVec = new byte[16];
         private int dataLen;
+
+        ArrayBuilder(Recycler<BytesRef> recycler) {
+            this.data = newStream(recycler);
+        }
 
         @Override
         public byte kind() {
@@ -527,10 +556,14 @@ final class EicfColumnBuilder {
 
     /** UNION: a per-document {@link EirfType} vector, an offset vector, and a dense value buffer. */
     private static final class UnionBuilder extends BaseBuilder {
-        private final RecyclerBytesStreamOutput data = newStream();
+        private final RecyclerBytesStreamOutput data;
         private int[] offsets = new int[16];
         private byte[] typeVec = new byte[16];
         private int dataLen;
+
+        UnionBuilder(Recycler<BytesRef> recycler) {
+            this.data = newStream(recycler);
+        }
 
         @Override
         public byte kind() {
@@ -632,8 +665,8 @@ final class EicfColumnBuilder {
         }
     }
 
-    private static RecyclerBytesStreamOutput newStream() {
-        return new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_8K_INSTANCE);
+    private static RecyclerBytesStreamOutput newStream(Recycler<BytesRef> recycler) {
+        return new RecyclerBytesStreamOutput(recycler);
     }
 
     private static void writeLongLE(RecyclerBytesStreamOutput out, long value) {

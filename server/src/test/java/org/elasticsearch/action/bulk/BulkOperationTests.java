@@ -51,6 +51,7 @@ import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.common.util.concurrent.AtomicArray;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
@@ -1310,7 +1311,8 @@ public class BulkOperationTests extends ESTestCase {
             failureStoreDocumentConverter,
             FailureStoreMetrics.NOOP,
             dataStreamFailureStoreSettings,
-            failureStoreNodeFeatureEnabled
+            failureStoreNodeFeatureEnabled,
+            PageCacheRecycler.NON_RECYCLING_INSTANCE
         );
     }
 

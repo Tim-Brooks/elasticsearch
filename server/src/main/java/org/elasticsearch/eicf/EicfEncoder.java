@@ -9,14 +9,17 @@
 
 package org.elasticsearch.eicf;
 
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
 import org.elasticsearch.eirf.EirfEncoder;
 import org.elasticsearch.eirf.EirfSchema;
 import org.elasticsearch.eirf.EirfType;
+import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.XContentString;
@@ -66,6 +69,9 @@ public final class EicfEncoder implements Releasable {
 
     private final EirfSchema schema;
 
+    /** Recycler backing the per-column data streams created by every {@link EicfColumnBuilder}. */
+    private final Recycler<BytesRef> recycler;
+
     /** Per-partition column builders (one per leaf) plus that partition's committed doc count. */
     private Partition[] partitions;
 
@@ -85,6 +91,11 @@ public final class EicfEncoder implements Releasable {
     private String[] cachedPath;
 
     public EicfEncoder() {
+        this(BytesRefRecycler.NON_RECYCLING_8K_INSTANCE);
+    }
+
+    public EicfEncoder(Recycler<BytesRef> recycler) {
+        this.recycler = recycler;
         this.schema = new EirfSchema();
         this.partitions = new Partition[INITIAL_PARTITION_CAPACITY];
         this.scratchType = new byte[INITIAL_CAPACITY];
@@ -192,6 +203,17 @@ public final class EicfEncoder implements Releasable {
 
     @Override
     public void close() {
+        // Release any column builder whose bytes were never moved out via buildPartition (e.g. partitions
+        // for shards marked non-batchable, or columns left behind when encoding was disabled mid-bulk),
+        // returning their pages to the recycler. Builders whose bytes were already moved out are a no-op
+        // here (their stream's pages were transferred to the produced EicfBatch).
+        for (Partition partition : partitions) {
+            if (partition != null) {
+                for (EicfColumnBuilder builder : partition.builders) {
+                    builder.discard();
+                }
+            }
+        }
         Arrays.fill(partitions, null);
     }
 
@@ -361,9 +383,9 @@ public final class EicfEncoder implements Releasable {
      * builder is back-filled with {@code partition.docCount} absent entries to account for documents
      * committed to this partition before the column first appeared in the schema.
      */
-    private static void ensurePartitionBuilders(Partition partition, int size) {
+    private void ensurePartitionBuilders(Partition partition, int size) {
         while (partition.builders.size() < size) {
-            EicfColumnBuilder builder = new EicfColumnBuilder();
+            EicfColumnBuilder builder = new EicfColumnBuilder(recycler);
             for (int i = 0; i < partition.docCount; i++) {
                 builder.addAbsent();
             }

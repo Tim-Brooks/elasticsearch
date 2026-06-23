@@ -44,6 +44,7 @@ import org.elasticsearch.cluster.metadata.ProjectMetadata;
 import org.elasticsearch.cluster.project.ProjectResolver;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.common.util.concurrent.AtomicArray;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.features.FeatureService;
@@ -91,6 +92,7 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
     private final OriginSettingClient rolloverClient;
     private final FailureStoreMetrics failureStoreMetrics;
     private final DataStreamFailureStoreSettings dataStreamFailureStoreSettings;
+    private final PageCacheRecycler pageCacheRecycler;
 
     @Inject
     public TransportBulkAction(
@@ -106,7 +108,8 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
         ProjectResolver projectResolver,
         FailureStoreMetrics failureStoreMetrics,
         DataStreamFailureStoreSettings dataStreamFailureStoreSettings,
-        FeatureService featureService
+        FeatureService featureService,
+        PageCacheRecycler pageCacheRecycler
     ) {
         this(
             threadPool,
@@ -122,7 +125,8 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
             threadPool::relativeTimeInNanos,
             failureStoreMetrics,
             dataStreamFailureStoreSettings,
-            featureService
+            featureService,
+            pageCacheRecycler
         );
     }
 
@@ -140,7 +144,8 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
         LongSupplier relativeTimeProvider,
         FailureStoreMetrics failureStoreMetrics,
         DataStreamFailureStoreSettings dataStreamFailureStoreSettings,
-        FeatureService featureService
+        FeatureService featureService,
+        PageCacheRecycler pageCacheRecycler
     ) {
         this(
             TYPE,
@@ -158,7 +163,8 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
             relativeTimeProvider,
             failureStoreMetrics,
             dataStreamFailureStoreSettings,
-            featureService
+            featureService,
+            pageCacheRecycler
         );
     }
 
@@ -178,7 +184,8 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
         LongSupplier relativeTimeProvider,
         FailureStoreMetrics failureStoreMetrics,
         DataStreamFailureStoreSettings dataStreamFailureStoreSettings,
-        FeatureService featureService
+        FeatureService featureService,
+        PageCacheRecycler pageCacheRecycler
     ) {
         super(
             bulkAction,
@@ -200,6 +207,7 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
         this.indexNameExpressionResolver = indexNameExpressionResolver;
         this.rolloverClient = new OriginSettingClient(client, LAZY_ROLLOVER_ORIGIN);
         this.failureStoreMetrics = failureStoreMetrics;
+        this.pageCacheRecycler = pageCacheRecycler;
     }
 
     public static <Response extends ReplicationResponse & WriteResponse> ActionListener<BulkResponse> unwrappingSingleItemBulkResponse(
@@ -664,7 +672,8 @@ public class TransportBulkAction extends TransportAbstractBulkAction {
             listener,
             failureStoreMetrics,
             dataStreamFailureStoreSettings,
-            clusterSupportsFailureStore
+            clusterSupportsFailureStore,
+            pageCacheRecycler
         ).run();
     }
 

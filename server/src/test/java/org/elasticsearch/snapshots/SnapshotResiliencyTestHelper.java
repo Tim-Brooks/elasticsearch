@@ -874,7 +874,8 @@ public class SnapshotResiliencyTestHelper {
                             public boolean clusterHasFeature(ClusterState state, NodeFeature feature) {
                                 return DataStream.DATA_STREAM_FAILURE_STORE_FEATURE.equals(feature);
                             }
-                        }
+                        },
+                        PageCacheRecycler.NON_RECYCLING_INSTANCE
                     )
                 );
                 final TransportShardBulkAction transportShardBulkAction = new TransportShardBulkAction(
