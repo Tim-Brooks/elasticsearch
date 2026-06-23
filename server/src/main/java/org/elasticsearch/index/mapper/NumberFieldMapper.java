@@ -2573,7 +2573,7 @@ public class NumberFieldMapper extends FieldMapper {
             // Anything else (a heterogeneous UNION, string-encoded numbers, explicit nulls, or a
             // long/double mismatch) is rebuilt into a homogeneous numeric EICF column document-by-document
             // — numerics coerced, strings parsed best-effort, other types left absent — then wrapped.
-            out.addColumn(EicfLuceneColumns.convertToNumeric(column, fullPath(), columnFieldType(kind), kind));
+            out.addColumn(EicfLuceneColumns.convertToNumeric(column, fullPath(), columnFieldType(kind), kind, nullValue));
         }
     }
 

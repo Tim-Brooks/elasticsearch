@@ -260,7 +260,13 @@ public class EicfLuceneColumnsTests extends ESTestCase {
             )
         ) {
             assertTrue("expected a UNION column", column(batch, 0) instanceof EicfUnionColumn);
-            LongColumn col = EicfLuceneColumns.convertToNumeric(column(batch, 0), "v", NUMERIC_FIELD_TYPE, LongColumn.NumericKind.LONG);
+            LongColumn col = EicfLuceneColumns.convertToNumeric(
+                column(batch, 0),
+                "v",
+                NUMERIC_FIELD_TYPE,
+                LongColumn.NumericKind.LONG,
+                null
+            );
             assertEquals(LongColumn.NumericKind.LONG, col.numericKind());
             assertEquals(Column.Density.SPARSE, col.density());
 
@@ -291,7 +297,13 @@ public class EicfLuceneColumnsTests extends ESTestCase {
             )
         ) {
             assertTrue("expected a UNION column", column(batch, 0) instanceof EicfUnionColumn);
-            LongColumn col = EicfLuceneColumns.convertToNumeric(column(batch, 0), "v", NUMERIC_FIELD_TYPE, LongColumn.NumericKind.DOUBLE);
+            LongColumn col = EicfLuceneColumns.convertToNumeric(
+                column(batch, 0),
+                "v",
+                NUMERIC_FIELD_TYPE,
+                LongColumn.NumericKind.DOUBLE,
+                null
+            );
             assertEquals(LongColumn.NumericKind.DOUBLE, col.numericKind());
             assertEquals(Column.Density.SPARSE, col.density());
 
@@ -314,7 +326,13 @@ public class EicfLuceneColumnsTests extends ESTestCase {
                 XContentType.JSON
             )
         ) {
-            LongColumn col = EicfLuceneColumns.convertToNumeric(column(batch, 0), "v", NUMERIC_FIELD_TYPE, LongColumn.NumericKind.LONG);
+            LongColumn col = EicfLuceneColumns.convertToNumeric(
+                column(batch, 0),
+                "v",
+                NUMERIC_FIELD_TYPE,
+                LongColumn.NumericKind.LONG,
+                null
+            );
             assertEquals(Column.Density.DENSE, col.density());
 
             LongValuesCursor values = col.values();
@@ -322,6 +340,157 @@ public class EicfLuceneColumnsTests extends ESTestCase {
             assertEquals(1L, values.nextLong());
             assertEquals(2L, values.nextLong());
             assertEquals(3L, values.nextLong());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // tryParseAsciiLong: UTF-8 byte-level long fast path
+    // -------------------------------------------------------------------------
+
+    /** Asserts the fast path parses {@code s} to {@code expected}, and that it agrees with {@link Long#parseLong}. */
+    private static void assertParsesLong(String s, long expected) {
+        long[] out = new long[1];
+        byte[] b = s.getBytes(StandardCharsets.UTF_8);
+        assertEquals("expected PARSE_LONG for [" + s + "]", 0 /* PARSE_LONG */, EicfLuceneColumns.tryParseAsciiLong(b, 0, b.length, out));
+        assertEquals("value for [" + s + "]", expected, out[0]);
+        assertEquals("must agree with Long.parseLong for [" + s + "]", Long.parseLong(s), out[0]);
+    }
+
+    private static int parseResult(String s) {
+        byte[] b = s.getBytes(StandardCharsets.UTF_8);
+        return EicfLuceneColumns.tryParseAsciiLong(b, 0, b.length, new long[1]);
+    }
+
+    public void testTryParseAsciiLongPlainIntegers() {
+        assertParsesLong("0", 0L);
+        assertParsesLong("7", 7L);
+        assertParsesLong("-7", -7L);
+        assertParsesLong("+7", 7L);
+        assertParsesLong("007", 7L); // leading zeros, matching Long.parseLong
+        assertParsesLong("123456789", 123456789L);
+        assertParsesLong("-123456789", -123456789L);
+    }
+
+    public void testTryParseAsciiLongBoundaries() {
+        assertParsesLong(Long.toString(Long.MAX_VALUE), Long.MAX_VALUE);
+        assertParsesLong(Long.toString(Long.MIN_VALUE), Long.MIN_VALUE);
+    }
+
+    public void testTryParseAsciiLongOverflowFallsBack() {
+        // One past the boundaries, and a clearly-too-long string: all must fall back rather than truncate.
+        assertEquals(2 /* PARSE_FALLBACK */, parseResult("9223372036854775808")); // Long.MAX_VALUE + 1
+        assertEquals(2 /* PARSE_FALLBACK */, parseResult("-9223372036854775809")); // Long.MIN_VALUE - 1
+        assertEquals(2 /* PARSE_FALLBACK */, parseResult("99999999999999999999999"));
+    }
+
+    public void testTryParseAsciiLongDecimalAndExponent() {
+        assertEquals(1 /* PARSE_DECIMAL */, parseResult("2.5"));
+        assertEquals(1 /* PARSE_DECIMAL */, parseResult("-3.9"));
+        assertEquals(1 /* PARSE_DECIMAL */, parseResult("1e3"));
+        assertEquals(1 /* PARSE_DECIMAL */, parseResult("1E3"));
+        assertEquals(1 /* PARSE_DECIMAL */, parseResult("5.")); // trailing dot, like the row path's BigDecimal coercion
+        assertEquals(1 /* PARSE_DECIMAL */, parseResult(".5"));
+    }
+
+    public void testTryParseAsciiLongMalformedFallsBack() {
+        assertEquals(2 /* PARSE_FALLBACK */, parseResult("+"));
+        assertEquals(2 /* PARSE_FALLBACK */, parseResult("-"));
+        assertEquals(2 /* PARSE_FALLBACK */, parseResult("oops"));
+        assertEquals(2 /* PARSE_FALLBACK */, parseResult("1_000")); // underscore not accepted by Long.parseLong either
+        assertEquals(2 /* PARSE_FALLBACK */, parseResult("12 "));
+        // Non-ASCII (Arabic-Indic) digits: byte parser bails so the caller can defer to Long.parseLong's semantics.
+        assertEquals(2 /* PARSE_FALLBACK */, parseResult("٠١"));
+    }
+
+    public void testTryParseAsciiLongHonoursOffsetAndLength() {
+        // Parse only the "42" slice embedded in a larger buffer.
+        byte[] b = "xx42yy".getBytes(StandardCharsets.UTF_8);
+        long[] out = new long[1];
+        assertEquals(0 /* PARSE_LONG */, EicfLuceneColumns.tryParseAsciiLong(b, 2, 2, out));
+        assertEquals(42L, out[0]);
+    }
+
+    public void testConvertDecimalStringToLongTruncates() throws IOException {
+        // Strings that hold a decimal/exponent are coerced to long by parsing as a double then truncating,
+        // matching a real double value and the row path's coerce behavior — without a thrown exception.
+        try (
+            EicfBatch batch = EicfEncoder.encode(
+                List.of(
+                    new BytesArray("{\"v\":\"2.5\"}"),
+                    new BytesArray("{\"v\":\"-3.9\"}"),
+                    new BytesArray("{\"v\":\"1e3\"}"),
+                    new BytesArray("{\"v\":\"7\"}")
+                ),
+                XContentType.JSON
+            )
+        ) {
+            LongColumn col = EicfLuceneColumns.convertToNumeric(
+                column(batch, 0),
+                "v",
+                NUMERIC_FIELD_TYPE,
+                LongColumn.NumericKind.LONG,
+                null
+            );
+            assertEquals(Column.Density.DENSE, col.density());
+
+            LongValuesCursor values = col.values();
+            assertEquals(4, values.size());
+            assertEquals("2.5 truncates to 2", 2L, values.nextLong());
+            assertEquals("-3.9 truncates to -3", -3L, values.nextLong());
+            assertEquals("1e3 parses to 1000", 1000L, values.nextLong());
+            assertEquals("plain integer string still parses", 7L, values.nextLong());
+        }
+    }
+
+    public void testConvertReplacesNullAndEmptyStringWithNullValue() throws IOException {
+        // long, explicit null, empty string, genuinely-absent doc. With a configured null_value, the
+        // explicit null and the empty string become that value; the absent doc stays absent.
+        try (
+            EicfBatch batch = EicfEncoder.encode(
+                List.of(
+                    new BytesArray("{\"v\":10}"),
+                    new BytesArray("{\"v\":null}"),
+                    new BytesArray("{\"v\":\"\"}"),
+                    new BytesArray("{\"other\":1}")
+                ),
+                XContentType.JSON
+            )
+        ) {
+            LongColumn col = EicfLuceneColumns.convertToNumeric(column(batch, 0), "v", NUMERIC_FIELD_TYPE, LongColumn.NumericKind.LONG, 7L);
+            assertEquals(Column.Density.SPARSE, col.density());
+
+            LongTupleCursor tuples = col.tuples();
+            assertEquals(0, tuples.nextDoc());
+            assertEquals(10L, tuples.longValue());
+            assertEquals(1, tuples.nextDoc());
+            assertEquals("explicit null becomes null_value", 7L, tuples.longValue());
+            assertEquals(2, tuples.nextDoc());
+            assertEquals("empty string becomes null_value", 7L, tuples.longValue());
+            assertEquals("absent doc stays absent", DocIdSetIterator.NO_MORE_DOCS, tuples.nextDoc());
+        }
+    }
+
+    public void testConvertWithoutNullValueLeavesNullAndEmptyStringAbsent() throws IOException {
+        // Same shape, but with no null_value configured (null): explicit null and empty string are absent.
+        try (
+            EicfBatch batch = EicfEncoder.encode(
+                List.of(new BytesArray("{\"v\":10}"), new BytesArray("{\"v\":null}"), new BytesArray("{\"v\":\"\"}")),
+                XContentType.JSON
+            )
+        ) {
+            LongColumn col = EicfLuceneColumns.convertToNumeric(
+                column(batch, 0),
+                "v",
+                NUMERIC_FIELD_TYPE,
+                LongColumn.NumericKind.LONG,
+                null
+            );
+            assertEquals(Column.Density.SPARSE, col.density());
+
+            LongTupleCursor tuples = col.tuples();
+            assertEquals(0, tuples.nextDoc());
+            assertEquals(10L, tuples.longValue());
+            assertEquals("null and empty string are absent when no null_value", DocIdSetIterator.NO_MORE_DOCS, tuples.nextDoc());
         }
     }
 

@@ -27,6 +27,7 @@ import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.sourcebatch.SourceColumn;
 import org.elasticsearch.sourcebatch.SourceColumnCursor;
+import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentString;
 
 import java.util.Arrays;
@@ -136,14 +137,29 @@ public final class EicfLuceneColumns {
      * {@link EicfColumn} is then wrapped via {@link #longColumn(EicfColumn, String, IndexableFieldType,
      * LongColumn.NumericKind)}, which already honors the absent bitset.
      *
+     * <p>Explicit JSON nulls and empty strings are replaced with {@code nullValue}, mirroring the row-major
+     * path in {@code NumberFieldMapper.value} (an empty string or a {@code VALUE_NULL} token there yields the
+     * field's configured {@code null_value}). When {@code nullValue} is {@code null} (no {@code null_value}
+     * configured) those documents are left absent, exactly as the row path produces no value. Documents whose
+     * field is genuinely absent stay absent regardless of {@code nullValue}, since the row path never invokes
+     * {@code value} for a missing field.
+     *
      * <p>This is the POC fallback for columns the fast path cannot wrap directly; string parsing is
      * intentionally basic and can be made stricter (coerce/range checks) later.
      */
-    public static LongColumn convertToNumeric(SourceColumn column, String name, IndexableFieldType fieldType, LongColumn.NumericKind kind) {
+    public static LongColumn convertToNumeric(
+        SourceColumn column,
+        String name,
+        IndexableFieldType fieldType,
+        LongColumn.NumericKind kind,
+        Number nullValue
+    ) {
         final boolean wantDouble = kind == LongColumn.NumericKind.FLOAT || kind == LongColumn.NumericKind.DOUBLE;
         final int docCount = column.docCount();
         final EicfColumnBuilder builder = new EicfColumnBuilder();
         final SourceColumnCursor cursor = column.cursor();
+        // Reused output holder for the UTF-8 long fast path, so the common case allocates nothing per value.
+        final long[] scratch = new long[1];
         while (cursor.advance()) {
             switch (cursor.type()) {
                 case EirfType.LONG -> {
@@ -161,22 +177,42 @@ public final class EicfLuceneColumns {
                     }
                 }
                 case EirfType.STRING -> {
-                    final String s = cursor.stringValue().string();
-                    try {
-                        if (wantDouble) {
+                    final Text text = cursor.stringValue();
+                    final var utf8 = text.bytes();
+                    if (utf8.length() == 0) {
+                        // An empty string maps to the configured null_value, matching the row path.
+                        addNullValue(builder, nullValue, wantDouble);
+                    } else if (wantDouble) {
+                        // Float/double target: java has no byte-level double parser, so decode the String once.
+                        final String s = text.string();
+                        try {
                             builder.addDouble(Double.parseDouble(s));
-                        } else {
-                            builder.addLong(Long.parseLong(s));
+                        } catch (NumberFormatException e) {
+                            logger.info("failed to parse string [{}] as number", s, e);
+                            builder.addAbsent();
                         }
-                    } catch (NumberFormatException e) {
-                        logger.info("failed to parse string [{}] as number", s, e);
-                        builder.addAbsent();
+                    } else {
+                        // Long target: parse the UTF-8 bytes directly. The common plain-integer case allocates
+                        // no String. Only decimal/exponent inputs ("2.5", "1e3") and inputs the byte parser
+                        // cannot handle exactly (overflow, non-ASCII digits) fall back to decoding the String.
+                        switch (tryParseAsciiLong(utf8.bytes(), utf8.offset(), utf8.length(), scratch)) {
+                            case PARSE_LONG -> builder.addLong(scratch[0]);
+                            // coerce: truncate the decimal to long, matching the EirfType.DOUBLE case and the
+                            // row path's coerce behavior.
+                            case PARSE_DECIMAL -> addParsedStringAsLong(builder, text.string(), true);
+                            // Overflow / signs-only / non-ASCII digits: defer to Long.parseLong for exact
+                            // semantics (e.g. Unicode digits); a genuine failure leaves the document absent.
+                            case PARSE_FALLBACK -> addParsedStringAsLong(builder, text.string(), false);
+                            default -> throw new AssertionError("unexpected parse result");
+                        }
                     }
                 }
-                // Absent documents, booleans, explicit nulls, binary, arrays, and key-value objects have no
+                // An explicit JSON null maps to the configured null_value, matching the row path.
+                case EirfType.NULL -> addNullValue(builder, nullValue, wantDouble);
+                // Genuinely absent documents, booleans, binary, arrays, and key-value objects have no
                 // numeric interpretation in this POC; leave the document without a value.
-                case EirfType.ABSENT, EirfType.NULL, EirfType.TRUE, EirfType.FALSE, EirfType.BINARY, EirfType.UNION_ARRAY,
-                    EirfType.FIXED_ARRAY, EirfType.KEY_VALUE -> builder.addAbsent();
+                case EirfType.ABSENT, EirfType.TRUE, EirfType.FALSE, EirfType.BINARY, EirfType.UNION_ARRAY, EirfType.FIXED_ARRAY,
+                    EirfType.KEY_VALUE -> builder.addAbsent();
                 default -> throw new IllegalStateException(
                     "unexpected EIRF type [" + EirfType.name(cursor.type()) + "] in column " + column.columnIndex()
                 );
@@ -184,6 +220,97 @@ public final class EicfLuceneColumns {
         }
         final EicfColumn converted = EicfColumn.from(column.columnIndex(), builder.finish(docCount));
         return longColumn(converted, name, fieldType, kind);
+    }
+
+    /**
+     * Appends the field's {@code null_value} to {@code builder} as the target numeric type, or leaves the
+     * document absent when no {@code null_value} is configured ({@code nullValue == null}). Mirrors
+     * {@code NumberFieldMapper.value} returning {@code nullValue} (possibly {@code null}) for nulls and empty
+     * strings.
+     */
+    private static void addNullValue(EicfColumnBuilder builder, Number nullValue, boolean wantDouble) {
+        if (nullValue == null) {
+            builder.addAbsent();
+        } else if (wantDouble) {
+            builder.addDouble(nullValue.doubleValue());
+        } else {
+            builder.addLong(nullValue.longValue());
+        }
+    }
+
+    /** {@link #tryParseAsciiLong} parsed the whole input as a {@code long}; the value is in {@code out[0]}. */
+    private static final int PARSE_LONG = 0;
+    /** The input holds a decimal point or exponent; parse it as a double and truncate. */
+    private static final int PARSE_DECIMAL = 1;
+    /** The input is not a plain ASCII integer (overflow, signs-only, or non-ASCII digits); defer to {@code String}. */
+    private static final int PARSE_FALLBACK = 2;
+
+    /**
+     * Parses {@code [off, off+len)} of {@code bytes} as a base-10 {@code long} directly from UTF-8, avoiding a
+     * {@code String} allocation for the common case. Numeric characters are all single-byte ASCII, so no decoding
+     * is required; any byte that is not an ASCII digit, sign, or decimal/exponent marker forces the
+     * {@link #PARSE_FALLBACK} path so the caller can preserve {@link Long#parseLong}'s exact semantics (including
+     * Unicode digits). Overflow likewise yields {@link #PARSE_FALLBACK} rather than a wrong (truncated) value.
+     *
+     * <p>Accumulation is done as a negative number (mirroring {@link Long#parseLong}) so that {@link Long#MIN_VALUE}
+     * is representable and overflow is detected before it happens.
+     *
+     * @param out receives the parsed value when {@link #PARSE_LONG} is returned; untouched otherwise
+     * @return one of {@link #PARSE_LONG}, {@link #PARSE_DECIMAL}, or {@link #PARSE_FALLBACK}
+     */
+    static int tryParseAsciiLong(byte[] bytes, int off, int len, long[] out) {
+        final int end = off + len;
+        int i = off;
+        boolean negative = false;
+        final byte first = bytes[i];
+        if (first == '-' || first == '+') {
+            negative = first == '-';
+            i++;
+            if (i == end) {
+                return PARSE_FALLBACK; // a lone "+" or "-"
+            }
+        }
+        final long limit = negative ? Long.MIN_VALUE : -Long.MAX_VALUE;
+        final long multiplyLimit = limit / 10;
+        long accumulator = 0; // accumulated as a negative number
+        for (; i < end; i++) {
+            final byte b = bytes[i];
+            if (b == '.' || b == 'e' || b == 'E') {
+                return PARSE_DECIMAL;
+            }
+            final int digit = b - '0';
+            if (digit < 0 || digit > 9) {
+                return PARSE_FALLBACK; // non-ASCII-digit byte (includes any byte >= 0x80, which is negative)
+            }
+            if (accumulator < multiplyLimit) {
+                return PARSE_FALLBACK; // accumulator * 10 would overflow
+            }
+            accumulator *= 10;
+            if (accumulator < limit + digit) {
+                return PARSE_FALLBACK; // accumulator - digit would overflow
+            }
+            accumulator -= digit;
+        }
+        out[0] = negative ? accumulator : -accumulator;
+        return PARSE_LONG;
+    }
+
+    /**
+     * Slow path for a numeric string targeting a long column: parses {@code s} (as a double then truncated when
+     * {@code viaDouble}, else directly as a long) and appends it, or logs and leaves the document absent when the
+     * string is not parseable.
+     */
+    private static void addParsedStringAsLong(EicfColumnBuilder builder, String s, boolean viaDouble) {
+        try {
+            if (viaDouble) {
+                builder.addLong((long) Double.parseDouble(s));
+            } else {
+                builder.addLong(Long.parseLong(s));
+            }
+        } catch (NumberFormatException e) {
+            logger.info("failed to parse string [{}] as number", s, e);
+            builder.addAbsent();
+        }
     }
 
     /**
