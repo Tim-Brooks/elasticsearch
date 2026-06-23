@@ -361,6 +361,13 @@ public final class DateFieldMapper extends FieldMapper {
 
         DateFormatter buildFormatter() {
             try {
+                // Some common literal date layouts (eg "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd") have a fast Iso8601Parser-backed
+                // formatter that avoids the slower, allocation-heavy generic java.time parsing. This speeds up both the row
+                // path (parseCreateField) and the columnar batch path (mapColumnBatch), which both parse via DateFieldType#parse.
+                DateFormatter fast = DateFormatters.fastDateFieldFormatterOrNull(format.getValue());
+                if (fast != null) {
+                    return fast.withLocale(locale.getValue());
+                }
                 return DateFormatter.forPattern(format.getValue(), indexCreatedVersion).withLocale(locale.getValue());
             } catch (IllegalArgumentException e) {
                 if (indexCreatedVersion.isLegacyIndexVersion()) {
@@ -1306,6 +1313,8 @@ public final class DateFieldMapper extends FieldMapper {
         // build a homogeneous numeric column. Unparseable values fall back to null_value, or leave the
         // document absent when no null_value is configured. POC: numeric epoch-millis inputs are not
         // handled here (ClickBench dates are formatted strings).
+        // Note: fieldType().parse uses the field's configured formatter, so common layouts such as
+        // "yyyy-MM-dd HH:mm:ss" and "yyyy-MM-dd" parse via the fast Iso8601Parser (see Builder#buildFormatter).
         final int docCount = column.docCount();
         final EicfLuceneColumns.LongColumnBuilder builder = EicfLuceneColumns.longColumnBuilder(
             docCount,
