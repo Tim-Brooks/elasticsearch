@@ -212,8 +212,9 @@ public final class EirfSchema {
         }
 
         int append(String name, int parentIdx) {
-            FieldKey key = new FieldKey(parentIdx, name);
-            int existing = lookup.getOrDefault(key, MISSING);
+            // Use a transient key for the lookup so it never escapes this method and stays eligible for scalar
+            // replacement on the common hit path; only materialize a stored key on the (rare) insert branch.
+            int existing = lookup.getOrDefault(new FieldKey(parentIdx, name), MISSING);
             if (existing != MISSING) {
                 return existing;
             }
@@ -226,7 +227,7 @@ public final class EirfSchema {
                 parents = Arrays.copyOf(parents, parents.length << 1);
             }
             parents[index] = parentIdx;
-            lookup.put(key, index);
+            lookup.put(new FieldKey(parentIdx, name), index);
             return index;
         }
     }
