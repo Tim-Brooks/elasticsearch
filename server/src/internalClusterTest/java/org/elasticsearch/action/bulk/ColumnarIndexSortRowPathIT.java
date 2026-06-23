@@ -34,13 +34,6 @@ import static org.junit.Assume.assumeTrue;
  */
 public class ColumnarIndexSortRowPathIT extends ESIntegTestCase {
 
-    @org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix(
-        bugUrl = "Documents a core bug: with the extended_doc_values_options feature flag enabled and "
-            + "index.mapping.doc_values.multi_value:false, the document path writes single-valued NUMERIC doc values, but "
-            + "IndexNumericFieldData.sortField always builds a SortedNumericSortField (requires SORTED_NUMERIC) for a numeric "
-            + "index sort. They are incompatible, so flush fails on the PURE ROW PATH (no batch indexing). Unrelated to batch "
-            + "indexing or columnar batch mode."
-    )
     public void testRowPathColumnarSingleValueNumericIndexSort() throws IOException {
         assumeTrue("columnar index mode feature flag must be enabled", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
         String index = "row-columnar-sort";
