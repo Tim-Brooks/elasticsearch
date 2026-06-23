@@ -25,6 +25,9 @@ import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.sourcebatch.SourceColumn;
 import org.elasticsearch.sourcebatch.SourceColumnCursor;
+import org.elasticsearch.xcontent.XContentString;
+
+import java.util.Arrays;
 
 /**
  * Adapts typed EICF columns — and plain in-memory arrays (used for engine/metadata columns) — to
@@ -229,6 +232,44 @@ public final class EicfLuceneColumns {
             // The synthetic column carries no schema identity, so the column index is irrelevant here.
             return longColumn(EicfColumn.from(0, builder.finish(docCount)), name, fieldType, kind);
         }
+    }
+
+    /**
+     * Adapts an arbitrary {@link SourceColumn} to a {@link BinaryColumn}. An {@link EicfStringColumn} or
+     * {@link EicfBinaryColumn} is wrapped directly (fast path); any other column — typically a
+     * heterogeneous {@code UNION} (e.g. a keyword field that received explicit nulls) or an all-absent
+     * column — is converted document-by-document via {@link #convertToBinary}.
+     */
+    public static BinaryColumn toBinaryColumn(SourceColumn column, String name, IndexableFieldType fieldType) {
+        if (column instanceof EicfStringColumn || column instanceof EicfBinaryColumn) {
+            return binaryColumn((EicfColumn) column, name, fieldType);
+        }
+        return convertToBinary(column, name, fieldType);
+    }
+
+    /**
+     * Converts an arbitrary {@link SourceColumn} into a {@link BinaryColumn} by materializing each
+     * document's value: a {@code STRING} value is copied to a {@link BytesRef}, and every other type
+     * (numbers, booleans, explicit nulls, arrays, key-value objects, and absences) leaves the document
+     * absent. This is the POC fallback for keyword columns the fast path cannot wrap directly — chiefly
+     * UNION columns produced when a keyword field receives a mix of strings and nulls — so such columns
+     * no longer force a row-major fallback. String coercion of non-string scalars can be added later.
+     */
+    public static BinaryColumn convertToBinary(SourceColumn column, String name, IndexableFieldType fieldType) {
+        final int docCount = column.docCount();
+        final BytesRef[] values = new BytesRef[docCount];
+        final SourceColumnCursor cursor = column.cursor();
+        int doc = 0;
+        while (cursor.advance()) {
+            if (cursor.type() == EirfType.STRING) {
+                final XContentString.UTF8Bytes utf8 = cursor.stringValue().bytes();
+                values[doc] = new BytesRef(Arrays.copyOfRange(utf8.bytes(), utf8.offset(), utf8.offset() + utf8.length()));
+            } else {
+                values[doc] = null;
+            }
+            doc++;
+        }
+        return arrayBinaryColumn(values, name, fieldType);
     }
 
     /** Adapts an {@link EicfStringColumn} or {@link EicfBinaryColumn} to a {@link BinaryColumn}. */

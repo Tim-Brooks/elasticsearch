@@ -52,7 +52,6 @@ import org.elasticsearch.common.lucene.search.AutomatonQueries;
 import org.elasticsearch.common.unit.Fuzziness;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.eicf.EicfLuceneColumns;
-import org.elasticsearch.eicf.EicfStringColumn;
 import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
@@ -1490,21 +1489,18 @@ public final class KeywordFieldMapper extends FieldMapper {
 
     @Override
     public void mapColumnBatch(SourceColumn column, BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
-        if (column instanceof EicfStringColumn == false) {
-            // Non-string values (e.g. an explicit null promotes the column to UNION) are not handled by
-            // the POC columnar keyword path; signal a fall back to the row-major path.
-            throw new UnsupportedOperationException(
-                "columnar batch indexing for keyword field [" + fullPath() + "] requires a string EICF column"
-            );
-        }
-        final EicfStringColumn stringColumn = (EicfStringColumn) column;
+        // EicfLuceneColumns.toBinaryColumn wraps a plain string column directly, and converts any other
+        // column (e.g. a UNION produced when a keyword field receives a mix of strings and explicit nulls,
+        // or an all-absent column) best-effort: string values are kept, everything else becomes absent. This
+        // keeps null/empty keywords — pervasive in real corpora — on the columnar path instead of forcing a
+        // row-major fallback (which is incompatible with columnar-mode single-value numeric index sorting).
         if (fieldType().usesBinaryDocValues()) {
             // High-cardinality keyword: values live in BINARY doc values. Reuse the document path's field
             // type (see DocValuesFieldFactory.addBinaryField) so the columnar FieldInfo matches exactly.
             if (dvFactory.isSingleValued()) {
                 // Single value per document → a plain BinaryDocValuesField holding the raw value bytes; no
                 // companion .counts field (matches addBinaryField for single-valued fields).
-                out.addColumn(EicfLuceneColumns.binaryColumn(stringColumn, fullPath(), BinaryDocValuesField.TYPE));
+                out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fullPath(), BinaryDocValuesField.TYPE));
             } else if (fieldType().usesArrayOrderBinaryDocValues()) {
                 // Multi-valued columnar keyword stores values via MultiValuedBinaryDocValuesField.ArrayOrderInlineNull,
                 // an in-document-order binary encoding the columnar path does not reproduce yet — fall back.
@@ -1513,29 +1509,30 @@ public final class KeywordFieldMapper extends FieldMapper {
                 );
             } else {
                 // Multi-valued (non-columnar) MultiValuedBinaryDocValuesField.SeparateCount: BINARY values plus
-                // a <name>.counts numeric field carrying the per-document value count (1 here — single value per row).
-                out.addColumn(EicfLuceneColumns.binaryColumn(stringColumn, fullPath(), BinaryDocValuesField.TYPE));
-                final int docCount = stringColumn.docCount();
+                // a <name>.counts numeric field carrying the per-document value count (1 for a kept string value,
+                // absent otherwise — consistent with the BINARY values written above).
+                out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fullPath(), BinaryDocValuesField.TYPE));
+                final int docCount = column.docCount();
                 final EicfLuceneColumns.LongColumnBuilder counts = EicfLuceneColumns.longColumnBuilder(
                     docCount,
                     fullPath() + MultiValuedBinaryDocValuesField.SeparateCount.COUNT_FIELD_SUFFIX,
                     COUNTS_FIELD_TYPE,
                     LongColumn.NumericKind.LONG
                 );
-                final SourceColumnCursor cursor = stringColumn.cursor();
+                final SourceColumnCursor cursor = column.cursor();
                 while (cursor.advance()) {
-                    if (cursor.type() == EirfType.ABSENT) {
-                        counts.addAbsent();
-                    } else {
+                    if (cursor.type() == EirfType.STRING) {
                         counts.addLong(1L);
+                    } else {
+                        counts.addAbsent();
                     }
                 }
                 out.addColumn(counts.build());
             }
         } else {
-            // Low-cardinality keyword: SORTED/SORTED_SET doc values fed directly from the string column,
+            // Low-cardinality keyword: SORTED/SORTED_SET doc values fed from the (possibly converted) column,
             // reusing the field's own Lucene field type.
-            out.addColumn(EicfLuceneColumns.binaryColumn(stringColumn, fullPath(), fieldType));
+            out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fullPath(), fieldType));
         }
     }
 

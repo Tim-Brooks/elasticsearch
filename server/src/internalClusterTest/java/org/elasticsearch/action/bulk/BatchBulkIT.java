@@ -235,6 +235,540 @@ public class BatchBulkIT extends ESIntegTestCase {
         assertThat(source.get("ts"), equalTo("2013-07-15 03:39:07"));
     }
 
+    public void testBatchIndexingWithClickBenchSortFields() throws IOException {
+        // Reproduces the production ClickBench failure more faithfully than testBatchIndexingWithIndexSorting:
+        // the index is sorted on a five-field key whose FIRST field is an `integer` (CounterID), exercising
+        // Lucene's IntSorter at flush. Also covers `short` and `integer` numeric columns, which the simpler
+        // index-sort test (long + date only) never indexed via the columnar path.
+        assumeTrue("columnar index mode feature flag must be enabled", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
+        String index = "test-batch-clickbench-sort";
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            mapping.field("dynamic", "strict");
+            mapping.startObject("properties");
+            {
+                mapping.startObject("CounterID").field("type", "integer").endObject();
+                mapping.startObject("EventDate").field("type", "date").field("format", "yyyy-MM-dd").endObject();
+                mapping.startObject("UserID").field("type", "long").endObject();
+                mapping.startObject("EventTime").field("type", "date").field("format", "yyyy-MM-dd HH:mm:ss").endObject();
+                mapping.startObject("WatchID").field("type", "long").endObject();
+                mapping.startObject("Age").field("type", "short").endObject();
+                mapping.startObject("Title").field("type", "keyword").endObject();
+                mapping.startObject("URL").field("type", "keyword").endObject();
+            }
+            mapping.endObject();
+            mapping.endObject();
+        }
+        mapping.endObject();
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put("index.mode", "columnar")
+                        .put("index.mapping.doc_values.multi_value", false)
+                        .put("index.seq_no.index_options", "doc_values_only")
+                        .putList("index.sort.field", "CounterID", "EventDate", "UserID", "EventTime", "WatchID")
+                        .putList("index.sort.order", "desc", "desc", "desc", "desc", "desc")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+        String coordinatingNode = findCoordinatingNode();
+
+        int numDocs = 50;
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int i = 0; i < numDocs; i++) {
+            String secs = String.format("%02d", i % 60);
+            bulkRequest.add(
+                new IndexRequest(index).id("d-" + i)
+                    .source(
+                        "{\"CounterID\":"
+                            + i
+                            + ",\"EventDate\":\"2013-07-15\",\"UserID\":"
+                            + (1000L + i)
+                            + ",\"EventTime\":\"2013-07-15 03:39:"
+                            + secs
+                            + "\",\"WatchID\":"
+                            + (9000L + i)
+                            + ",\"Age\":"
+                            + (i % 100)
+                            + ",\"Title\":\"t-"
+                            + i
+                            + "\",\"URL\":\"http://example.com/"
+                            + i
+                            + "\"}",
+                        XContentType.JSON
+                    )
+            );
+        }
+        try (var mockLog = MockLog.capture(ShardBatchMapper.class)) {
+            mockLog.addExpectation(
+                new MockLog.UnseenEventExpectation(
+                    "no columnar fallback",
+                    ShardBatchMapper.class.getCanonicalName(),
+                    Level.WARN,
+                    "*failed to assemble column batch*"
+                )
+            );
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+            assertNoFailures(bulkResponse);
+            mockLog.assertAllExpectationsMatched();
+        }
+        // refresh() forces the flush + index-sort of the segment — this is where the production NPE fired.
+        refresh(index);
+
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), r -> {
+            assertNoFailures(r);
+            assertThat(r.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+        // Sort by the integer field to confirm its SORTED_NUMERIC doc values round-trip.
+        assertResponse(
+            prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).addSort("CounterID", SortOrder.DESC).setSize(numDocs),
+            r -> {
+                assertNoFailures(r);
+                SearchHit[] hits = r.getHits().getHits();
+                for (int i = 0; i < numDocs; i++) {
+                    assertThat(((Number) hits[i].getSourceAsMap().get("CounterID")).intValue(), equalTo(numDocs - 1 - i));
+                }
+            }
+        );
+    }
+
+    // The exact ClickBench "hits" field set: {name, type, date-format-or-empty}. Mirrors the production
+    // index template so the columnar batch path is exercised against the real schema shape.
+    private static final String[][] CLICKBENCH_FIELDS = {
+        { "AdvEngineID", "short", "" },
+        { "Age", "short", "" },
+        { "BrowserCountry", "keyword", "" },
+        { "BrowserLanguage", "keyword", "" },
+        { "CLID", "integer", "" },
+        { "ClientEventTime", "date", "yyyy-MM-dd HH:mm:ss" },
+        { "ClientIP", "integer", "" },
+        { "ClientTimeZone", "short", "" },
+        { "CodeVersion", "integer", "" },
+        { "ConnectTiming", "integer", "" },
+        { "CookieEnable", "short", "" },
+        { "CounterClass", "short", "" },
+        { "CounterID", "integer", "" },
+        { "DNSTiming", "integer", "" },
+        { "DontCountHits", "short", "" },
+        { "EventDate", "date", "yyyy-MM-dd" },
+        { "EventTime", "date", "yyyy-MM-dd HH:mm:ss" },
+        { "FUniqID", "long", "" },
+        { "FetchTiming", "integer", "" },
+        { "FlashMajor", "short", "" },
+        { "FlashMinor", "short", "" },
+        { "FlashMinor2", "short", "" },
+        { "FromTag", "keyword", "" },
+        { "GoodEvent", "short", "" },
+        { "HID", "integer", "" },
+        { "HTTPError", "short", "" },
+        { "HasGCLID", "short", "" },
+        { "HistoryLength", "short", "" },
+        { "HitColor", "keyword", "" },
+        { "IPNetworkID", "integer", "" },
+        { "Income", "short", "" },
+        { "Interests", "short", "" },
+        { "IsArtifical", "short", "" },
+        { "IsDownload", "short", "" },
+        { "IsEvent", "short", "" },
+        { "IsLink", "short", "" },
+        { "IsMobile", "short", "" },
+        { "IsNotBounce", "short", "" },
+        { "IsOldCounter", "short", "" },
+        { "IsParameter", "short", "" },
+        { "IsRefresh", "short", "" },
+        { "JavaEnable", "short", "" },
+        { "JavascriptEnable", "short", "" },
+        { "LocalEventTime", "date", "yyyy-MM-dd HH:mm:ss" },
+        { "MobilePhone", "short", "" },
+        { "MobilePhoneModel", "keyword", "" },
+        { "NetMajor", "short", "" },
+        { "NetMinor", "short", "" },
+        { "OS", "short", "" },
+        { "OpenerName", "integer", "" },
+        { "OpenstatAdID", "keyword", "" },
+        { "OpenstatCampaignID", "keyword", "" },
+        { "OpenstatServiceName", "keyword", "" },
+        { "OpenstatSourceID", "keyword", "" },
+        { "OriginalURL", "keyword", "" },
+        { "PageCharset", "keyword", "" },
+        { "ParamCurrency", "keyword", "" },
+        { "ParamCurrencyID", "short", "" },
+        { "ParamOrderID", "keyword", "" },
+        { "ParamPrice", "long", "" },
+        { "Params", "keyword", "" },
+        { "Referer", "keyword", "" },
+        { "RefererCategoryID", "short", "" },
+        { "RefererHash", "long", "" },
+        { "RefererRegionID", "integer", "" },
+        { "RegionID", "integer", "" },
+        { "RemoteIP", "integer", "" },
+        { "ResolutionDepth", "short", "" },
+        { "ResolutionHeight", "short", "" },
+        { "ResolutionWidth", "short", "" },
+        { "ResponseEndTiming", "integer", "" },
+        { "ResponseStartTiming", "integer", "" },
+        { "Robotness", "short", "" },
+        { "SearchEngineID", "short", "" },
+        { "SearchPhrase", "keyword", "" },
+        { "SendTiming", "integer", "" },
+        { "Sex", "short", "" },
+        { "SilverlightVersion1", "short", "" },
+        { "SilverlightVersion2", "short", "" },
+        { "SilverlightVersion3", "integer", "" },
+        { "SilverlightVersion4", "short", "" },
+        { "SocialAction", "keyword", "" },
+        { "SocialNetwork", "keyword", "" },
+        { "SocialSourceNetworkID", "short", "" },
+        { "SocialSourcePage", "keyword", "" },
+        { "Title", "keyword", "" },
+        { "TraficSourceID", "short", "" },
+        { "URL", "keyword", "" },
+        { "URLCategoryID", "short", "" },
+        { "URLHash", "long", "" },
+        { "URLRegionID", "integer", "" },
+        { "UTMCampaign", "keyword", "" },
+        { "UTMContent", "keyword", "" },
+        { "UTMMedium", "keyword", "" },
+        { "UTMSource", "keyword", "" },
+        { "UTMTerm", "keyword", "" },
+        { "UserAgent", "short", "" },
+        { "UserAgentMajor", "short", "" },
+        { "UserAgentMinor", "keyword", "" },
+        { "UserID", "long", "" },
+        { "WatchID", "long", "" },
+        { "WindowClientHeight", "short", "" },
+        { "WindowClientWidth", "short", "" },
+        { "WindowName", "integer", "" },
+        { "WithHash", "short", "" } };
+
+    public void testClickBenchFullMappingViaBatchMode() throws IOException {
+        // The most faithful reproduction of the production ClickBench failure: the exact "hits" mapping
+        // (105 fields across short/integer/long/date/keyword), the same settings (columnar mode,
+        // single-value doc values, time_based merge policy), and the same five-field index sort starting
+        // with the `integer` CounterID. Indexes several bulk batches so a segment accumulates, then forces
+        // a flush via refresh — the production NPE fired in maybeSortSegment at exactly this point.
+        assumeTrue("columnar index mode feature flag must be enabled", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
+        String index = "hits";
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            mapping.field("dynamic", "strict");
+            mapping.startObject("properties");
+            for (String[] f : CLICKBENCH_FIELDS) {
+                mapping.startObject(f[0]).field("type", f[1]);
+                if (f[2].isEmpty() == false) {
+                    mapping.field("format", f[2]);
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+            mapping.endObject();
+        }
+        mapping.endObject();
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put("index.mode", "columnar")
+                        .put("index.mapping.doc_values.multi_value", false)
+                        .put("index.seq_no.index_options", "doc_values_only")
+                        .put("index.merge.policy.type", "time_based")
+                        .put("index.requests.cache.enable", false)
+                        .putList("index.sort.field", "CounterID", "EventDate", "UserID", "EventTime", "WatchID")
+                        .putList("index.sort.order", "desc", "desc", "desc", "desc", "desc")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+        String coordinatingNode = findCoordinatingNode();
+
+        int numDocs = 200;
+        int batchSize = 25;
+        try (var mockLog = MockLog.capture(ShardBatchMapper.class)) {
+            mockLog.addExpectation(
+                new MockLog.UnseenEventExpectation(
+                    "no columnar fallback",
+                    ShardBatchMapper.class.getCanonicalName(),
+                    Level.WARN,
+                    "*failed to assemble column batch*"
+                )
+            );
+            for (int start = 0; start < numDocs; start += batchSize) {
+                BulkRequest bulkRequest = new BulkRequest();
+                for (int i = start; i < start + batchSize; i++) {
+                    bulkRequest.add(new IndexRequest(index).id("d-" + i).source(clickBenchDoc(i), XContentType.JSON));
+                }
+                BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+                assertNoFailures(bulkResponse);
+            }
+            mockLog.assertAllExpectationsMatched();
+        }
+        // Forces the flush + index-sort that fails in production.
+        refresh(index);
+
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), r -> {
+            assertNoFailures(r);
+            assertThat(r.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).addSort("CounterID", SortOrder.DESC).setSize(10), r -> {
+            assertNoFailures(r);
+            SearchHit[] hits = r.getHits().getHits();
+            for (int i = 0; i < hits.length; i++) {
+                assertThat(((Number) hits[i].getSourceAsMap().get("CounterID")).intValue(), equalTo(numDocs - 1 - i));
+            }
+        });
+    }
+
+    public void testClickBenchSparseDataViaBatchMode() throws IOException {
+        // Same exact mapping/settings as the full-mapping test, but with messy data closer to the real
+        // ClickBench corpus: nulls, empty-string keywords, numeric values arriving as strings, and short/
+        // integer values that overflow their mapped width. This probes whether per-document coercion
+        // failures on a fallback leave the segment in a state that breaks the flush-time index sort.
+        assumeTrue("columnar index mode feature flag must be enabled", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
+        String index = "hits-sparse";
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            mapping.field("dynamic", "strict");
+            mapping.startObject("properties");
+            for (String[] f : CLICKBENCH_FIELDS) {
+                mapping.startObject(f[0]).field("type", f[1]);
+                if (f[2].isEmpty() == false) {
+                    mapping.field("format", f[2]);
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+            mapping.endObject();
+        }
+        mapping.endObject();
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put("index.mode", "columnar")
+                        .put("index.mapping.doc_values.multi_value", false)
+                        .put("index.seq_no.index_options", "doc_values_only")
+                        .put("index.merge.policy.type", "time_based")
+                        .putList("index.sort.field", "CounterID", "EventDate", "UserID", "EventTime", "WatchID")
+                        .putList("index.sort.order", "desc", "desc", "desc", "desc", "desc")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+        String coordinatingNode = findCoordinatingNode();
+
+        int numDocs = 200;
+        int batchSize = 25;
+        for (int start = 0; start < numDocs; start += batchSize) {
+            BulkRequest bulkRequest = new BulkRequest();
+            for (int i = start; i < start + batchSize; i++) {
+                bulkRequest.add(new IndexRequest(index).id("d-" + i).source(clickBenchMessyDoc(i), XContentType.JSON));
+            }
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+            // Some messy docs may legitimately fail; we only care that the surviving segment flushes.
+            logger.info("messy bulk [{}..{}] hadFailures={}", start, start + batchSize, bulkResponse.hasFailures());
+        }
+        // Forces the flush + index-sort. The production NPE would surface here.
+        refresh(index);
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), r -> {
+            assertNoFailures(r);
+        });
+    }
+
+    public void testClickBenchNullKeywordStaysColumnar() throws IOException {
+        // Regression guard for the production ClickBench flush NPE. A keyword (BrowserCountry, null in every
+        // doc) makes the EICF column a non-string column; previously KeywordFieldMapper.mapColumnBatch threw
+        // and the whole batch fell back to the row-major path, which under columnar mode + single-value doc
+        // values writes NUMERIC doc values incompatible with the SortedNumeric index sort, NPEing at flush.
+        // The keyword path now converts non-string columns best-effort (string kept, null absent), so no
+        // fallback happens and the segment flushes cleanly.
+        assumeTrue("columnar index mode feature flag must be enabled", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
+        String index = "hits-kwnull";
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            mapping.field("dynamic", "strict");
+            mapping.startObject("properties");
+            for (String[] f : CLICKBENCH_FIELDS) {
+                mapping.startObject(f[0]).field("type", f[1]);
+                if (f[2].isEmpty() == false) {
+                    mapping.field("format", f[2]);
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+            mapping.endObject();
+        }
+        mapping.endObject();
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put("index.mode", "columnar")
+                        .put("index.mapping.doc_values.multi_value", false)
+                        .put("index.seq_no.index_options", "doc_values_only")
+                        .putList("index.sort.field", "CounterID", "EventDate", "UserID", "EventTime", "WatchID")
+                        .putList("index.sort.order", "desc", "desc", "desc", "desc", "desc")
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+        String coordinatingNode = findCoordinatingNode();
+
+        int numDocs = 50;
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int i = 0; i < numDocs; i++) {
+            // Valid numerics/dates; one keyword nulled on every doc to force the keyword fallback.
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (String[] f : CLICKBENCH_FIELDS) {
+                if (first == false) {
+                    sb.append(',');
+                }
+                first = false;
+                sb.append('"').append(f[0]).append("\":");
+                switch (f[1]) {
+                    case "short" -> sb.append(i % 100);
+                    case "integer" -> sb.append(f[0].equals("CounterID") ? i : (i * 7));
+                    case "long" -> sb.append(1_000_000_000L + i);
+                    case "date" -> sb.append(
+                        f[2].equals("yyyy-MM-dd") ? "\"2013-07-15\"" : "\"2013-07-15 03:39:" + String.format("%02d", i % 60) + "\""
+                    );
+                    case "keyword" -> sb.append(f[0].equals("BrowserCountry") ? "null" : "\"" + f[0] + "-" + i + "\"");
+                    default -> throw new AssertionError("unexpected type " + f[1]);
+                }
+            }
+            sb.append('}');
+            bulkRequest.add(new IndexRequest(index).id("d-" + i).source(sb.toString(), XContentType.JSON));
+        }
+        try (var mockLog = MockLog.capture(ShardBatchMapper.class)) {
+            mockLog.addExpectation(
+                new MockLog.UnseenEventExpectation(
+                    "no columnar fallback",
+                    ShardBatchMapper.class.getCanonicalName(),
+                    Level.WARN,
+                    "*failed to assemble column batch*"
+                )
+            );
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+            assertNoFailures(bulkResponse);
+            mockLog.assertAllExpectationsMatched();
+        }
+        refresh(index);
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), r -> {
+            assertNoFailures(r);
+            assertThat(r.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+        // The null keyword reconstructs as absent from synthetic source; a present keyword round-trips.
+        var getResponse = client().get(new org.elasticsearch.action.get.GetRequest(index).id("d-3")).actionGet();
+        assertTrue(getResponse.isExists());
+        Map<String, Object> source = getResponse.getSourceAsMap();
+        assertThat(source.get("BrowserCountry"), equalTo(null));
+        assertThat(source.get("Title"), equalTo("Title-3"));
+        assertThat(((Number) source.get("CounterID")).intValue(), equalTo(3));
+    }
+
+    private static String clickBenchMessyDoc(int i) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (String[] f : CLICKBENCH_FIELDS) {
+            if (first == false) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append('"').append(f[0]).append("\":");
+            boolean nullIt = (i % 5 == 0) && (f[0].equals("CounterID") == false);
+            switch (f[1]) {
+                case "short" -> {
+                    if (nullIt) {
+                        sb.append("null");
+                    } else if (i % 7 == 0) {
+                        sb.append(100000 + i); // overflows short range
+                    } else if (i % 3 == 0) {
+                        sb.append('"').append(i % 100).append('"'); // numeric-as-string
+                    } else {
+                        sb.append(i % 100);
+                    }
+                }
+                case "integer" -> {
+                    if (nullIt) {
+                        sb.append("null");
+                    } else if (i % 3 == 0) {
+                        sb.append('"').append(f[0].equals("CounterID") ? i : (i * 7)).append('"');
+                    } else {
+                        sb.append(f[0].equals("CounterID") ? i : (i * 7));
+                    }
+                }
+                case "long" -> sb.append(nullIt ? "null" : Long.toString(1_000_000_000L + i));
+                case "date" -> {
+                    if (nullIt) {
+                        sb.append("null");
+                    } else if (f[2].equals("yyyy-MM-dd")) {
+                        sb.append("\"2013-07-15\"");
+                    } else {
+                        sb.append("\"2013-07-15 03:39:").append(String.format("%02d", i % 60)).append('"');
+                    }
+                }
+                case "keyword" -> {
+                    if (nullIt) {
+                        sb.append("null");
+                    } else if (i % 4 == 0) {
+                        sb.append("\"\""); // empty string
+                    } else {
+                        sb.append('"').append(f[0]).append('-').append(i).append('"');
+                    }
+                }
+                default -> throw new AssertionError("unexpected type " + f[1]);
+            }
+        }
+        sb.append('}');
+        return sb.toString();
+    }
+
+    private static String clickBenchDoc(int i) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (String[] f : CLICKBENCH_FIELDS) {
+            if (first == false) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append('"').append(f[0]).append("\":");
+            switch (f[1]) {
+                case "short" -> sb.append(i % 100);
+                case "integer" -> sb.append(f[0].equals("CounterID") ? i : (i * 7));
+                case "long" -> sb.append(1_000_000_000L + i);
+                case "date" -> {
+                    if (f[2].equals("yyyy-MM-dd")) {
+                        sb.append("\"2013-07-15\"");
+                    } else {
+                        sb.append("\"2013-07-15 03:39:").append(String.format("%02d", i % 60)).append('"');
+                    }
+                }
+                case "keyword" -> sb.append('"').append(f[0]).append('-').append(i).append('"');
+                default -> throw new AssertionError("unexpected type " + f[1]);
+            }
+        }
+        sb.append('}');
+        return sb.toString();
+    }
+
     public void testMixedTypeNumericColumnStaysColumnar() throws IOException {
         // A single batch where the "value" (long) field receives mixed types: a number, a numeric
         // string, an explicit null, and another number. The heterogeneous column promotes to UNION on
