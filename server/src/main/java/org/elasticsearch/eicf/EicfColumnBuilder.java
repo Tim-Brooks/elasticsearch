@@ -633,7 +633,7 @@ final class EicfColumnBuilder {
     }
 
     private static RecyclerBytesStreamOutput newStream() {
-        return new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE);
+        return new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_8K_INSTANCE);
     }
 
     private static void writeLongLE(RecyclerBytesStreamOutput out, long value) {
