@@ -714,7 +714,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
                             + "]"
                     );
                 }
-                return current.addBatch(serialized, batch.ops());
+                return current.addBatch(serialized, batch);
             } finally {
                 readLock.unlock();
             }
