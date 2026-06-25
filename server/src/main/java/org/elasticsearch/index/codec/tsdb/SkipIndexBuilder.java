@@ -57,6 +57,7 @@ public final class SkipIndexBuilder {
     private long globalMinValue = Long.MAX_VALUE;
     private int globalDocCount = 0;
     private int maxDocId = -1;
+    private int globalMaxValueCount = 0;
     private boolean finished = false;
 
     public SkipIndexBuilder(TSDBDocValuesFormatConfig formatConfig) {
@@ -72,6 +73,7 @@ public final class SkipIndexBuilder {
      * skip-interval accumulator (see {@link SkipAccumulator#isDone}).
      */
     public void onNewDoc(int docID, int docValueCount, long firstValue) throws IOException {
+        globalMaxValueCount = Math.max(globalMaxValueCount, docValueCount);
         if (currentAccumulator != null && currentAccumulator.isDone(skipIndexIntervalSize, docValueCount, firstValue, docID)) {
             globalMaxValue = Math.max(globalMaxValue, currentAccumulator.maxValue);
             globalMinValue = Math.min(globalMinValue, currentAccumulator.minValue);
@@ -143,8 +145,8 @@ public final class SkipIndexBuilder {
 
     /**
      * Writes the buffered skip data to {@code skipOut} and the skip-index header to {@code meta}.
-     * The header layout (start, length, max, min, docCount, maxDocId) matches the historical
-     * single-pass implementation byte-for-byte.
+     * The header layout (start, length, max, min, docCount, maxDocId, maxValueCount) matches the
+     * historical single-pass implementation byte-for-byte.
      */
     public void writeSkipIndex(IndexOutput skipOut, IndexOutput meta) throws IOException {
         finish();
@@ -159,6 +161,7 @@ public final class SkipIndexBuilder {
         assert globalDocCount <= maxDocId + 1;
         meta.writeInt(globalDocCount);
         meta.writeInt(maxDocId);
+        meta.writeInt(globalMaxValueCount);
     }
 
     private void writeLevels(List<SkipAccumulator> accumulators) throws IOException {
