@@ -58,9 +58,11 @@ import java.util.List;
  * }
  * </pre>
  *
- * <p><b>Limitations (prototype):</b> Empty objects ({@code {}}) and {@code KEY_VALUE} leaves are not
- * supported and throw {@link UnsupportedOperationException}. Arrays and objects nested inside arrays
- * are encoded using the existing EIRF array packing codec ({@link EirfEncoder#parseArray}).
+ * <p><b>Limitations (prototype):</b> An empty object ({@code {}}) is treated as absent (it emits no
+ * leaf) rather than encoded as a {@code KEY_VALUE} leaf as the row format does — see the TODO in
+ * {@link #flattenObject}. {@code KEY_VALUE} leaves are otherwise not supported and throw
+ * {@link UnsupportedOperationException}. Arrays and objects nested inside arrays are encoded using the
+ * existing EIRF array packing codec ({@link EirfEncoder#parseArray}).
  */
 public final class EicfEncoder implements Releasable {
 
@@ -255,10 +257,18 @@ public final class EicfEncoder implements Releasable {
             if (token == XContentParser.Token.START_OBJECT) {
                 XContentParser.Token inner = parser.nextToken();
                 if (inner == XContentParser.Token.END_OBJECT) {
-                    // Top-level empty objects are not yet supported as standalone KEY_VALUE columns.
-                    throw new UnsupportedOperationException(
-                        "Empty objects as standalone columns are not yet supported in EICF (field: [" + fieldName + "])"
-                    );
+                    // An empty object contributes no values, so we treat it as absent for this document and
+                    // emit no leaf. Under synthetic/columnar source this is lossless (empty objects produce
+                    // no doc values and are not reconstructed anyway), which is what the columnar batch path
+                    // targets (e.g. a flattened field whose value is {}).
+                    //
+                    // TODO(columnar-prod): this loses an explicit empty object {} from a reconstructed
+                    // _source in STORED-source mode, where the batch path rebuilds _source from EICF rather
+                    // than the raw bytes (the row-major path preserves it). The row format (EirfEncoder)
+                    // already encodes an empty object as a zero-byte KEY_VALUE leaf; the columnar EICF column
+                    // model has no KEY_VALUE column type yet. When hardening this into a production feature,
+                    // add a first-class KEY_VALUE column (and SourceColumn/reconstruction support) so empty
+                    // objects round-trip byte-for-byte with the row path instead of being dropped here.
                 } else {
                     int nonLeafIdx = schema.appendNonLeaf(fieldName, parentNonLeafIdx);
                     flattenObject(parser, nonLeafIdx, inner, sink);

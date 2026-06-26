@@ -232,6 +232,36 @@ public abstract class FieldMapper extends Mapper {
     }
 
     /**
+     * Whether this mapper resolves against a <em>group</em> of schema leaf columns rooted at its own
+     * path, rather than a single leaf, in the columnar bulk batch path (see {@code ShardBatchMapper}).
+     * A {@code flattened} field is the canonical example: the EICF encoder explodes its object value
+     * into one leaf column per nested key (e.g. {@code attrs.host.name}), none of which has its own
+     * mapper. A mapper returning {@code true} receives every such leaf via {@link #mapColumnGroupBatch}
+     * and those leaves are not handed to any other mapper. Defaults to {@code false}.
+     */
+    public boolean resolvesColumnGroup() {
+        return false;
+    }
+
+    /**
+     * Attaches this field's values as Lucene columns to {@code out} for the columnar bulk batch path,
+     * for a mapper that {@link #resolvesColumnGroup() resolves against a group of leaf columns}.
+     * {@code columns[i]} is a leaf column beneath this field and {@code relativeKeys[i]} is its path
+     * relative to this field (the flattened key). Mappers that return {@code true} from
+     * {@link #resolvesColumnGroup()} must override this. The default throws.
+     *
+     * @throws UnsupportedOperationException if this mapper does not support columnar group indexing
+     */
+    public void mapColumnGroupBatch(
+        org.elasticsearch.sourcebatch.SourceColumn[] columns,
+        String[] relativeKeys,
+        BatchDocumentParserContext[] contexts,
+        ColumnBatchBuilder out
+    ) {
+        throw new UnsupportedOperationException("mapper of type [" + typeName() + "] does not implement columnar group batch indexing");
+    }
+
+    /**
      * Parse the field value using the provided {@link DocumentParserContext}.
      */
     public void parse(DocumentParserContext context) throws IOException {

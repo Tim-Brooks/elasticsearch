@@ -18,7 +18,9 @@ import org.apache.lucene.document.column.LongValuesCursor;
 import org.apache.lucene.document.column.ObjectTupleCursor;
 import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.BytesRefBuilder;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.common.util.ByteUtils;
@@ -363,6 +365,265 @@ public final class EicfLuceneColumns {
         public LongColumn build() {
             // The synthetic column carries no schema identity, so the column index is irrelevant here.
             return longColumn(EicfColumn.from(0, builder.finish(docCount)), name, fieldType, kind);
+        }
+    }
+
+    /**
+     * Returns a builder that assembles a {@link BinaryColumn} one document at a time into a single
+     * contiguous byte buffer plus an offsets array, for mappers that must derive new per-document binary
+     * values rather than wrap an existing column (e.g. a {@code pattern_text} field emitting its computed
+     * {@code template}/{@code args} sub-columns). Packing into one buffer keeps the column cache-friendly
+     * on the indexing read path, unlike a {@code BytesRef[]} of independently allocated values. The caller
+     * adds exactly one entry per document, in document order — {@link BinaryColumnBuilder#addString} /
+     * {@link BinaryColumnBuilder#addBytesRef} for a present value or {@link BinaryColumnBuilder#addAbsent}
+     * to leave the document without one — then calls {@link BinaryColumnBuilder#build}. Skipped documents
+     * become the column's absent bitset.
+     */
+    public static BinaryColumnBuilder binaryColumnBuilder(int docCount, String name, IndexableFieldType fieldType) {
+        return new BinaryColumnBuilder(docCount, name, fieldType);
+    }
+
+    /**
+     * Accumulates per-document binary values (or absences) into a contiguous {@code byte[]} + {@code int[]}
+     * offsets representation and finishes them into a {@link BinaryColumn}. One value must be added per
+     * document, in document order, before {@link #build()} is called. String values are UTF-8 encoded
+     * through a single reused {@link BytesRefBuilder}, so the common case allocates only the growing
+     * backing buffers rather than a {@link BytesRef} per value.
+     */
+    public static final class BinaryColumnBuilder {
+        private final int docCount;
+        private final String name;
+        private final IndexableFieldType fieldType;
+        private final int[] offsets;
+        private final BytesRefBuilder scratch = new BytesRefBuilder();
+        private byte[] data;
+        private int dataLen;
+        private int doc;
+        private FixedBitSet absent;
+        private boolean anyPresent;
+
+        BinaryColumnBuilder(int docCount, String name, IndexableFieldType fieldType) {
+            this.docCount = docCount;
+            this.name = name;
+            this.fieldType = fieldType;
+            this.offsets = new int[docCount + 1];
+            this.data = new byte[Math.max(16, docCount * 8)];
+        }
+
+        /** Adds the UTF-8 encoding of {@code value} as the next document's value. */
+        public void addString(String value) {
+            scratch.copyChars(value);
+            append(scratch.bytes(), 0, scratch.length());
+        }
+
+        /** Adds a copy of {@code value}'s bytes as the next document's value. */
+        public void addBytesRef(BytesRef value) {
+            append(value.bytes, value.offset, value.length);
+        }
+
+        /** Adds a copy of {@code bytes[off, off+len)} as the next document's value. */
+        public void addBytes(byte[] bytes, int off, int len) {
+            append(bytes, off, len);
+        }
+
+        private void append(byte[] bytes, int off, int len) {
+            rawAppend(bytes, off, len);
+            offsets[++doc] = dataLen;
+            anyPresent = true;
+        }
+
+        // -- Direct-write primitives: compose one document's value in place (no intermediate buffer) --
+        // Usage: appendVInt/appendBytes one or more times, then commitValue() exactly once.
+
+        /** Appends a base-128 VInt directly into the current document's value (matches Lucene/ES VInt). */
+        public void appendVInt(int value) {
+            int v = value;
+            while ((v & ~0x7F) != 0) {
+                ensureCapacity(1);
+                data[dataLen++] = (byte) ((v & 0x7F) | 0x80);
+                v >>>= 7;
+            }
+            ensureCapacity(1);
+            data[dataLen++] = (byte) v;
+        }
+
+        /** Appends raw bytes directly into the current document's value. */
+        public void appendBytes(byte[] bytes, int off, int len) {
+            rawAppend(bytes, off, len);
+        }
+
+        /** Finishes the current document's value after one or more {@code append*} calls. */
+        public void commitValue() {
+            offsets[++doc] = dataLen;
+            anyPresent = true;
+        }
+
+        private void rawAppend(byte[] bytes, int off, int len) {
+            ensureCapacity(len);
+            System.arraycopy(bytes, off, data, dataLen, len);
+            dataLen += len;
+        }
+
+        private void ensureCapacity(int extra) {
+            if (dataLen + extra > data.length) {
+                data = ArrayUtil.grow(data, dataLen + extra);
+            }
+        }
+
+        /** Leaves the next document without a value (it becomes absent in the resulting column). */
+        public void addAbsent() {
+            if (absent == null) {
+                absent = new FixedBitSet(docCount);
+            }
+            absent.set(doc);
+            offsets[doc + 1] = dataLen;
+            doc++;
+        }
+
+        /** Whether every document so far has been left absent (the column would carry no values). */
+        public boolean isEmpty() {
+            return anyPresent == false;
+        }
+
+        /** Finishes the accumulated values into a {@link BinaryColumn}. Call exactly once. */
+        public BinaryColumn build() {
+            assert doc == docCount : "added [" + doc + "] documents but expected [" + docCount + "]";
+            return new EicfBinaryColumnAdapter(name, fieldType, absent, docCount, data, 0, offsets);
+        }
+    }
+
+    /**
+     * Builds a {@code MultiValuedBinaryDocValuesField}-SeparateCount-compatible pair of columns for a
+     * multi-valued binary doc-values field: a values {@link BinaryColumn} plus a companion counts
+     * {@link LongColumn}. Per document the caller begins a doc ({@code startDoc}), adds zero or more
+     * values, then ends it ({@code endDoc}); the builder sorts the values (unsigned byte order) and
+     * encodes the document's binary value as the raw bytes when there is a single value (no length
+     * prefix) or {@code [VInt len][bytes]…} when there are several — matching
+     * {@code MultiValuedBinaryDocValuesField.SeparateCount#binaryValue()} — while the counts column
+     * records the per-document value count (absent when the document has no values).
+     *
+     * <p>It deliberately does <b>not</b> deduplicate: callers that derive values from single-valued
+     * (non-array) EICF leaf columns produce unique entries by construction (e.g. a flattened field's
+     * {@code key\0value} entries). Values are copied into a reused arena and written straight into the
+     * column's contiguous buffer, so the hot path allocates nothing per value.
+     */
+    public static SeparateCountColumnBuilder separateCountColumnBuilder(
+        int docCount,
+        String valuesName,
+        IndexableFieldType valuesType,
+        String countsName,
+        IndexableFieldType countsType
+    ) {
+        return new SeparateCountColumnBuilder(docCount, valuesName, valuesType, countsName, countsType);
+    }
+
+    /** @see #separateCountColumnBuilder */
+    public static final class SeparateCountColumnBuilder {
+        private final BinaryColumnBuilder values;
+        private final LongColumnBuilder counts;
+        // Per-document scratch: values are copied into the arena, then sorted by index without moving bytes.
+        private byte[] arena = new byte[64];
+        private int arenaLen;
+        private int[] entryOff = new int[8];
+        private int[] entryLen = new int[8];
+        private int[] order = new int[8];
+        private int entryCount;
+
+        SeparateCountColumnBuilder(
+            int docCount,
+            String valuesName,
+            IndexableFieldType valuesType,
+            String countsName,
+            IndexableFieldType countsType
+        ) {
+            this.values = new BinaryColumnBuilder(docCount, valuesName, valuesType);
+            this.counts = new LongColumnBuilder(docCount, countsName, countsType, LongColumn.NumericKind.LONG);
+        }
+
+        /** Begins accumulating values for the next document. */
+        public void startDoc() {
+            arenaLen = 0;
+            entryCount = 0;
+        }
+
+        /** Adds one value for the current document. */
+        public void addValue(byte[] bytes, int off, int len) {
+            if (entryCount == entryOff.length) {
+                entryOff = ArrayUtil.grow(entryOff, entryCount + 1);
+                entryLen = ArrayUtil.grow(entryLen, entryCount + 1);
+                order = ArrayUtil.grow(order, entryCount + 1);
+            }
+            if (arenaLen + len > arena.length) {
+                arena = ArrayUtil.grow(arena, arenaLen + len);
+            }
+            System.arraycopy(bytes, off, arena, arenaLen, len);
+            entryOff[entryCount] = arenaLen;
+            entryLen[entryCount] = len;
+            arenaLen += len;
+            entryCount++;
+        }
+
+        /** Adds one value for the current document from a {@link BytesRef}. */
+        public void addValue(BytesRef value) {
+            addValue(value.bytes, value.offset, value.length);
+        }
+
+        /** Finishes the current document, encoding its sorted values into the values + counts columns. */
+        public void endDoc() {
+            if (entryCount == 0) {
+                values.addAbsent();
+                counts.addAbsent();
+                return;
+            }
+            if (entryCount == 1) {
+                values.addBytes(arena, entryOff[0], entryLen[0]);
+            } else {
+                sortEntries();
+                for (int i = 0; i < entryCount; i++) {
+                    final int e = order[i];
+                    values.appendVInt(entryLen[e]);
+                    values.appendBytes(arena, entryOff[e], entryLen[e]);
+                }
+                values.commitValue();
+            }
+            counts.addLong(entryCount);
+        }
+
+        public BinaryColumn buildValues() {
+            return values.build();
+        }
+
+        public LongColumn buildCounts() {
+            return counts.build();
+        }
+
+        // Insertion sort of entry indices by unsigned byte order; entry counts per document are small.
+        private void sortEntries() {
+            for (int i = 0; i < entryCount; i++) {
+                order[i] = i;
+            }
+            for (int i = 1; i < entryCount; i++) {
+                final int current = order[i];
+                int j = i - 1;
+                while (j >= 0 && compareEntries(order[j], current) > 0) {
+                    order[j + 1] = order[j];
+                    j--;
+                }
+                order[j + 1] = current;
+            }
+        }
+
+        private int compareEntries(int a, int b) {
+            final int aOff = entryOff[a];
+            final int bOff = entryOff[b];
+            final int len = Math.min(entryLen[a], entryLen[b]);
+            for (int i = 0; i < len; i++) {
+                final int cmp = (arena[aOff + i] & 0xFF) - (arena[bOff + i] & 0xFF);
+                if (cmp != 0) {
+                    return cmp;
+                }
+            }
+            return entryLen[a] - entryLen[b];
         }
     }
 

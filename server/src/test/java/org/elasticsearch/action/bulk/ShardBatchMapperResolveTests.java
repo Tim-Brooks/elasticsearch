@@ -9,17 +9,24 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.eirf.EirfBatch;
 import org.elasticsearch.eirf.EirfRowBuilder;
 import org.elasticsearch.eirf.EirfSchema;
+import org.elasticsearch.index.IndexMode;
+import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.MapperServiceTestCase;
 import org.elasticsearch.index.mapper.NumberFieldMapper;
 import org.elasticsearch.index.mapper.ShardBatchMapper;
 import org.elasticsearch.index.mapper.ShardBatchMapper.BatchMapperResolution;
+import org.elasticsearch.index.mapper.ShardBatchMapper.ColumnGroup;
+import org.elasticsearch.index.mapper.flattened.FlattenedFieldMapper;
 import org.elasticsearch.xcontent.XContentBuilder;
 
 import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Resolve-time tests for the columnar batch path. After the columnar migration only
@@ -139,6 +146,57 @@ public class ShardBatchMapperResolveTests extends MapperServiceTestCase {
         assertNotNull(resolution);
         assertNotNull(resolution.columnMappers()[schema.findLeaf("known", schema.findNonLeaf("outer", 0))]);
         assertNull(resolution.columnMappers()[schema.findLeaf("unknown", schema.findNonLeaf("outer", 0))]);
+    }
+
+    private static Settings columnarSettings() {
+        return Settings.builder().put(IndexSettings.MODE.getKey(), IndexMode.COLUMNAR.name()).build();
+    }
+
+    public void testFlattenedGroupResolvesToParent() throws IOException {
+        assumeTrue("columnar index mode requires snapshot build", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
+        MapperService ms = createMapperService(
+            columnarSettings(),
+            mapping(b -> b.startObject("attrs").field("type", "flattened").endObject())
+        );
+        // EICF explodes the flattened object into a leaf per key; none has its own mapper, so they must
+        // resolve as a group against the flattened parent.
+        EirfSchema schema = schemaOf("attrs.host.name", "attrs.os.type");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup());
+        assertNotNull(resolution);
+        assertEquals("the child leaves belong to a group, not a leaf mapper", 1, resolution.groups().size());
+        ColumnGroup group = resolution.groups().getFirst();
+        assertTrue(group.mapper() instanceof FlattenedFieldMapper);
+        assertEquals(2, group.leafIndices().length);
+
+        Set<String> relativeKeys = new HashSet<>(Set.of(group.relativeKeys()));
+        assertEquals(Set.of("host.name", "os.type"), relativeKeys);
+
+        // The grouped leaves must not also be handed to a leaf mapper.
+        for (int leaf : group.leafIndices()) {
+            assertNull(resolution.columnMappers()[leaf]);
+        }
+    }
+
+    public void testFlattenedEmptyObjectResolvesAsLeaf() throws IOException {
+        assumeTrue("columnar index mode requires snapshot build", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
+        MapperService ms = createMapperService(
+            columnarSettings(),
+            mapping(b -> b.startObject("attrs").field("type", "flattened").endObject())
+        );
+        // An empty flattened object is encoded by EICF as a single leaf at the field path, which resolves
+        // directly to the flattened mapper (handled by its leaf mapColumnBatch as a no-op).
+        EirfSchema schema = schemaOf("attrs");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup());
+        assertNotNull(resolution);
+        assertTrue(resolution.groups().isEmpty());
+        assertTrue(resolution.columnMappers()[schema.findLeaf("attrs", 0)] instanceof FlattenedFieldMapper);
+    }
+
+    public void testFlattenedNonColumnarFallsBack() throws IOException {
+        // Without the binary/columnar doc-values configuration the flattened mapper does not support batch
+        // indexing, so its child leaves cannot be grouped and the batch falls back to the row-major path.
+        MapperService ms = mapper(mapping(b -> b.startObject("attrs").field("type", "flattened").endObject()));
+        assertNull(ShardBatchMapper.resolveMappers(schemaOf("attrs.host.name"), ms.mappingLookup()));
     }
 
     // TODO columnar: re-enable when keyword supports columnar batch indexing.

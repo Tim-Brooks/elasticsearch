@@ -49,6 +49,14 @@ final class EicfColumnBuilder {
     private final Recycler<BytesRef> recycler;
     /** The active typed builder, or {@code null} until the first value (or {@link #finish}). */
     private TypedBuilder current;
+    /**
+     * Mirrors {@code current.kind()} for the active builder ({@link EicfColumnKind#NONE} while
+     * {@code current == null}). Cached as a primitive on the facade so the per-value type check in
+     * {@link #ensure} is a plain field compare on {@code this} — it never dereferences {@code current},
+     * avoiding a megamorphic interface call on the hot path. Kept in sync at the two points where
+     * {@code current} is (re)assigned for value accumulation: {@link #ensure} and {@link #promoteToUnion}.
+     */
+    private byte currentKind = EicfColumnKind.NONE;
     /** Absent documents seen before the first value, backfilled when a typed builder is created. */
     private int leadingAbsents;
 
@@ -148,17 +156,19 @@ final class EicfColumnBuilder {
     private void ensure(byte kind) {
         if (current == null) {
             current = newTyped(kind, recycler);
+            currentKind = kind;
             for (int i = 0; i < leadingAbsents; i++) {
                 current.addAbsent();
             }
             leadingAbsents = 0;
-        } else if (current.kind() != kind && current.kind() != EicfColumnKind.UNION) {
+        } else if (currentKind != kind && currentKind != EicfColumnKind.UNION) {
             promoteToUnion();
         }
     }
 
     private void promoteToUnion() {
-        if (current != null && current.kind() == EicfColumnKind.UNION) {
+        // currentKind is NONE while current == null, so this never short-circuits the leading-absents path.
+        if (currentKind == EicfColumnKind.UNION) {
             return;
         }
         if (current != null) {
@@ -171,6 +181,7 @@ final class EicfColumnBuilder {
             }
             current = union;
         }
+        currentKind = EicfColumnKind.UNION;
         leadingAbsents = 0;
     }
 

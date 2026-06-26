@@ -14,14 +14,19 @@ import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.index.IndexOptions;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.settings.Setting;
+import org.elasticsearch.eicf.EicfLuceneColumns;
+import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.IndexVersions;
 import org.elasticsearch.index.analysis.AnalyzerScope;
 import org.elasticsearch.index.analysis.NamedAnalyzer;
+import org.elasticsearch.index.mapper.BatchDocumentParserContext;
 import org.elasticsearch.index.mapper.BinaryDocValuesSyntheticFieldLoader;
+import org.elasticsearch.index.mapper.ColumnBatchBuilder;
 import org.elasticsearch.index.mapper.CompositeSyntheticFieldLoader;
 import org.elasticsearch.index.mapper.DocumentParserContext;
 import org.elasticsearch.index.mapper.FieldMapper;
@@ -34,9 +39,12 @@ import org.elasticsearch.index.mapper.SourceLoader;
 import org.elasticsearch.index.mapper.StringStoredFieldFieldLoader;
 import org.elasticsearch.index.mapper.TextParams;
 import org.elasticsearch.index.mapper.TextSearchInfo;
+import org.elasticsearch.sourcebatch.SourceColumn;
+import org.elasticsearch.sourcebatch.SourceColumnCursor;
 import org.elasticsearch.xcontent.XContentBuilder;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -327,6 +335,140 @@ public class PatternTextFieldMapper extends FieldMapper {
                     context.doc().add(new SortedSetDocValuesField(fieldType().argsFieldName(), new BytesRef(remainingArgs)));
                 }
             }
+        }
+    }
+
+    @Override
+    public boolean supportsBatchIndexing() {
+        // Mirror the keyword/number/date gates: scripts, copy_to and multi-fields pull in behavior the
+        // columnar batch path does not reproduce, so only plain pattern_text fields are eligible. Both the
+        // templating and stored-fallback paths are reproduced in mapColumnBatch below.
+        return hasScript() == false && copyTo().copyToFields().isEmpty() && multiFields().iterator().hasNext() == false;
+    }
+
+    @Override
+    public void mapColumnBatch(SourceColumn column, BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        final int docCount = column.docCount();
+
+        // Primary inverted field: wrap the raw Body string column directly (zero-copy for an EICF string
+        // column). Lucene applies the configured analyzer lazily per document during the row-pass inversion
+        // (BinaryColumnAdapter.tokenStream -> analyzer.tokenStream), exactly mirroring the row document model
+        // where parseCreateField stores the string in a tokenized Field and IndexingChain inverts it.
+        out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fieldType().name(), fieldType));
+
+        if (fieldType().disableTemplating()) {
+            // Templating disabled: only the raw-text stored column is produced (see parseCreateField).
+            final EicfLuceneColumns.BinaryColumnBuilder stored = EicfLuceneColumns.binaryColumnBuilder(
+                docCount,
+                fieldType().storedNamed(),
+                BinaryDocValuesField.TYPE
+            );
+            final SourceColumnCursor cursor = column.cursor();
+            while (cursor.advance()) {
+                if (cursor.type() == EirfType.STRING) {
+                    requireBinaryDocValuesForRawText();
+                    stored.addString(cursor.stringValue().string());
+                } else {
+                    stored.addAbsent();
+                }
+            }
+            if (stored.isEmpty() == false) {
+                out.addColumn(stored.build());
+            }
+            return;
+        }
+
+        // Templating enabled: split each value into the template/args sub-columns, mirroring parseCreateField.
+        // Each sub-column packs its computed values into one contiguous buffer for cache-friendly indexing.
+        final IndexableFieldType templateIdFieldType = templateIdMapper.buildKeywordField(new BytesRef()).fieldType();
+        final EicfLuceneColumns.BinaryColumnBuilder templateId = EicfLuceneColumns.binaryColumnBuilder(
+            docCount,
+            fieldType().templateIdFieldName(),
+            templateIdFieldType
+        );
+        final EicfLuceneColumns.BinaryColumnBuilder template = EicfLuceneColumns.binaryColumnBuilder(
+            docCount,
+            fieldType().templateFieldName(),
+            SortedSetDocValuesField.TYPE
+        );
+        final EicfLuceneColumns.BinaryColumnBuilder argsInfo = EicfLuceneColumns.binaryColumnBuilder(
+            docCount,
+            fieldType().argsInfoFieldName(),
+            SortedSetDocValuesField.TYPE
+        );
+        final EicfLuceneColumns.BinaryColumnBuilder args = EicfLuceneColumns.binaryColumnBuilder(
+            docCount,
+            fieldType().argsFieldName(),
+            useBinaryDocValueArgs ? BinaryDocValuesField.TYPE : SortedSetDocValuesField.TYPE
+        );
+        final EicfLuceneColumns.BinaryColumnBuilder stored = EicfLuceneColumns.binaryColumnBuilder(
+            docCount,
+            fieldType().storedNamed(),
+            BinaryDocValuesField.TYPE
+        );
+
+        final SourceColumnCursor cursor = column.cursor();
+        try {
+            while (cursor.advance()) {
+                if (cursor.type() != EirfType.STRING) {
+                    templateId.addAbsent();
+                    template.addAbsent();
+                    argsInfo.addAbsent();
+                    args.addAbsent();
+                    stored.addAbsent();
+                    continue;
+                }
+                final String value = cursor.stringValue().string();
+                final PatternTextValueProcessor.Parts parts = PatternTextValueProcessor.split(value);
+                templateId.addString(parts.templateId());
+                if (parts.useBinaryDocValuesForRawText()) {
+                    requireBinaryDocValuesForRawText();
+                    stored.addString(value);
+                    template.addAbsent();
+                    argsInfo.addAbsent();
+                    args.addAbsent();
+                } else {
+                    stored.addAbsent();
+                    template.addString(parts.template());
+                    argsInfo.addString(Arg.encodeInfo(parts.argsInfo()));
+                    if (parts.args().isEmpty() == false) {
+                        args.addString(Arg.encodeRemainingArgs(parts));
+                    } else {
+                        args.addAbsent();
+                    }
+                }
+            }
+        } catch (IOException e) {
+            // Arg.encodeInfo writes to a pre-sized in-memory buffer and does not realistically fail; surface
+            // any failure so ShardBatchMapper falls back to the row-major path rather than dropping data.
+            throw new UncheckedIOException(e);
+        }
+
+        if (templateId.isEmpty() == false) {
+            out.addColumn(templateId.build());
+        }
+        if (template.isEmpty() == false) {
+            out.addColumn(template.build());
+        }
+        if (argsInfo.isEmpty() == false) {
+            out.addColumn(argsInfo.build());
+        }
+        if (args.isEmpty() == false) {
+            out.addColumn(args.build());
+        }
+        if (stored.isEmpty() == false) {
+            out.addColumn(stored.build());
+        }
+    }
+
+    /**
+     * The legacy raw-text path stores values in a {@link StoredField} rather than binary doc values; the
+     * columnar batch path does not emit stored fields, so signal a fallback to the row-major path. Not
+     * reachable for a fresh time-series/columnar index, where {@link #useBinaryDocValuesForRawText} is true.
+     */
+    private void requireBinaryDocValuesForRawText() {
+        if (useBinaryDocValuesForRawText == false) {
+            throw new UnsupportedOperationException("pattern_text columnar batch indexing requires binary-doc-values raw-text storage");
         }
     }
 

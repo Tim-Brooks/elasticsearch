@@ -17,6 +17,7 @@ import org.apache.lucene.document.column.LongTupleCursor;
 import org.apache.lucene.document.column.ObjectTupleCursor;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.NumericUtils;
 import org.elasticsearch.action.index.IndexRequest;
@@ -26,6 +27,8 @@ import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.eicf.EicfBatch;
 import org.elasticsearch.eicf.EicfEncoder;
+import org.elasticsearch.index.IndexMode;
+import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.mapper.FieldMapper;
@@ -42,7 +45,9 @@ import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,6 +73,12 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
     ).build();
 
     private static final Settings STORED_SOURCE_SETTINGS = indexSettings(IndexVersion.current(), 1, 0).build();
+
+    // Columnar mode gives flattened its binary doc-values / doc-values-only configuration.
+    private static final Settings COLUMNAR_SETTINGS = indexSettings(IndexVersion.current(), 1, 0).put(
+        IndexSettings.MODE.getKey(),
+        IndexMode.COLUMNAR.name()
+    ).build();
 
     private IndexShard newShardWithMapping(String mapping, Settings settings) throws IOException {
         IndexMetadata md = IndexMetadata.builder("index").putMapping(mapping).settings(settings).primaryTerm(0, 1).build();
@@ -339,6 +350,92 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
         }
 
         closeShards(shard);
+    }
+
+    public void testFlattenedColumnGroupEmitsKeyedAndRootColumns() throws Exception {
+        assumeTrue("columnar index mode requires snapshot build", IndexMode.COLUMNAR_FEATURE_FLAG.isEnabled());
+        String mapping = """
+            {
+              "properties": {
+                "attrs": { "type": "flattened" }
+              }
+            }""";
+        IndexShard shard = newShardWithMapping(mapping, COLUMNAR_SETTINGS);
+
+        // doc0 has two keys (multi-value SeparateCount encoding), doc1 a single key (raw encoding),
+        // doc2 has no attrs at all (absent in every column). Note: an empty flattened object {} is not
+        // encodable in EICF's columnar format, so the absent case uses a document without the field.
+        List<BytesReference> sources = List.of(
+            new BytesArray("{\"attrs\":{\"host.name\":\"h1\",\"os.type\":\"linux\"}}"),
+            new BytesArray("{\"attrs\":{\"host.name\":\"h2\"}}"),
+            new BytesArray("{}")
+        );
+        int numDocs = sources.size();
+
+        try (EicfBatch batch = EicfEncoder.encode(sources, XContentType.JSON)) {
+            ColumnBatch columnBatch = mapToColumnBatch(shard, batch, items(numDocs));
+            Map<String, Column> cols = columnsByName(columnBatch);
+
+            // Keyed sub-field: BINARY values + NUMERIC .counts companion (MultiValuedBinaryDocValuesField SeparateCount).
+            Column keyed = cols.get("attrs._keyed");
+            assertNotNull("attrs._keyed column must be present", keyed);
+            assertTrue(keyed instanceof BinaryColumn);
+            assertEquals(DocValuesType.BINARY, keyed.fieldType().docValuesType());
+            Column keyedCounts = cols.get("attrs._keyed.counts");
+            assertNotNull("attrs._keyed.counts column must be present", keyedCounts);
+            assertEquals(DocValuesType.NUMERIC, keyedCounts.fieldType().docValuesType());
+            // doc2 (empty object) is absent in every column.
+            assertEquals(Column.Density.SPARSE, keyed.density());
+
+            // Sorted-unique "key\0value" entries; doc2 absent (cursor skips it).
+            assertSeparateCount(
+                (BinaryColumn) keyed,
+                (LongColumn) keyedCounts,
+                List.of(List.of("host.name\0h1", "os.type\0linux"), List.of("host.name\0h2"))
+            );
+
+            // In (strict) columnar mode the flattened field is doc-values-only with indexed=false, so the
+            // root field carries no doc values (hasRootDocValues=false): only the keyed columns are emitted.
+            assertNull("root value column must not be present in columnar mode", cols.get("attrs"));
+            assertNull("root counts column must not be present in columnar mode", cols.get("attrs.counts"));
+        }
+
+        closeShards(shard);
+    }
+
+    /**
+     * Asserts a SeparateCount values+counts column pair decodes to {@code expectedByDoc} for the present
+     * documents in order, and that no further documents are present (trailing docs are absent).
+     */
+    private static void assertSeparateCount(BinaryColumn values, LongColumn counts, List<List<String>> expectedByDoc) {
+        ObjectTupleCursor<BytesRef> valueCursor = values.tuples();
+        LongTupleCursor countCursor = counts.tuples();
+        for (List<String> expected : expectedByDoc) {
+            int doc = valueCursor.nextDoc();
+            assertThat(doc, not(equalTo(DocIdSetIterator.NO_MORE_DOCS)));
+            assertEquals("values and counts must cover the same documents", doc, countCursor.nextDoc());
+            int count = (int) countCursor.longValue();
+            assertEquals(expected.size(), count);
+            assertEquals(expected, decode(BytesRef.deepCopyOf(valueCursor.value()), count));
+        }
+        assertEquals(DocIdSetIterator.NO_MORE_DOCS, valueCursor.nextDoc());
+        assertEquals(DocIdSetIterator.NO_MORE_DOCS, countCursor.nextDoc());
+    }
+
+    /** Decodes a SeparateCount binary doc value: raw bytes for a single value, else {@code [VInt len][bytes]…}. */
+    private static List<String> decode(BytesRef packed, int count) {
+        if (count == 1) {
+            return List.of(packed.utf8ToString());
+        }
+        List<String> out = new ArrayList<>(count);
+        ByteArrayDataInput in = new ByteArrayDataInput(packed.bytes, packed.offset, packed.length);
+        for (int i = 0; i < count; i++) {
+            int len = in.readVInt();
+            int pos = in.getPosition();
+            out.add(new String(packed.bytes, pos, len, StandardCharsets.UTF_8));
+            in.setPosition(pos + len);
+        }
+        return out;
     }
 
     // TODO columnar: re-enable / rewrite for the columnar path when these mappers support batch indexing.

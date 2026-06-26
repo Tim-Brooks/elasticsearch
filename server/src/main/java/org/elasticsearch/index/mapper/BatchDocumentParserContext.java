@@ -25,7 +25,7 @@ import java.util.List;
  * scalar fields (see {@code ShardBatchMapper}), so behaviors that require nested documents,
  * array handling, or dot expansion are not exercised here.
  */
-final class BatchDocumentParserContext extends DocumentParserContext {
+public final class BatchDocumentParserContext extends DocumentParserContext {
 
     // TODO: Will need to implement ContentPath for future mappers.
     private final ContentPath path = new ContentPath();

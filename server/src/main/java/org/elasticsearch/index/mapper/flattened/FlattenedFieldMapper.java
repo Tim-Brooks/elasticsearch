@@ -9,10 +9,13 @@
 
 package org.elasticsearch.index.mapper.flattened;
 
+import org.apache.lucene.document.BinaryDocValuesField;
+import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.ImpactsEnum;
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.MultiTerms;
 import org.apache.lucene.index.OrdinalMap;
@@ -29,8 +32,10 @@ import org.apache.lucene.search.PrefixQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.TermRangeQuery;
+import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.AttributeSource;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.BytesRefBuilder;
 import org.apache.lucene.util.IOBooleanSupplier;
 import org.apache.lucene.util.automaton.Automata;
 import org.apache.lucene.util.automaton.Automaton;
@@ -45,6 +50,8 @@ import org.elasticsearch.common.unit.Fuzziness;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.eicf.EicfLuceneColumns;
+import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
@@ -62,8 +69,10 @@ import org.elasticsearch.index.fielddata.SortedBinaryDocValues;
 import org.elasticsearch.index.fielddata.fieldcomparator.BytesRefFieldComparatorSource;
 import org.elasticsearch.index.fielddata.plain.BytesBinaryIndexFieldData;
 import org.elasticsearch.index.fielddata.plain.SortedSetOrdinalsIndexFieldData;
+import org.elasticsearch.index.mapper.BatchDocumentParserContext;
 import org.elasticsearch.index.mapper.BlockLoader;
 import org.elasticsearch.index.mapper.BlockSourceReader;
+import org.elasticsearch.index.mapper.ColumnBatchBuilder;
 import org.elasticsearch.index.mapper.DocumentParserContext;
 import org.elasticsearch.index.mapper.DynamicFieldType;
 import org.elasticsearch.index.mapper.FieldMapper;
@@ -76,6 +85,7 @@ import org.elasticsearch.index.mapper.MapperMergeContext;
 import org.elasticsearch.index.mapper.MapperParsingException;
 import org.elasticsearch.index.mapper.MappingParser;
 import org.elasticsearch.index.mapper.MappingParserContext;
+import org.elasticsearch.index.mapper.MultiValuedBinaryDocValuesField;
 import org.elasticsearch.index.mapper.PassThroughFieldSource;
 import org.elasticsearch.index.mapper.SourceLoader;
 import org.elasticsearch.index.mapper.SourceValueFetcher;
@@ -96,8 +106,10 @@ import org.elasticsearch.search.aggregations.support.CoreValuesSourceType;
 import org.elasticsearch.search.aggregations.support.ValuesSourceType;
 import org.elasticsearch.search.sort.BucketedSort;
 import org.elasticsearch.search.sort.SortOrder;
+import org.elasticsearch.sourcebatch.SourceColumn;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xcontent.XContentString;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -148,6 +160,11 @@ public final class FlattenedFieldMapper extends FieldMapper implements PassThrou
     public static final String KEYED_FIELD_SUFFIX = "._keyed";
     public static final String KEYED_IGNORED_VALUES_FIELD_SUFFIX = "._keyed._ignored";
     public static final String TIME_SERIES_DIMENSIONS_ARRAY_PARAM = "time_series_dimensions";
+
+    // The per-document value-count companion for the columnar batch path's binary doc-values columns,
+    // matching the row path's MultiValuedBinaryDocValuesField.SeparateCount counts field (an indexed
+    // numeric doc value). Same field type KeywordFieldMapper uses for its multi-valued .counts column.
+    private static final IndexableFieldType COUNTS_FIELD_TYPE = NumericDocValuesField.indexedField("f", 0L).fieldType();
 
     public static final NodeFeature FLATTENED_MAPPED_SUBFIELDS_FEATURE = new NodeFeature("mapper.flattened.mapped_subfields");
     public static final NodeFeature FLATTENED_PASSTHROUGH_FEATURE = new NodeFeature("mapper.flattened.passthrough");
@@ -1696,6 +1713,172 @@ public final class FlattenedFieldMapper extends FieldMapper implements PassThrou
         if (mappedFieldType.hasDocValues() == false) {
             context.addToFieldNames(fieldType().name());
         }
+    }
+
+    /**
+     * Whether this flattened field can be driven through the columnar bulk batch path. Only the
+     * logsdb_columnar configuration is supported: binary doc values, doc-values-only (no inverted
+     * terms), no mapped sub-fields, dimensions, scripts, copy_to or multi-fields. Everything else
+     * falls back to the row-major path. Required (alongside {@link #resolvesColumnGroup()}) so that an
+     * empty flattened object — encoded by EICF as a {@code KEY_VALUE} leaf at the field path — does not
+     * force the whole batch to fall back.
+     */
+    private boolean supportsColumnarBatch() {
+        return hasScript() == false
+            && copyTo().copyToFields().isEmpty()
+            && multiFields().iterator().hasNext() == false
+            && mappedSubFields.isEmpty()
+            && builder.dimensions.getValue().isEmpty()
+            && builder.usesBinaryDocValues
+            && builder.indexed.get() == false
+            && fieldType().hasDocValues();
+    }
+
+    @Override
+    public boolean supportsBatchIndexing() {
+        return supportsColumnarBatch();
+    }
+
+    @Override
+    public boolean resolvesColumnGroup() {
+        return supportsColumnarBatch();
+    }
+
+    @Override
+    public void mapColumnBatch(SourceColumn column, BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        // Defensive: a flattened value is always an object, and the columnar encoder represents an empty
+        // object as absent (no leaf), so a flattened field is normally only ever resolved as a column group
+        // (see mapColumnGroupBatch), not as a single leaf. This is reached only for absent/null docs (a
+        // no-op) or malformed input (a scalar/KEY_VALUE leaf at the flattened path), which falls back.
+        final int docCount = column.docCount();
+        for (int d = 0; d < docCount; d++) {
+            final byte type = column.getTypeByte(d);
+            if (type == EirfType.ABSENT || type == EirfType.NULL) {
+                continue;
+            }
+            if (type == EirfType.KEY_VALUE) {
+                if (column.getKeyValue(d).next()) {
+                    throw new UnsupportedOperationException(
+                        "flattened columnar batch indexing does not support non-empty KEY_VALUE columns"
+                    );
+                }
+                continue;
+            }
+            throw new UnsupportedOperationException(
+                "flattened columnar batch indexing got unexpected column type [" + EirfType.name(type) + "]"
+            );
+        }
+    }
+
+    @Override
+    public void mapColumnGroupBatch(
+        SourceColumn[] columns,
+        String[] relativeKeys,
+        BatchDocumentParserContext[] contexts,
+        ColumnBatchBuilder out
+    ) {
+        final int docCount = contexts.length;
+        final boolean hasRoot = builder.hasRootDocValues();
+        final int ignoreAbove = builder.ignoreAbove.get();
+        final String name = fieldType().name();
+
+        // keyed: <name>._keyed holding sorted-unique "key\0value" entries; root: <name> holding the bare
+        // values (only when root doc values are written). Both follow the SeparateCount layout: a binary
+        // values column plus a numeric .counts companion (see MultiValuedBinaryDocValuesField).
+        final EicfLuceneColumns.SeparateCountColumnBuilder keyed = EicfLuceneColumns.separateCountColumnBuilder(
+            docCount,
+            name + KEYED_FIELD_SUFFIX,
+            BinaryDocValuesField.TYPE,
+            name + KEYED_FIELD_SUFFIX + MultiValuedBinaryDocValuesField.SeparateCount.COUNT_FIELD_SUFFIX,
+            COUNTS_FIELD_TYPE
+        );
+        final EicfLuceneColumns.SeparateCountColumnBuilder root = hasRoot
+            ? EicfLuceneColumns.separateCountColumnBuilder(
+                docCount,
+                name,
+                BinaryDocValuesField.TYPE,
+                name + MultiValuedBinaryDocValuesField.SeparateCount.COUNT_FIELD_SUFFIX,
+                COUNTS_FIELD_TYPE
+            )
+            : null;
+
+        // Per column the "key\0" prefix is constant across documents — compute it once.
+        final byte[][] keyPrefixes = new byte[columns.length][];
+        final BytesRefBuilder prefixScratch = new BytesRefBuilder();
+        for (int k = 0; k < columns.length; k++) {
+            prefixScratch.clear();
+            prefixScratch.copyChars(relativeKeys[k]);
+            prefixScratch.append(FlattenedFieldParser.SEPARATOR_BYTE);
+            keyPrefixes[k] = ArrayUtil.copyOfSubArray(prefixScratch.bytes(), 0, prefixScratch.length());
+        }
+
+        final BytesRefBuilder valueScratch = new BytesRefBuilder();
+        final BytesRefBuilder keyedScratch = new BytesRefBuilder();
+        for (int d = 0; d < docCount; d++) {
+            keyed.startDoc();
+            if (root != null) {
+                root.startDoc();
+            }
+            for (int k = 0; k < columns.length; k++) {
+                final SourceColumn col = columns[k];
+                final byte type = col.getTypeByte(d);
+                if (type == EirfType.ABSENT || type == EirfType.NULL) {
+                    continue;
+                }
+                // Resolve the value bytes (STRING uses the column bytes directly; other scalars are
+                // stringified like the row path's parser.text(); arrays / KEY_VALUE fall back).
+                final byte[] vb;
+                final int vo;
+                final int vl;
+                if (type == EirfType.STRING) {
+                    final XContentString.UTF8Bytes utf8 = col.getStringValue(d).bytes();
+                    vb = utf8.bytes();
+                    vo = utf8.offset();
+                    vl = utf8.length();
+                } else {
+                    valueScratch.copyChars(scalarToString(col, d, type));
+                    vb = valueScratch.bytes();
+                    vo = 0;
+                    vl = valueScratch.length();
+                }
+                if (vl > ignoreAbove) {
+                    throw new UnsupportedOperationException("flattened columnar batch indexing does not support ignore_above overflow");
+                }
+                if (root != null) {
+                    root.addValue(vb, vo, vl);
+                }
+                final byte[] prefix = keyPrefixes[k];
+                keyedScratch.clear();
+                keyedScratch.append(prefix, 0, prefix.length);
+                keyedScratch.append(vb, vo, vl);
+                keyed.addValue(keyedScratch.bytes(), 0, keyedScratch.length());
+            }
+            keyed.endDoc();
+            if (root != null) {
+                root.endDoc();
+            }
+        }
+
+        out.addColumn(keyed.buildValues());
+        out.addColumn(keyed.buildCounts());
+        if (root != null) {
+            out.addColumn(root.buildValues());
+            out.addColumn(root.buildCounts());
+        }
+    }
+
+    private static String scalarToString(SourceColumn col, int doc, byte type) {
+        return switch (type) {
+            case EirfType.LONG -> Long.toString(col.getLongValue(doc));
+            case EirfType.INT -> Integer.toString(col.getIntValue(doc));
+            case EirfType.DOUBLE -> Double.toString(col.getDoubleValue(doc));
+            case EirfType.FLOAT -> Float.toString(col.getFloatValue(doc));
+            case EirfType.TRUE -> "true";
+            case EirfType.FALSE -> "false";
+            default -> throw new UnsupportedOperationException(
+                "flattened columnar batch indexing does not support EIRF type [" + EirfType.name(type) + "]"
+            );
+        };
     }
 
     @Override

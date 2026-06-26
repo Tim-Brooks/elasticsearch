@@ -355,12 +355,22 @@ public class EicfEncoderTests extends ESTestCase {
         );
     }
 
-    public void testEmptyObjectThrows() {
-        // Empty objects as top-level fields are not yet supported in EICF
-        expectThrows(
-            UnsupportedOperationException.class,
-            () -> EicfEncoder.encode(List.of(new BytesArray("{\"obj\":{}}")), XContentType.JSON)
-        );
+    public void testEmptyObjectIsAbsent() throws IOException {
+        // An empty object contributes no values, so it is treated as absent and emits no leaf column
+        // (see the TODO in EicfEncoder#flattenObject). A sibling scalar is still encoded normally.
+        try (EicfBatch batch = EicfEncoder.encode(List.of(new BytesArray("{\"a\":1,\"obj\":{}}")), XContentType.JSON)) {
+            assertEquals(1, batch.schema().leafCount());
+            assertEquals("a", batch.schema().getFullPath(0));
+        }
+        // A nested empty object is likewise dropped, leaving only the real leaves.
+        try (EicfBatch batch = EicfEncoder.encode(List.of(new BytesArray("{\"outer\":{\"b\":2,\"empty\":{}}}")), XContentType.JSON)) {
+            assertEquals(1, batch.schema().leafCount());
+            assertEquals("outer.b", batch.schema().getFullPath(0));
+        }
+        // A document whose only field is an empty object encodes with no leaves at all.
+        try (EicfBatch batch = EicfEncoder.encode(List.of(new BytesArray("{\"obj\":{}}")), XContentType.JSON)) {
+            assertEquals(0, batch.schema().leafCount());
+        }
     }
 
     public void testBoundsCheck() throws IOException {
