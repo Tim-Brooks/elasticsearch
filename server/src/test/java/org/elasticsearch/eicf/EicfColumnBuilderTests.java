@@ -9,8 +9,12 @@
 
 package org.elasticsearch.eicf;
 
+import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.test.ESTestCase;
+
+import java.nio.charset.StandardCharsets;
 
 /**
  * Unit tests for {@link EicfColumnBuilder} focused on kind selection, lazy materialisation of the
@@ -238,7 +242,7 @@ public class EicfColumnBuilderTests extends ESTestCase {
         EicfColumnBuilder b = new EicfColumnBuilder();
         b.addLong(1);
         b.addAbsent();
-        b.addDouble(2.5); // promotes; the absent row must be replayed into the union
+        b.addDouble(2.5); // promotes; the absent row must carry into the union
         EicfColumnData col = b.finish(3);
 
         assertEquals(EicfColumnKind.UNION, col.kind());
@@ -249,8 +253,80 @@ public class EicfColumnBuilderTests extends ESTestCase {
         assertEquals(2.5, r.getDoubleValue(2), 0.0);
     }
 
+    public void testBinaryThenLongPromotesToUnion() {
+        EicfColumnBuilder b = new EicfColumnBuilder();
+        b.addBinary(utf8("payload"));
+        b.addLong(7);
+        EicfColumnData col = b.finish(2);
+
+        assertEquals(EicfColumnKind.UNION, col.kind());
+        EicfColumn r = read(col);
+        assertEquals(EirfType.BINARY, r.getTypeByte(0));
+        BytesRef bin = r.getBinaryValue(0);
+        assertEquals("payload", new String(bin.bytes, bin.offset, bin.length, StandardCharsets.UTF_8));
+        assertEquals(EirfType.LONG, r.getTypeByte(1));
+        assertEquals(7L, r.getLongValue(1));
+    }
+
+    public void testArrayThenLongPromotesToUnion() {
+        EicfColumnBuilder b = new EicfColumnBuilder();
+        b.addArray(EirfType.FIXED_ARRAY, fixedIntArray(1, 2));
+        b.addAbsent();
+        b.addLong(99); // promotes; the array's own type vector and the absent row must carry into the union
+        EicfColumnData col = b.finish(3);
+
+        assertEquals(EicfColumnKind.UNION, col.kind());
+        EicfColumn r = read(col);
+        assertEquals(EirfType.FIXED_ARRAY, r.getTypeByte(0));
+        var arr = r.getArrayValue(0);
+        assertTrue(arr.next());
+        assertEquals(1, arr.intValue());
+        assertTrue(arr.next());
+        assertEquals(2, arr.intValue());
+        assertFalse(arr.next());
+        assertTrue(r.isAbsent(1));
+        assertEquals(EirfType.ABSENT, r.getTypeByte(1));
+        assertEquals(EirfType.LONG, r.getTypeByte(2));
+        assertEquals(99L, r.getLongValue(2));
+    }
+
+    public void testNumericPromotionWithInterleavedAbsents() {
+        // Several absents among the longs precede the double that triggers promotion. The adopted numeric
+        // buffer keeps an 8-byte zero slot for each absent doc; decoding must still be correct because the
+        // union locates values via offsets[d] and detects absence via the bitset, never via payload length.
+        EicfColumnBuilder b = new EicfColumnBuilder();
+        b.addLong(1);
+        b.addAbsent();
+        b.addLong(3);
+        b.addAbsent();
+        b.addDouble(5.5); // promotes
+        b.addAbsent();
+        b.addLong(7);
+        EicfColumnData col = b.finish(7);
+
+        assertEquals(EicfColumnKind.UNION, col.kind());
+        EicfColumn r = read(col);
+        assertEquals(1L, r.getLongValue(0));
+        assertTrue(r.isAbsent(1));
+        assertEquals(3L, r.getLongValue(2));
+        assertTrue(r.isAbsent(3));
+        assertEquals(5.5, r.getDoubleValue(4), 0.0);
+        assertTrue(r.isAbsent(5));
+        assertEquals(7L, r.getLongValue(6));
+    }
+
+    /** Builds a FIXED_ARRAY of {@code int} elements in EIRF packed form: a shared type byte then 4 LE bytes each. */
+    private static byte[] fixedIntArray(int... values) {
+        byte[] packed = new byte[1 + values.length * 4];
+        packed[0] = EirfType.INT;
+        for (int i = 0; i < values.length; i++) {
+            ByteUtils.writeIntLE(values[i], packed, 1 + i * 4);
+        }
+        return packed;
+    }
+
     private static org.elasticsearch.xcontent.XContentString.UTF8Bytes utf8(String s) {
-        byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
         return new org.elasticsearch.xcontent.XContentString.UTF8Bytes(bytes, 0, bytes.length);
     }
 }

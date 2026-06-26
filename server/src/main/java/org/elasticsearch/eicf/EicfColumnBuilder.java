@@ -161,17 +161,17 @@ final class EicfColumnBuilder {
         if (current != null && current.kind() == EicfColumnKind.UNION) {
             return;
         }
-        UnionBuilder union = new UnionBuilder(recycler);
         if (current != null) {
-            current.replayInto(union);
-            current.discard();
+            // Ownership of the data stream transfers to the union; the old builder must not be discarded.
+            current = current.promote(recycler);
         } else {
+            UnionBuilder union = new UnionBuilder(recycler);
             for (int i = 0; i < leadingAbsents; i++) {
                 union.addAbsent();
             }
+            current = union;
         }
         leadingAbsents = 0;
-        current = union;
     }
 
     private static TypedBuilder newTyped(byte kind, Recycler<BytesRef> recycler) {
@@ -208,8 +208,13 @@ final class EicfColumnBuilder {
 
         void addAbsent();
 
-        /** Re-emits every accumulated document into {@code union} (used during promotion). */
-        void replayInto(UnionBuilder union);
+        /**
+         * Promotes this builder to a terminal {@link UnionBuilder} by adopting its buffers, avoiding any
+         * per-value re-encoding. The returned union continues this column's document sequence. Ownership of
+         * the data stream transfers to the union, so the promoted builder must not be used or
+         * {@link #discard discarded} afterwards.
+         */
+        UnionBuilder promote(Recycler<BytesRef> recycler);
 
         /** Serialises the accumulated column into its four-field form. */
         EicfColumnData finish(int docCount);
@@ -317,17 +322,19 @@ final class EicfColumnBuilder {
         }
 
         @Override
-        public void replayInto(UnionBuilder union) {
-            BytesReference d = data.bytes();
+        public UnionBuilder promote(Recycler<BytesRef> recycler) {
+            // The numeric data is already 8 bytes per document (absent documents hold a zero slot); adopt it
+            // verbatim. The offset vector indexes the slot starts; the union reads numerics at offsets[d] and
+            // ignores the offset delta, so the retained absent slots are harmless (8 wasted bytes each).
+            byte present = kind == EicfColumnKind.LONG ? EirfType.LONG : EirfType.DOUBLE;
+            byte[] typeVec = new byte[count];
+            int[] offsets = new int[count + 1];
             for (int i = 0; i < count; i++) {
-                if (isAbsentAt(i)) {
-                    union.addAbsent();
-                } else if (kind == EicfColumnKind.LONG) {
-                    union.addLong(d.getLongLE(i * 8));
-                } else {
-                    union.addDouble(Double.longBitsToDouble(d.getLongLE(i * 8)));
-                }
+                typeVec[i] = isAbsentAt(i) ? EirfType.ABSENT : present;
+                offsets[i] = i * 8;
             }
+            offsets[count] = count * 8;
+            return new UnionBuilder(data, typeVec, offsets, count * 8, count, absent);
         }
 
         @Override
@@ -368,14 +375,18 @@ final class EicfColumnBuilder {
         }
 
         @Override
-        public void replayInto(UnionBuilder union) {
+        public UnionBuilder promote(Recycler<BytesRef> recycler) {
+            // Booleans carry no payload in a union (the value is the TRUE/FALSE type byte), so the union
+            // starts with an empty data buffer and an all-zero offset vector.
+            byte[] typeVec = new byte[count];
             for (int i = 0; i < count; i++) {
                 if (isAbsentAt(i)) {
-                    union.addAbsent();
+                    typeVec[i] = EirfType.ABSENT;
                 } else {
-                    union.addBoolean(values != null && values.get(i));
+                    typeVec[i] = (values != null && values.get(i)) ? EirfType.TRUE : EirfType.FALSE;
                 }
             }
+            return new UnionBuilder(newStream(recycler), typeVec, new int[count + 1], 0, count, absent);
         }
 
         @Override
@@ -432,24 +443,17 @@ final class EicfColumnBuilder {
         }
 
         @Override
-        public void replayInto(UnionBuilder union) {
-            BytesReference d = data.bytes();
+        public UnionBuilder promote(Recycler<BytesRef> recycler) {
+            // The data buffer is already dense (absent documents wrote no payload) and the offset vector
+            // already matches the union layout; adopt both and only synthesize the per-document type vector.
+            byte present = kind == EicfColumnKind.STRING ? EirfType.STRING : EirfType.BINARY;
+            byte[] typeVec = new byte[count];
+            for (int i = 0; i < count; i++) {
+                typeVec[i] = isAbsentAt(i) ? EirfType.ABSENT : present;
+            }
             offsets = ensureIntCapacity(offsets, count + 1);
             offsets[count] = dataLen;
-            for (int i = 0; i < count; i++) {
-                if (isAbsentAt(i)) {
-                    union.addAbsent();
-                    continue;
-                }
-                int len = offsets[i + 1] - offsets[i];
-                var ref = d.slice(offsets[i], len).toBytesRef();
-                XContentString.UTF8Bytes slice = new XContentString.UTF8Bytes(ref.bytes, ref.offset, ref.length);
-                if (kind == EicfColumnKind.STRING) {
-                    union.addString(slice);
-                } else {
-                    union.addBinary(slice);
-                }
-            }
+            return new UnionBuilder(data, typeVec, offsets, dataLen, count, absent);
         }
 
         @Override
@@ -516,19 +520,13 @@ final class EicfColumnBuilder {
         }
 
         @Override
-        public void replayInto(UnionBuilder union) {
-            BytesReference d = data.bytes();
+        public UnionBuilder promote(Recycler<BytesRef> recycler) {
+            // ARRAY already stores exactly the union representation: a dense data buffer, an offset vector,
+            // and a per-document type vector (the arrayType for present documents, ABSENT for absent ones).
+            // Adopt all three with no per-value work.
             offsets = ensureIntCapacity(offsets, count + 1);
             offsets[count] = dataLen;
-            for (int i = 0; i < count; i++) {
-                if (isAbsentAt(i)) {
-                    union.addAbsent();
-                    continue;
-                }
-                int len = offsets[i + 1] - offsets[i];
-                var ref = d.slice(offsets[i], len).toBytesRef();
-                union.addArray(typeVec[i], Arrays.copyOfRange(ref.bytes, ref.offset, ref.offset + len));
-            }
+            return new UnionBuilder(data, typeVec, offsets, dataLen, count, absent);
         }
 
         @Override
@@ -563,6 +561,21 @@ final class EicfColumnBuilder {
 
         UnionBuilder(Recycler<BytesRef> recycler) {
             this.data = newStream(recycler);
+        }
+
+        /**
+         * Adopts the buffers of a promoted typed builder. Ownership of {@code data} transfers to this union;
+         * {@code typeVec} and {@code offsets} hold the already-built per-document vectors (their capacity is
+         * grown lazily as further values arrive), and {@code count}/{@code absent} continue this column's
+         * document sequence.
+         */
+        UnionBuilder(RecyclerBytesStreamOutput data, byte[] typeVec, int[] offsets, int dataLen, int count, FixedBitSet absent) {
+            this.data = data;
+            this.typeVec = typeVec;
+            this.offsets = offsets;
+            this.dataLen = dataLen;
+            this.count = count;
+            this.absent = absent;
         }
 
         @Override
@@ -638,8 +651,8 @@ final class EicfColumnBuilder {
         }
 
         @Override
-        public void replayInto(UnionBuilder union) {
-            throw new AssertionError("a union builder is terminal and is never replayed");
+        public UnionBuilder promote(Recycler<BytesRef> recycler) {
+            throw new AssertionError("a union builder is terminal and is never promoted");
         }
 
         @Override
