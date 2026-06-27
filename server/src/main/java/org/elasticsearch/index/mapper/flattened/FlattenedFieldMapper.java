@@ -1836,13 +1836,23 @@ public final class FlattenedFieldMapper extends FieldMapper implements PassThrou
                     vo = utf8.offset();
                     vl = utf8.length();
                 } else {
-                    valueScratch.copyChars(scalarToString(col, d, type));
+                    valueScratch.copyChars(scalarToString(col, d, type, relativeKeys[k]));
                     vb = valueScratch.bytes();
                     vo = 0;
                     vl = valueScratch.length();
                 }
                 if (vl > ignoreAbove) {
-                    throw new UnsupportedOperationException("flattened columnar batch indexing does not support ignore_above overflow");
+                    throw new UnsupportedOperationException(
+                        "flattened columnar batch indexing does not support a value exceeding ignore_above ["
+                            + ignoreAbove
+                            + "] for field ["
+                            + fullPath()
+                            + "] key ["
+                            + relativeKeys[k]
+                            + "] (length "
+                            + vl
+                            + ")"
+                    );
                 }
                 if (root != null) {
                     root.addValue(vb, vo, vl);
@@ -1867,7 +1877,7 @@ public final class FlattenedFieldMapper extends FieldMapper implements PassThrou
         }
     }
 
-    private static String scalarToString(SourceColumn col, int doc, byte type) {
+    private String scalarToString(SourceColumn col, int doc, byte type, String key) {
         return switch (type) {
             case EirfType.LONG -> Long.toString(col.getLongValue(doc));
             case EirfType.INT -> Integer.toString(col.getIntValue(doc));
@@ -1875,8 +1885,16 @@ public final class FlattenedFieldMapper extends FieldMapper implements PassThrou
             case EirfType.FLOAT -> Float.toString(col.getFloatValue(doc));
             case EirfType.TRUE -> "true";
             case EirfType.FALSE -> "false";
+            // Arrays and nested key-value values inside a flattened field are not supported on the columnar
+            // path; name the field + key so the offending document can be identified from the fallback log.
             default -> throw new UnsupportedOperationException(
-                "flattened columnar batch indexing does not support EIRF type [" + EirfType.name(type) + "]"
+                "flattened columnar batch indexing does not support EIRF type ["
+                    + EirfType.name(type)
+                    + "] for field ["
+                    + fullPath()
+                    + "] key ["
+                    + key
+                    + "]"
             );
         };
     }

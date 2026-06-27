@@ -82,11 +82,11 @@ public final class ShardBatchMapper {
         // Runtime fields or index-time scripts anywhere in the mapping would require the normal
         // parsing flow; the batch path does not support them.
         if (lookup.getMapping().getRoot().runtimeFields().isEmpty() == false) {
-            logger.debug("batch indexing disabled: mapping defines runtime fields");
+            logger.info("batch indexing fallback: mapping defines runtime fields");
             return null;
         }
         if (lookup.indexTimeScriptMappers().isEmpty() == false) {
-            logger.debug("batch indexing disabled: mapping defines index-time scripts");
+            logger.info("batch indexing fallback: mapping defines index-time scripts");
             return null;
         }
 
@@ -117,7 +117,7 @@ public final class ShardBatchMapper {
                 }
                 // A field type without a mapper indicates a runtime field shadow.
                 if (lookup.getFieldType(fullPath) != null) {
-                    logger.debug("batch indexing disabled: runtime-field shadow at [{}]", fullPath);
+                    logger.info("batch indexing fallback: runtime-field shadow at [{}]", fullPath);
                     return null;
                 }
                 final ObjectMapper.Dynamic parentDynamic = findNearestParentDynamic(fullPath, lookup);
@@ -127,19 +127,19 @@ public final class ShardBatchMapper {
                     columnMappers[leaf] = null;
                     continue;
                 }
-                logger.debug("batch indexing disabled: unmapped leaf [{}] under dynamic={} parent", fullPath, parentDynamic);
+                logger.info("batch indexing fallback: unmapped leaf [{}] under dynamic={} parent", fullPath, parentDynamic);
                 return null;
             }
 
             if ((resolved instanceof FieldMapper) == false) {
-                logger.debug("batch indexing disabled: non-field mapper at [{}]", fullPath);
+                logger.info("batch indexing fallback: non-field mapper at [{}]", fullPath);
                 return null;
             }
             final FieldMapper fieldMapper = (FieldMapper) resolved;
 
             if (fieldMapper.supportsBatchIndexing() == false) {
-                logger.debug(
-                    "batch indexing disabled: mapper at [{}] of type [{}] does not support batch indexing",
+                logger.info(
+                    "batch indexing fallback: mapper at [{}] of type [{}] does not support batch indexing",
                     fullPath,
                     fieldMapper.typeName()
                 );
@@ -291,24 +291,47 @@ public final class ShardBatchMapper {
                     metadataMapper.mapMetadataColumns(contexts, builder);
                 }
             }
-            for (int leaf = 0; leaf < columnMappers.length; leaf++) {
-                final FieldMapper mapper = columnMappers[leaf];
-                if (mapper == null) {
-                    continue;
-                }
-                mapper.mapColumnBatch(chunkBatch.column(leaf), contexts, builder);
-            }
-            for (ShardBatchMapper.ColumnGroup group : resolution.groups()) {
-                final int[] leafIndices = group.leafIndices();
-                final SourceColumn[] groupColumns = new SourceColumn[leafIndices.length];
-                for (int i = 0; i < leafIndices.length; i++) {
-                    groupColumns[i] = chunkBatch.column(leafIndices[i]);
-                }
-                group.mapper().mapColumnGroupBatch(groupColumns, group.relativeKeys(), contexts, builder);
-            }
         } catch (Exception e) {
-            logger.warn("batch indexing on primary failed to assemble column batch, falling back", e);
+            // INFO so a columnar benchmark can see exactly which step abandoned the fast path (the stack
+            // trace identifies the metadata mapper).
+            logger.info("batch indexing fallback: a metadata mapper failed to assemble column batch, falling back to row-major", e);
             return null;
+        }
+        for (int leaf = 0; leaf < columnMappers.length; leaf++) {
+            final FieldMapper mapper = columnMappers[leaf];
+            if (mapper == null) {
+                continue;
+            }
+            try {
+                mapper.mapColumnBatch(chunkBatch.column(leaf), contexts, builder);
+            } catch (Exception e) {
+                // Names the offending field + type so the document/field forcing the fallback is identifiable.
+                logger.info(
+                    "batch indexing fallback: field [{}] of type [{}] failed columnar mapping, falling back to row-major",
+                    schema.getFullPath(leaf),
+                    mapper.typeName(),
+                    e
+                );
+                return null;
+            }
+        }
+        for (ShardBatchMapper.ColumnGroup group : resolution.groups()) {
+            final int[] leafIndices = group.leafIndices();
+            final SourceColumn[] groupColumns = new SourceColumn[leafIndices.length];
+            for (int i = 0; i < leafIndices.length; i++) {
+                groupColumns[i] = chunkBatch.column(leafIndices[i]);
+            }
+            try {
+                group.mapper().mapColumnGroupBatch(groupColumns, group.relativeKeys(), contexts, builder);
+            } catch (Exception e) {
+                logger.info(
+                    "batch indexing fallback: group field [{}] of type [{}] failed columnar mapping, falling back to row-major",
+                    group.mapper().fullPath(),
+                    group.mapper().typeName(),
+                    e
+                );
+                return null;
+            }
         }
 
         chunkBatch.setColumnBatchProvider(builder);
