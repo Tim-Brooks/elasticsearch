@@ -1813,7 +1813,6 @@ public final class FlattenedFieldMapper extends FieldMapper implements PassThrou
         }
 
         final BytesRefBuilder valueScratch = new BytesRefBuilder();
-        final BytesRefBuilder keyedScratch = new BytesRefBuilder();
         for (int d = 0; d < docCount; d++) {
             keyed.startDoc();
             if (root != null) {
@@ -1857,11 +1856,10 @@ public final class FlattenedFieldMapper extends FieldMapper implements PassThrou
                 if (root != null) {
                     root.addValue(vb, vo, vl);
                 }
+                // Compose the "key\0value" entry directly into the keyed builder's arena — the constant
+                // per-column prefix plus the value as one entry — avoiding an intermediate scratch buffer.
                 final byte[] prefix = keyPrefixes[k];
-                keyedScratch.clear();
-                keyedScratch.append(prefix, 0, prefix.length);
-                keyedScratch.append(vb, vo, vl);
-                keyed.addValue(keyedScratch.bytes(), 0, keyedScratch.length());
+                keyed.addValue(prefix, 0, prefix.length, vb, vo, vl);
             }
             keyed.endDoc();
             if (root != null) {

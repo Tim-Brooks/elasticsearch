@@ -21,17 +21,23 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefBuilder;
+import org.apache.lucene.util.BytesRefIterator;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.NumericUtils;
+import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.util.ByteUtils;
 import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.sourcebatch.SourceColumn;
 import org.elasticsearch.sourcebatch.SourceColumnCursor;
+import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentString;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Arrays;
 
 /**
@@ -396,7 +402,11 @@ public final class EicfLuceneColumns {
         private final IndexableFieldType fieldType;
         private final int[] offsets;
         private final BytesRefBuilder scratch = new BytesRefBuilder();
-        private byte[] data;
+        // Paged, non-recycling backing: values are appended page-by-page, so growth never recopies the buffer
+        // the way a doubling byte[] does, and the built column reads straight from those pages (zero-copy within
+        // a page, copying only the rare value that straddles a page boundary). Swapping NON_RECYCLING_INSTANCE
+        // for a pooling Recycler — plus a release lifecycle on the column — would additionally pool the pages.
+        private final RecyclerBytesStreamOutput data = new RecyclerBytesStreamOutput(BytesRefRecycler.NON_RECYCLING_INSTANCE);
         private int dataLen;
         private int doc;
         private FixedBitSet absent;
@@ -407,7 +417,6 @@ public final class EicfLuceneColumns {
             this.name = name;
             this.fieldType = fieldType;
             this.offsets = new int[docCount + 1];
-            this.data = new byte[Math.max(16, docCount * 8)];
         }
 
         /** Adds the UTF-8 encoding of {@code value} as the next document's value. */
@@ -427,7 +436,8 @@ public final class EicfLuceneColumns {
         }
 
         private void append(byte[] bytes, int off, int len) {
-            rawAppend(bytes, off, len);
+            data.writeBytes(bytes, off, len);
+            dataLen = Math.toIntExact(data.position());
             offsets[++doc] = dataLen;
             anyPresent = true;
         }
@@ -437,37 +447,19 @@ public final class EicfLuceneColumns {
 
         /** Appends a base-128 VInt directly into the current document's value (matches Lucene/ES VInt). */
         public void appendVInt(int value) {
-            int v = value;
-            while ((v & ~0x7F) != 0) {
-                ensureCapacity(1);
-                data[dataLen++] = (byte) ((v & 0x7F) | 0x80);
-                v >>>= 7;
-            }
-            ensureCapacity(1);
-            data[dataLen++] = (byte) v;
+            data.writeVInt(value);
         }
 
         /** Appends raw bytes directly into the current document's value. */
         public void appendBytes(byte[] bytes, int off, int len) {
-            rawAppend(bytes, off, len);
+            data.writeBytes(bytes, off, len);
         }
 
         /** Finishes the current document's value after one or more {@code append*} calls. */
         public void commitValue() {
+            dataLen = Math.toIntExact(data.position());
             offsets[++doc] = dataLen;
             anyPresent = true;
-        }
-
-        private void rawAppend(byte[] bytes, int off, int len) {
-            ensureCapacity(len);
-            System.arraycopy(bytes, off, data, dataLen, len);
-            dataLen += len;
-        }
-
-        private void ensureCapacity(int extra) {
-            if (dataLen + extra > data.length) {
-                data = ArrayUtil.grow(data, dataLen + extra);
-            }
         }
 
         /** Leaves the next document without a value (it becomes absent in the resulting column). */
@@ -476,6 +468,7 @@ public final class EicfLuceneColumns {
                 absent = new FixedBitSet(docCount);
             }
             absent.set(doc);
+            // No bytes were written for this document, so the running length is unchanged.
             offsets[doc + 1] = dataLen;
             doc++;
         }
@@ -488,7 +481,7 @@ public final class EicfLuceneColumns {
         /** Finishes the accumulated values into a {@link BinaryColumn}. Call exactly once. */
         public BinaryColumn build() {
             assert doc == docCount : "added [" + doc + "] documents but expected [" + docCount + "]";
-            return new EicfBinaryColumnAdapter(name, fieldType, absent, docCount, data, 0, offsets);
+            return PagedBinaryColumnAdapter.create(name, fieldType, absent, docCount, data, offsets);
         }
     }
 
@@ -566,6 +559,30 @@ public final class EicfLuceneColumns {
         /** Adds one value for the current document from a {@link BytesRef}. */
         public void addValue(BytesRef value) {
             addValue(value.bytes, value.offset, value.length);
+        }
+
+        /**
+         * Adds one value for the current document composed of two contiguous byte ranges written as a
+         * single entry — typically a constant {@code key\0} prefix followed by the value. Equivalent to
+         * concatenating the ranges and calling {@link #addValue(byte[], int, int)}, but the segments are
+         * copied straight into the arena so the caller needs no intermediate buffer.
+         */
+        public void addValue(byte[] a, int aOff, int aLen, byte[] b, int bOff, int bLen) {
+            if (entryCount == entryOff.length) {
+                entryOff = ArrayUtil.grow(entryOff, entryCount + 1);
+                entryLen = ArrayUtil.grow(entryLen, entryCount + 1);
+                order = ArrayUtil.grow(order, entryCount + 1);
+            }
+            final int total = aLen + bLen;
+            if (arenaLen + total > arena.length) {
+                arena = ArrayUtil.grow(arena, arenaLen + total);
+            }
+            System.arraycopy(a, aOff, arena, arenaLen, aLen);
+            System.arraycopy(b, bOff, arena, arenaLen + aLen, bLen);
+            entryOff[entryCount] = arenaLen;
+            entryLen[entryCount] = total;
+            arenaLen += total;
+            entryCount++;
         }
 
         /** Finishes the current document, encoding its sorted values into the values + counts columns. */
@@ -988,6 +1005,170 @@ public final class EicfLuceneColumns {
             int startByte = offsets[pos];
             System.arraycopy(data, dataBase + startByte, dst, offset, length * width);
             pos += length;
+        }
+    }
+
+    /**
+     * A {@link BinaryColumn} whose values live in a paged {@link BytesReference} (produced by a
+     * {@link RecyclerBytesStreamOutput}) rather than a single contiguous array. Each cursor walks the pages
+     * forward with its own {@link BytesRefIterator}, doing the offset accounting itself: a value contained in
+     * one page is returned zero-copy; a value that straddles a page boundary is gathered into a reused
+     * per-cursor buffer. Reads are always sequential (ascending doc order, monotonic offsets), so the walk only
+     * ever advances — no random page access and no assumption about page size.
+     */
+    private static final class PagedBinaryColumnAdapter extends BinaryColumn {
+        private final FixedBitSet absent;
+        private final int docCount;
+        private final int[] offsets;
+        private final BytesReference data;
+
+        static PagedBinaryColumnAdapter create(
+            String name,
+            IndexableFieldType fieldType,
+            FixedBitSet absent,
+            int docCount,
+            RecyclerBytesStreamOutput data,
+            int[] offsets
+        ) {
+            return new PagedBinaryColumnAdapter(name, fieldType, absent, docCount, offsets, data.moveToBytesReference());
+        }
+
+        private PagedBinaryColumnAdapter(
+            String name,
+            IndexableFieldType fieldType,
+            FixedBitSet absent,
+            int docCount,
+            int[] offsets,
+            BytesReference data
+        ) {
+            super(name, fieldType, absent == null ? Density.DENSE : Density.SPARSE);
+            this.absent = absent;
+            this.docCount = docCount;
+            this.offsets = offsets;
+            this.data = data;
+        }
+
+        @Override
+        public ObjectTupleCursor<BytesRef> tuples() {
+            return new ObjectTupleCursor<>() {
+                private final PagedValueReader reader = new PagedValueReader(data);
+                private BytesRef current;
+                private int doc = -1;
+
+                @Override
+                public int nextDoc() {
+                    int next = nextPresent(absent, docCount, doc);
+                    if (next >= docCount) {
+                        doc = docCount;
+                        return DocIdSetIterator.NO_MORE_DOCS;
+                    }
+                    doc = next;
+                    current = reader.read(offsets[next], offsets[next + 1]);
+                    return next;
+                }
+
+                @Override
+                public BytesRef value() {
+                    return current;
+                }
+            };
+        }
+
+        @Override
+        public BytesRefValuesCursor values() {
+            if (density() != Density.DENSE) {
+                return super.values(); // throws; never consulted for SPARSE columns
+            }
+            return new BytesRefValuesCursor(docCount) {
+                private final PagedValueReader reader = new PagedValueReader(data);
+                private int pos;
+
+                @Override
+                public BytesRef nextValue() {
+                    if (pos >= size()) {
+                        throw new IllegalStateException("nextValue() called more than size()=" + size() + " times");
+                    }
+                    int off0 = offsets[pos];
+                    int off1 = offsets[pos + 1];
+                    pos++;
+                    return reader.read(off0, off1);
+                }
+            };
+        }
+    }
+
+    /**
+     * Forward-only reader over a paged {@link BytesReference}. Each call to {@link #read(int, int)} must use a
+     * non-decreasing start offset; the reader advances its page iterator as needed and returns a reused
+     * {@link BytesRef} — pointing straight into a page when the value fits within one, or into a reused span
+     * buffer when it crosses a page boundary. The returned {@link BytesRef} is valid only until the next call.
+     */
+    private static final class PagedValueReader {
+        private final BytesRefIterator pages;
+        private final BytesRef scratch = new BytesRef();
+        private BytesRef page;
+        private int pageStart;
+        private int pageEnd;
+        private byte[] spanBuf = BytesRef.EMPTY_BYTES;
+
+        PagedValueReader(BytesReference data) {
+            this.pages = data.iterator();
+        }
+
+        BytesRef read(int off0, int off1) {
+            final int len = off1 - off0;
+            if (len == 0) {
+                scratch.bytes = BytesRef.EMPTY_BYTES;
+                scratch.offset = 0;
+                scratch.length = 0;
+                return scratch;
+            }
+            seekTo(off0);
+            if (off1 <= pageEnd) {
+                // Entirely within the current page → zero-copy view into the page's array.
+                scratch.bytes = page.bytes;
+                scratch.offset = page.offset + (off0 - pageStart);
+                scratch.length = len;
+                return scratch;
+            }
+            // Straddles a page boundary → gather into a contiguous local buffer.
+            if (spanBuf.length < len) {
+                spanBuf = new byte[ArrayUtil.oversize(len, Byte.BYTES)];
+            }
+            int dst = 0, src = off0, remaining = len;
+            while (remaining > 0) {
+                if (src >= pageEnd) {
+                    advancePage();
+                }
+                final int inPage = src - pageStart;
+                final int n = Math.min(pageEnd - src, remaining);
+                System.arraycopy(page.bytes, page.offset + inPage, spanBuf, dst, n);
+                dst += n;
+                src += n;
+                remaining -= n;
+            }
+            scratch.bytes = spanBuf;
+            scratch.offset = 0;
+            scratch.length = len;
+            return scratch;
+        }
+
+        /** Advances the page walk until the current page contains logical offset {@code off}. */
+        private void seekTo(int off) {
+            while (page == null || off >= pageEnd) {
+                advancePage();
+            }
+        }
+
+        private void advancePage() {
+            try {
+                page = pages.next();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e); // in-memory BytesReference never performs IO
+            }
+            assert page != null : "ran past the end of the column's pages";
+            pageStart = pageEnd;
+            pageEnd = pageStart + page.length;
         }
     }
 

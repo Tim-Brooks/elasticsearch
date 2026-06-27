@@ -532,4 +532,153 @@ public class EicfLuceneColumnsTests extends ESTestCase {
             assertEquals(10L, b.longValue());
         }
     }
+
+    // -------------------------------------------------------------------------
+    // SeparateCountColumnBuilder — two-segment addValue
+    // -------------------------------------------------------------------------
+
+    /**
+     * The two-segment {@code addValue(prefix, value)} (used by the flattened mapper to compose
+     * {@code key\0value} entries without an intermediate buffer) must produce byte-identical values and
+     * counts to assembling the entry first and calling the single-segment {@code addValue}. Covers a
+     * multi-value document (which is sorted), a single-value document (raw encoding), an absent
+     * document, and duplicate entries (kept, not deduplicated).
+     */
+    public void testSeparateCountTwoSegmentMatchesConcatenated() {
+        final int docCount = 4;
+        EicfLuceneColumns.SeparateCountColumnBuilder twoSeg = EicfLuceneColumns.separateCountColumnBuilder(
+            docCount,
+            "v",
+            BINARY_FIELD_TYPE,
+            "v.counts",
+            NUMERIC_FIELD_TYPE
+        );
+        EicfLuceneColumns.SeparateCountColumnBuilder ref = EicfLuceneColumns.separateCountColumnBuilder(
+            docCount,
+            "v",
+            BINARY_FIELD_TYPE,
+            "v.counts",
+            NUMERIC_FIELD_TYPE
+        );
+
+        // Per document: a list of (prefix, value) entries.
+        String[][][] docs = {
+            { { "k2\0", "beta" }, { "k1\0", "alpha" } }, // multi-value → sorted
+            { { "k1\0", "z" } },                         // single value → raw bytes
+            {},                                          // absent
+            { { "k\0", "x" }, { "k\0", "x" } }           // duplicates kept (no dedup)
+        };
+        for (String[][] doc : docs) {
+            twoSeg.startDoc();
+            ref.startDoc();
+            for (String[] entry : doc) {
+                byte[] prefix = entry[0].getBytes(StandardCharsets.UTF_8);
+                byte[] value = entry[1].getBytes(StandardCharsets.UTF_8);
+                twoSeg.addValue(prefix, 0, prefix.length, value, 0, value.length);
+                byte[] concatenated = new byte[prefix.length + value.length];
+                System.arraycopy(prefix, 0, concatenated, 0, prefix.length);
+                System.arraycopy(value, 0, concatenated, prefix.length, value.length);
+                ref.addValue(concatenated, 0, concatenated.length);
+            }
+            twoSeg.endDoc();
+            ref.endDoc();
+        }
+
+        BytesRef[] twoSegValues = readBinaryByDoc(twoSeg.buildValues(), docCount);
+        BytesRef[] refValues = readBinaryByDoc(ref.buildValues(), docCount);
+        assertArrayEquals("two-segment values must match concatenated single-segment values", refValues, twoSegValues);
+
+        Long[] twoSegCounts = readCountsByDoc(twoSeg.buildCounts(), docCount);
+        Long[] refCounts = readCountsByDoc(ref.buildCounts(), docCount);
+        assertArrayEquals("two-segment counts must match", refCounts, twoSegCounts);
+
+        // Anchor the expected shapes explicitly so the test is not purely self-referential.
+        assertArrayEquals(new Long[] { 2L, 1L, null, 2L }, twoSegCounts);
+        assertEquals("single-value doc is stored as raw bytes", new BytesRef("k1\0z"), twoSegValues[1]);
+        assertNull("empty doc is absent", twoSegValues[2]);
+    }
+
+    /** Reads a (possibly sparse) {@link BinaryColumn} into a per-document array; {@code null} marks an absent doc. */
+    private static BytesRef[] readBinaryByDoc(BinaryColumn col, int docCount) {
+        BytesRef[] out = new BytesRef[docCount];
+        ObjectTupleCursor<BytesRef> cursor = col.tuples();
+        int doc;
+        while ((doc = cursor.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+            out[doc] = BytesRef.deepCopyOf(cursor.value());
+        }
+        return out;
+    }
+
+    /** Reads a (possibly sparse) counts {@link LongColumn} into a per-document array; {@code null} marks an absent doc. */
+    private static Long[] readCountsByDoc(LongColumn col, int docCount) {
+        Long[] out = new Long[docCount];
+        LongTupleCursor cursor = col.tuples();
+        int doc;
+        while ((doc = cursor.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+            out[doc] = cursor.longValue();
+        }
+        return out;
+    }
+
+    // -------------------------------------------------------------------------
+    // BinaryColumnBuilder — paged backing across page boundaries
+    // -------------------------------------------------------------------------
+
+    /**
+     * The paged binary column must read back values correctly even when they straddle the 16KB page
+     * boundaries of the backing buffer — the common case is a zero-copy view into one page, the rare case a
+     * gather across pages. Builds well over a page of data so both cases occur, and verifies both cursors.
+     */
+    public void testPagedBinaryColumnAcrossPageBoundaries() {
+        final int docCount = 50;
+        final int valueLen = 1000; // 50 * 1000 ≈ 49KB over 16KB pages → several values straddle a boundary
+        EicfLuceneColumns.BinaryColumnBuilder builder = EicfLuceneColumns.binaryColumnBuilder(docCount, "v", BINARY_FIELD_TYPE);
+        byte[][] expected = new byte[docCount][];
+        for (int d = 0; d < docCount; d++) {
+            byte[] value = new byte[valueLen];
+            for (int i = 0; i < valueLen; i++) {
+                value[i] = (byte) (d * 31 + i);
+            }
+            expected[d] = value;
+            builder.addBytes(value, 0, value.length);
+        }
+        BinaryColumn col = builder.build();
+        assertEquals(Column.Density.DENSE, col.density());
+
+        // tuples() cursor
+        ObjectTupleCursor<BytesRef> tuples = col.tuples();
+        for (int d = 0; d < docCount; d++) {
+            assertEquals(d, tuples.nextDoc());
+            assertEquals("doc " + d, new BytesRef(expected[d]), tuples.value());
+        }
+        assertEquals(DocIdSetIterator.NO_MORE_DOCS, tuples.nextDoc());
+
+        // dense values() cursor (fresh, independent walk)
+        BytesRefValuesCursor values = col.values();
+        assertEquals(docCount, values.size());
+        for (int d = 0; d < docCount; d++) {
+            assertEquals("value " + d, new BytesRef(expected[d]), values.nextValue());
+        }
+    }
+
+    /** A sparse paged column with an absent document and an empty (zero-length) present value. */
+    public void testPagedBinaryColumnSparseAndEmptyValues() {
+        final int docCount = 4;
+        EicfLuceneColumns.BinaryColumnBuilder builder = EicfLuceneColumns.binaryColumnBuilder(docCount, "v", BINARY_FIELD_TYPE);
+        builder.addBytes("alpha".getBytes(StandardCharsets.UTF_8), 0, 5);
+        builder.addAbsent();
+        builder.addBytes(new byte[0], 0, 0); // empty but present
+        builder.addBytes("gamma".getBytes(StandardCharsets.UTF_8), 0, 5);
+        BinaryColumn col = builder.build();
+        assertEquals(Column.Density.SPARSE, col.density());
+
+        ObjectTupleCursor<BytesRef> tuples = col.tuples();
+        assertEquals(0, tuples.nextDoc());
+        assertEquals(new BytesRef("alpha"), tuples.value());
+        assertEquals(2, tuples.nextDoc()); // doc 1 is absent and skipped
+        assertEquals(new BytesRef(""), tuples.value());
+        assertEquals(3, tuples.nextDoc());
+        assertEquals(new BytesRef("gamma"), tuples.value());
+        assertEquals(DocIdSetIterator.NO_MORE_DOCS, tuples.nextDoc());
+    }
 }
