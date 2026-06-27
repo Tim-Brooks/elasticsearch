@@ -1459,15 +1459,19 @@ public final class KeywordFieldMapper extends FieldMapper {
 
     @Override
     public boolean supportsBatchIndexing() {
-        // Only plain keyword fields are eligible. Scripts, copy_to, multi-fields, dimensions, a custom
-        // normalizer, or an ignore_above limit all require per-value handling the columnar batch path
-        // does not reproduce, so those configurations fall back to the row-major path.
+        // Only plain keyword fields are eligible. Scripts, copy_to, multi-fields, dimensions, or a custom
+        // normalizer all require per-value handling the columnar batch path does not reproduce, so those
+        // configurations fall back to the row-major path.
+        //
+        // NOTE(benchmark): ignore_above is intentionally NOT gated here. logsdb defaults ignore_above to 8191,
+        // which would otherwise disqualify essentially every keyword field. mapColumnBatch instead drops any
+        // over-limit value as absent. See the TODO there: production must route ignored values to _ignored and
+        // the synthetic-source fallback rather than silently dropping them.
         return hasScript() == false
             && copyTo().copyToFields().isEmpty()
             && multiFields().iterator().hasNext() == false
             && fieldType().isDimension() == false
-            && fieldType().normalizer() == Lucene.KEYWORD_ANALYZER
-            && fieldType().ignoreAbove().valuesPotentiallyIgnored() == false;
+            && fieldType().normalizer() == Lucene.KEYWORD_ANALYZER;
     }
 
     @Override
@@ -1477,13 +1481,20 @@ public final class KeywordFieldMapper extends FieldMapper {
         // or an all-absent column) best-effort: string values are kept, everything else becomes absent. This
         // keeps null/empty keywords — pervasive in real corpora — on the columnar path instead of forcing a
         // row-major fallback (which is incompatible with columnar-mode single-value numeric index sorting).
+        //
+        // ignoreAbove is the effective ignore_above limit (Integer.MAX_VALUE when unlimited). It is threaded
+        // into toBinaryColumn, which drops over-limit values as absent.
+        // TODO(production): dropping is a benchmark shortcut — over-limit values must instead be routed to the
+        // _ignored field and stored for synthetic source, as KeywordFieldMapper.indexValue does on the row path.
+        // The multi-valued <name>.counts companion below also does not yet subtract dropped values.
+        final int ignoreAbove = fieldType().ignoreAbove().get();
         if (fieldType().usesBinaryDocValues()) {
             // High-cardinality keyword: values live in BINARY doc values. Reuse the document path's field
             // type (see DocValuesFieldFactory.addBinaryField) so the columnar FieldInfo matches exactly.
             if (dvFactory.isSingleValued()) {
                 // Single value per document → a plain BinaryDocValuesField holding the raw value bytes; no
                 // companion .counts field (matches addBinaryField for single-valued fields).
-                out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fullPath(), BinaryDocValuesField.TYPE));
+                out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fullPath(), BinaryDocValuesField.TYPE, ignoreAbove));
             } else if (fieldType().usesArrayOrderBinaryDocValues()) {
                 // Multi-valued columnar keyword stores values via MultiValuedBinaryDocValuesField.ArrayOrderInlineNull,
                 // an in-document-order binary encoding the columnar path does not reproduce yet — fall back.
@@ -1494,7 +1505,7 @@ public final class KeywordFieldMapper extends FieldMapper {
                 // Multi-valued (non-columnar) MultiValuedBinaryDocValuesField.SeparateCount: BINARY values plus
                 // a <name>.counts numeric field carrying the per-document value count (1 for a kept string value,
                 // absent otherwise — consistent with the BINARY values written above).
-                out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fullPath(), BinaryDocValuesField.TYPE));
+                out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fullPath(), BinaryDocValuesField.TYPE, ignoreAbove));
                 final int docCount = column.docCount();
                 final EicfLuceneColumns.LongColumnBuilder counts = EicfLuceneColumns.longColumnBuilder(
                     docCount,
@@ -1515,7 +1526,7 @@ public final class KeywordFieldMapper extends FieldMapper {
         } else {
             // Low-cardinality keyword: SORTED/SORTED_SET doc values fed from the (possibly converted) column,
             // reusing the field's own Lucene field type.
-            out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fullPath(), fieldType));
+            out.addColumn(EicfLuceneColumns.toBinaryColumn(column, fullPath(), fieldType, ignoreAbove));
         }
     }
 

@@ -634,10 +634,57 @@ public final class EicfLuceneColumns {
      * column — is converted document-by-document via {@link #convertToBinary}.
      */
     public static BinaryColumn toBinaryColumn(SourceColumn column, String name, IndexableFieldType fieldType) {
+        return toBinaryColumn(column, name, fieldType, Integer.MAX_VALUE);
+    }
+
+    /**
+     * As {@link #toBinaryColumn(SourceColumn, String, IndexableFieldType)} but drops (marks absent) any
+     * string value longer than {@code ignoreAboveCharLimit} characters, mirroring keyword {@code ignore_above}.
+     *
+     * <p>The zero-copy fast path is preserved whenever no value can exceed the limit: a cheap pass over the
+     * column's offset vector compares UTF-8 byte lengths (an upper bound on character length), and only when
+     * some value's byte length exceeds the limit do we fall to the per-document {@link #convertToBinary}
+     * path, which applies the precise character-length check.
+     *
+     * <p>TODO(production): this is a benchmark shortcut. Dropping an over-limit value is not the production
+     * contract — such values must be routed to the {@code _ignored} field and, under synthetic source, stored
+     * for source reconstruction, exactly as {@code KeywordFieldMapper.indexValue} does on the row path. Until
+     * then this silently discards them.
+     */
+    public static BinaryColumn toBinaryColumn(SourceColumn column, String name, IndexableFieldType fieldType, int ignoreAboveCharLimit) {
         if (column instanceof EicfStringColumn || column instanceof EicfBinaryColumn) {
-            return binaryColumn((EicfColumn) column, name, fieldType);
+            if (ignoreAboveCharLimit == Integer.MAX_VALUE || anyValueExceedsBytes((EicfColumn) column, ignoreAboveCharLimit) == false) {
+                return binaryColumn((EicfColumn) column, name, fieldType);
+            }
         }
-        return convertToBinary(column, name, fieldType);
+        return convertToBinary(column, name, fieldType, ignoreAboveCharLimit);
+    }
+
+    /**
+     * Returns whether any present value's UTF-8 byte length exceeds {@code limit}. Byte length is an upper
+     * bound on character length, so a {@code false} result guarantees no value exceeds the character-based
+     * {@code ignore_above} limit — the cheap gate that lets the zero-copy fast path stand.
+     */
+    private static boolean anyValueExceedsBytes(EicfColumn column, int limit) {
+        final int[] offsets;
+        if (column instanceof EicfStringColumn s) {
+            offsets = s.offsets();
+        } else if (column instanceof EicfBinaryColumn b) {
+            offsets = b.offsets();
+        } else {
+            return true; // unknown layout: force the safe per-document conversion
+        }
+        final FixedBitSet absent = column.absentBits();
+        final int docCount = column.docCount();
+        for (int d = 0; d < docCount; d++) {
+            if (absent != null && absent.get(d)) {
+                continue;
+            }
+            if (offsets[d + 1] - offsets[d] > limit) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -649,14 +696,28 @@ public final class EicfLuceneColumns {
      * no longer force a row-major fallback. String coercion of non-string scalars can be added later.
      */
     public static BinaryColumn convertToBinary(SourceColumn column, String name, IndexableFieldType fieldType) {
+        return convertToBinary(column, name, fieldType, Integer.MAX_VALUE);
+    }
+
+    /**
+     * As {@link #convertToBinary(SourceColumn, String, IndexableFieldType)} but additionally drops (marks
+     * absent) any string value longer than {@code ignoreAboveCharLimit} characters. See
+     * {@link #toBinaryColumn(SourceColumn, String, IndexableFieldType, int)} for the production TODO.
+     */
+    public static BinaryColumn convertToBinary(SourceColumn column, String name, IndexableFieldType fieldType, int ignoreAboveCharLimit) {
         final int docCount = column.docCount();
         final BytesRef[] values = new BytesRef[docCount];
         final SourceColumnCursor cursor = column.cursor();
         int doc = 0;
         while (cursor.advance()) {
             if (cursor.type() == EirfType.STRING) {
-                final XContentString.UTF8Bytes utf8 = cursor.stringValue().bytes();
-                values[doc] = new BytesRef(Arrays.copyOfRange(utf8.bytes(), utf8.offset(), utf8.offset() + utf8.length()));
+                final Text text = cursor.stringValue();
+                if (ignoreAboveCharLimit != Integer.MAX_VALUE && text.stringLength() > ignoreAboveCharLimit) {
+                    values[doc] = null; // exceeds ignore_above → dropped (benchmark shortcut; see toBinaryColumn TODO)
+                } else {
+                    final XContentString.UTF8Bytes utf8 = text.bytes();
+                    values[doc] = new BytesRef(Arrays.copyOfRange(utf8.bytes(), utf8.offset(), utf8.offset() + utf8.length()));
+                }
             } else {
                 values[doc] = null;
             }
