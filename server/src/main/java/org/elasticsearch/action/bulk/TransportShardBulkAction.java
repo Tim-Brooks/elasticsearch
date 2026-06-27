@@ -222,6 +222,10 @@ public class TransportShardBulkAction extends TransportWriteAction<BulkShardRequ
                         try {
                             BulkShardBatch.ensureInlineSources(request);
                         } catch (IOException e) {
+                            logger.warn(
+                                () -> format("%s failed to inline sources for serial fallback after batch indexing", primary.shardId()),
+                                e
+                            );
                             delegate.onFailure(e);
                             return;
                         }

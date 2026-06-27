@@ -93,7 +93,14 @@ public final class ShardBatchIndexer {
         final ActionListener<Void> listener
     ) {
         ActionListener.run(listener, l -> {
-            doBatchIndexOnPrimary(items, batch, context.getPrimary(), context);
+            try {
+                doBatchIndexOnPrimary(items, batch, context.getPrimary(), context);
+            } catch (Exception e) {
+                // A throw here (unlike an early return, which signals a graceful fallback to the serial path) fails the
+                // whole shard operation and is only surfaced via the listener, so log it explicitly for diagnosis.
+                logger.warn(() -> "batch indexing on primary " + context.getPrimary().shardId() + " failed", e);
+                throw e;
+            }
             l.onResponse(null);
         });
     }
