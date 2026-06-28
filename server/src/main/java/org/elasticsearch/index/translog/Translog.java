@@ -107,7 +107,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
 
     public static final TransportVersion REORDERED_TRANSLOG_OPERATIONS = TransportVersion.fromName("reordered_translog_operations");
 
-    public static final boolean DISABLED = true;
+    public static final boolean DISABLED = false;
 
     /*
      * TODO

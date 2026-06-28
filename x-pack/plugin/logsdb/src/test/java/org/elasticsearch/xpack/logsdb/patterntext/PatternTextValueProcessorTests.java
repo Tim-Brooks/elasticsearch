@@ -11,6 +11,7 @@ import org.elasticsearch.test.ESTestCase;
 import org.hamcrest.Matchers;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -152,5 +153,109 @@ public class PatternTextValueProcessorTests extends ESTestCase {
 
     private static List<Arg.Info> info(int... offsets) throws IOException {
         return Arrays.stream(offsets).mapToObj(o -> new Arg.Info(Arg.Type.GENERIC, o)).toList();
+    }
+
+    // ----- Byte-level splitUtf8 (columnar batch path) must be byte-identical to the String split path -----
+
+    public void testSplitUtf8MatchesStringPathFixedCases() throws IOException {
+        // The same inputs exercised by the String-path tests above, plus delimiter/Unicode edge cases.
+        for (String text : List.of(
+            "",
+            " ",
+            "\t\n\f\r[]",
+            "no-delimiters-no-digits",
+            " some text with arg1 and 2arg2 and 333 ",
+            " 2021-04-13T13:51:38.000Z some text with arg1 and arg2 and arg3",
+            "[2020-08-18T00:58:56] Found 123 errors for service [cheddar1]",
+            "[a][b][c] plain words only",
+            "   leading and trailing spaces   ",
+            "consecutive[[]]brackets",
+            // Non-ASCII, no digits: stays in the template, contributes multi-byte chars to arg offsets.
+            "café münchen 数据 value7 end",
+            // BMP non-ASCII decimal digits (Character.isDigit(char) true) make their token an arg: Arabic-Indic, Devanagari.
+            "token٣ and ३abc plain",
+            // Supplementary (4-byte) code points. Arg.isArg inspects UTF-16 chars, and surrogates are never digits,
+            // so even a "mathematical bold digit" (𝟎, U+1D7CE) is NOT treated as a digit — these stay in the template.
+            "emoji😀 here 𝟎 math tail",
+            "😀😀 word value42"
+        )) {
+            assertSplitEquivalent(text);
+        }
+    }
+
+    public void testSplitUtf8MatchesStringPathRandom() throws IOException {
+        for (int iter = 0; iter < 2000; iter++) {
+            assertSplitEquivalent(randomLogLine());
+        }
+    }
+
+    private static String randomLogLine() {
+        StringBuilder sb = new StringBuilder();
+        int numTokens = randomIntBetween(0, 12);
+        for (int i = 0; i < numTokens; i++) {
+            if (randomBoolean()) {
+                sb.append(randomLogDelimiter());
+            }
+            sb.append(randomToken());
+        }
+        // Random trailing delimiters (exercise the trailing-empty-token handling of the String split path).
+        int trailing = randomIntBetween(0, 3);
+        for (int i = 0; i < trailing; i++) {
+            sb.append(randomLogDelimiter());
+        }
+        return sb.toString();
+    }
+
+    private static String randomToken() {
+        return switch (randomIntBetween(0, 6)) {
+            case 0 -> randomAlphaOfLength(between(1, 8));
+            case 1 -> Integer.toString(randomInt());
+            case 2 -> "2021-04-13T13:51:38.000Z";
+            case 3 -> "18be2355-6306-4a00-9db9-f0696aa1a225";
+            case 4 -> "caféññten"; // multi-byte, no digit
+            case 5 -> "token٣३"; // BMP multi-byte Unicode digits -> arg
+            case 6 -> "𝟎😀"; // supplementary code points -> NOT an arg (surrogates are never digits)
+            default -> throw new AssertionError();
+        };
+    }
+
+    private static String randomLogDelimiter() {
+        return randomFrom(List.of(" ", "\n", "\t", "\r", "\f", "", "[", "]"));
+    }
+
+    /** Asserts the byte-level {@code splitUtf8} produces template/templateId/argsInfo/args byte-identical to {@code split}. */
+    private static void assertSplitEquivalent(String text) throws IOException {
+        final byte[] src = text.getBytes(StandardCharsets.UTF_8);
+        final PatternTextValueProcessor.Parts parts = PatternTextValueProcessor.split(text);
+
+        final PatternTextValueProcessor.Utf8SplitScratch scratch = new PatternTextValueProcessor.Utf8SplitScratch();
+        PatternTextValueProcessor.splitUtf8(src, 0, src.length, scratch);
+
+        assertArrayEquals(
+            "template bytes for [" + text + "]",
+            parts.template().getBytes(StandardCharsets.UTF_8),
+            Arrays.copyOf(scratch.template, scratch.templateLen)
+        );
+
+        final int idLen = scratch.encodeTemplateId();
+        assertEquals("templateId for [" + text + "]", parts.templateId(), new String(scratch.b64, 0, idLen, StandardCharsets.US_ASCII));
+
+        final int infoLen = scratch.encodeArgsInfo();
+        assertEquals(
+            "argsInfo for [" + text + "]",
+            Arg.encodeInfo(parts.argsInfo()),
+            new String(scratch.b64, 0, infoLen, StandardCharsets.US_ASCII)
+        );
+
+        assertEquals("arg count for [" + text + "]", parts.args().size(), scratch.argCount);
+        final StringBuilder joined = new StringBuilder();
+        for (int a = 0; a < scratch.argCount; a++) {
+            if (a > 0) {
+                joined.append(' ');
+            }
+            joined.append(new String(src, scratch.argOff[a], scratch.argLen[a], StandardCharsets.UTF_8));
+        }
+        final String expectedArgs = parts.args().isEmpty() ? "" : Arg.encodeRemainingArgs(parts);
+        assertEquals("joined args for [" + text + "]", expectedArgs, joined.toString());
     }
 }

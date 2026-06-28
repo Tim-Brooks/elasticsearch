@@ -97,6 +97,39 @@ public class Arg {
         return ENCODER.encodeToString(data);
     }
 
+    /** Upper bound on the bytes {@link #encodeInfoRaw} writes for {@code argCount} arguments (matches {@link #encodeInfo}). */
+    static int encodeInfoRawMaxSize(int argCount) {
+        return VINT_MAX_BYTES + argCount * (VINT_MAX_BYTES + VINT_MAX_BYTES);
+    }
+
+    /**
+     * Byte-level form of {@link #encodeInfo} for the columnar batch path: writes the raw (pre-base64) bytes —
+     * {@code vint(argCount)} then, per argument, {@code vint(typeCode)} {@code vint(offsetDelta)} — into
+     * {@code dst} and returns the number of bytes written. Every argument is {@link Type#GENERIC} (the only
+     * type produced by splitting), so the type code is a constant {@code 0}. {@code dst} must hold at least
+     * {@link #encodeInfoRawMaxSize(int)} bytes.
+     */
+    static int encodeInfoRaw(int argCount, int[] argCharOffsets, byte[] dst) {
+        int pos = writeVInt(dst, 0, argCount);
+        int previousOffset = 0;
+        for (int i = 0; i < argCount; i++) {
+            pos = writeVInt(dst, pos, Type.GENERIC.toCode());
+            pos = writeVInt(dst, pos, argCharOffsets[i] - previousOffset);
+            previousOffset = argCharOffsets[i];
+        }
+        return pos;
+    }
+
+    /** Writes {@code value} as a Lucene/ES VInt into {@code dst} starting at {@code pos}; returns the new position. */
+    private static int writeVInt(byte[] dst, int pos, int value) {
+        while ((value & ~0x7F) != 0) {
+            dst[pos++] = (byte) ((value & 0x7F) | 0x80);
+            value >>>= 7;
+        }
+        dst[pos++] = (byte) value;
+        return pos;
+    }
+
     static List<Info> decodeInfo(String encoded) throws IOException {
         byte[] encodedBytes = DECODER.decode(encoded);
         var input = new ByteArrayDataInput(encodedBytes);

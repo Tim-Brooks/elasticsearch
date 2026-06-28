@@ -42,6 +42,7 @@ import org.elasticsearch.index.mapper.TextSearchInfo;
 import org.elasticsearch.sourcebatch.SourceColumn;
 import org.elasticsearch.sourcebatch.SourceColumnCursor;
 import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentString;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -367,7 +368,8 @@ public class PatternTextFieldMapper extends FieldMapper {
             while (cursor.advance()) {
                 if (cursor.type() == EirfType.STRING) {
                     requireBinaryDocValuesForRawText();
-                    stored.addString(cursor.stringValue().string());
+                    final XContentString.UTF8Bytes utf8 = cursor.stringValue().bytes();
+                    stored.addBytes(utf8.bytes(), utf8.offset(), utf8.length());
                 } else {
                     stored.addAbsent();
                 }
@@ -407,6 +409,7 @@ public class PatternTextFieldMapper extends FieldMapper {
             BinaryDocValuesField.TYPE
         );
 
+        final PatternTextValueProcessor.Utf8SplitScratch scratch = new PatternTextValueProcessor.Utf8SplitScratch();
         final SourceColumnCursor cursor = column.cursor();
         try {
             while (cursor.advance()) {
@@ -418,29 +421,47 @@ public class PatternTextFieldMapper extends FieldMapper {
                     stored.addAbsent();
                     continue;
                 }
-                final String value = cursor.stringValue().string();
-                final PatternTextValueProcessor.Parts parts = PatternTextValueProcessor.split(value);
-                templateId.addString(parts.templateId());
-                if (parts.useBinaryDocValuesForRawText()) {
-                    requireBinaryDocValuesForRawText();
-                    stored.addString(value);
-                    template.addAbsent();
-                    argsInfo.addAbsent();
-                    args.addAbsent();
-                } else {
-                    stored.addAbsent();
-                    template.addString(parts.template());
-                    argsInfo.addString(Arg.encodeInfo(parts.argsInfo()));
-                    if (parts.args().isEmpty() == false) {
-                        args.addString(Arg.encodeRemainingArgs(parts));
-                    } else {
-                        args.addAbsent();
+                final XContentString.UTF8Bytes utf8 = cursor.stringValue().bytes();
+                final byte[] src = utf8.bytes();
+                final int srcOff = utf8.offset();
+                final int srcLen = utf8.length();
+                if (srcLen > PatternTextValueProcessor.MAX_LOG_LEN_TO_STORE_AS_DOC_VALUE) {
+                    // Rare large value: the row path truncates by char length, so defer to the String path
+                    // (which handles both the truncated-but-not-exceeded and exceeded sub-cases) rather than
+                    // re-deriving the truncation byte offset here. A value with byteLen <= the limit always has
+                    // charLen <= the limit (UTF-16 length <= UTF-8 byte length), so the hot path below never
+                    // needs to consider truncation.
+                    mapDocViaStringPath(cursor.stringValue().string(), templateId, template, argsInfo, args, stored);
+                    continue;
+                }
+
+                // Hot path: split directly on the UTF-8 bytes and compose each sub-column value straight into
+                // the page-backed builder arenas, allocating no String, token array, or intermediate buffer.
+                PatternTextValueProcessor.splitUtf8(src, srcOff, srcLen, scratch);
+
+                final int idLen = scratch.encodeTemplateId();
+                templateId.addBytes(scratch.b64, 0, idLen);
+                stored.addAbsent();
+                template.addBytes(scratch.template, 0, scratch.templateLen);
+                final int infoLen = scratch.encodeArgsInfo();
+                argsInfo.addBytes(scratch.b64, 0, infoLen);
+                if (scratch.argCount > 0) {
+                    // Compose the space-joined args (matching Arg.encodeRemainingArgs) directly into the arena.
+                    for (int a = 0; a < scratch.argCount; a++) {
+                        if (a > 0) {
+                            args.appendBytes(SPACE_BYTES, 0, 1);
+                        }
+                        args.appendBytes(src, scratch.argOff[a], scratch.argLen[a]);
                     }
+                    args.commitValue();
+                } else {
+                    args.addAbsent();
                 }
             }
         } catch (IOException e) {
-            // Arg.encodeInfo writes to a pre-sized in-memory buffer and does not realistically fail; surface
-            // any failure so ShardBatchMapper falls back to the row-major path rather than dropping data.
+            // Only the String fallback path calls Arg.encodeInfo, which writes to a pre-sized in-memory buffer
+            // and does not realistically fail; surface any failure so ShardBatchMapper falls back to the
+            // row-major path rather than dropping data.
             throw new UncheckedIOException(e);
         }
 
@@ -458,6 +479,42 @@ public class PatternTextFieldMapper extends FieldMapper {
         }
         if (stored.isEmpty() == false) {
             out.addColumn(stored.build());
+        }
+    }
+
+    /** Single-space separator for the joined args column (matches {@code Arg.encodeRemainingArgs}). */
+    private static final byte[] SPACE_BYTES = { ' ' };
+
+    /**
+     * Maps one document through the String-based {@link PatternTextValueProcessor#split} path, mirroring
+     * {@code parseCreateField}. Used only for values longer than {@link PatternTextValueProcessor#MAX_LOG_LEN_TO_STORE_AS_DOC_VALUE}
+     * bytes, where the row path's char-based truncation must be reproduced exactly.
+     */
+    private void mapDocViaStringPath(
+        String value,
+        EicfLuceneColumns.BinaryColumnBuilder templateId,
+        EicfLuceneColumns.BinaryColumnBuilder template,
+        EicfLuceneColumns.BinaryColumnBuilder argsInfo,
+        EicfLuceneColumns.BinaryColumnBuilder args,
+        EicfLuceneColumns.BinaryColumnBuilder stored
+    ) throws IOException {
+        final PatternTextValueProcessor.Parts parts = PatternTextValueProcessor.split(value);
+        templateId.addString(parts.templateId());
+        if (parts.useBinaryDocValuesForRawText()) {
+            requireBinaryDocValuesForRawText();
+            stored.addString(value);
+            template.addAbsent();
+            argsInfo.addAbsent();
+            args.addAbsent();
+        } else {
+            stored.addAbsent();
+            template.addString(parts.template());
+            argsInfo.addString(Arg.encodeInfo(parts.argsInfo()));
+            if (parts.args().isEmpty() == false) {
+                args.addString(Arg.encodeRemainingArgs(parts));
+            } else {
+                args.addAbsent();
+            }
         }
     }
 
