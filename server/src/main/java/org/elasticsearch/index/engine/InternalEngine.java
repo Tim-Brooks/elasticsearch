@@ -1172,13 +1172,6 @@ public class InternalEngine extends Engine {
         return true;
     }
 
-    private static boolean assertNoMixedRecoveryOperations(List<Index> operations) {
-        boolean allRecovery = operations.stream().allMatch(o -> o.origin().isFromTranslog());
-        boolean nonRecovery = operations.stream().allMatch(o -> o.origin().isFromTranslog() == false);
-        assert allRecovery || nonRecovery;
-        return true;
-    }
-
     private boolean assertIncomingSequenceNumber(final Operation.Origin origin, final long seqNo) {
         if (origin == Operation.Origin.PRIMARY) {
             assert assertPrimaryIncomingSequenceNumber(origin, seqNo);
@@ -1368,13 +1361,12 @@ public class InternalEngine extends Engine {
 
     @Override
     public List<IndexResult> indexBatch(List<Index> operations, SourceBatch batch) throws IOException {
-        assert operations.size() == batch.docCount()
-            : "operations [" + operations.size() + "] must map 1:1 to batch rows [" + batch.docCount() + "]";
+        final EngineBatch engineBatch = EngineBatch.fromIndexOperations(operations, batch);
         try (var ignored = acquireEnsureOpenRef()) {
             // If the first operation is recovery they are all recovery
-            boolean isRecovery = operations.getFirst().origin().isRecovery();
+            boolean isRecovery = engineBatch.origin().isRecovery();
 
-            final int batchSize = operations.size();
+            final int batchSize = engineBatch.size();
             final IndexResult[] allResults = new IndexResult[batchSize];
 
             int idx = 0;
@@ -1385,12 +1377,12 @@ public class InternalEngine extends Engine {
                 // TODO: Consider only throttling per batch opposed to sub-batch
                 try (Releasable indexThrottle = doThrottle ? throttle.acquireThrottle() : () -> {}) {
                     // Blocking acquire for the first operation
-                    locks.add(versionMap.acquireLock(operations.get(idx).uid()));
+                    locks.add(versionMap.acquireLock(engineBatch.uid(idx)));
                     subBatchCount++;
 
                     // Try-acquire later operations in order; stop at the first failure
                     for (int i = idx + 1; i < batchSize; i++) {
-                        Releasable lock = versionMap.tryAcquireLock(operations.get(i).uid());
+                        Releasable lock = versionMap.tryAcquireLock(engineBatch.uid(i));
                         if (lock == null) {
                             break;
                         }
@@ -1398,10 +1390,10 @@ public class InternalEngine extends Engine {
                         subBatchCount++;
                     }
 
-                    assert assertNoDuplicateUidsInSubBatch(operations, idx, subBatchCount);
-                    processSubBatch(operations, idx, subBatchCount, batch, allResults);
+                    assert assertNoDuplicateUidsInSubBatch(engineBatch, idx, subBatchCount);
+                    processSubBatch(engineBatch, idx, subBatchCount, allResults);
                 } catch (RuntimeException | IOException e) {
-                    failOnTragicEvent(idx, subBatchCount, operations, e);
+                    failOnTragicEvent(idx, subBatchCount, engineBatch, e);
                     throw e;
                 } finally {
                     for (Releasable lock : locks) {
@@ -1416,22 +1408,22 @@ public class InternalEngine extends Engine {
         }
     }
 
-    private static boolean assertNoDuplicateUidsInSubBatch(List<Index> operations, int subBatchIdx, int subBatchSize) {
+    private static boolean assertNoDuplicateUidsInSubBatch(EngineBatch batch, int subBatchIdx, int subBatchSize) {
         final Set<BytesRef> seenUids = HashSet.newHashSet(subBatchSize);
         for (int i = subBatchIdx; i < subBatchIdx + subBatchSize; i++) {
-            final Index op = operations.get(i);
-            if (seenUids.add(op.uid()) == false) {
+            final BytesRef uid = batch.uid(i);
+            if (seenUids.add(uid) == false) {
                 throw new AssertionError(
-                    "Duplicate uid [" + op.id() + "] in sub-batch at index " + i + " — this indicates a bug in the version lock"
+                    "Duplicate uid [" + Uid.decodeId(uid) + "] in sub-batch at index " + i + " — this indicates a bug in the version lock"
                 );
             }
         }
         return true;
     }
 
-    private void failOnTragicEvent(int startIdx, int count, List<Index> operations, Exception e) {
+    private void failOnTragicEvent(int startIdx, int count, EngineBatch batch, Exception e) {
         for (int i = 0; i < count; i++) {
-            Index op = operations.get(startIdx + i);
+            Index op = batch.materializeIndex(startIdx + i);
             try {
                 if (e instanceof AlreadyClosedException == false && treatDocumentFailureAsTragicError(op)) {
                     failEngine("index id[" + op.id() + "] origin[" + op.origin() + "] seq#[" + op.seqNo() + "]", e);
@@ -1447,10 +1439,11 @@ public class InternalEngine extends Engine {
         }
     }
 
-    private void processSubBatch(List<Index> operations, int subBatchIdx, int subBatchSize, SourceBatch batch, IndexResult[] allResults)
-        throws IOException {
-        final boolean fromTranslog = operations.getFirst().origin().isFromTranslog();
-        assert assertNoMixedRecoveryOperations(operations);
+    private void processSubBatch(EngineBatch batch, int subBatchIdx, int subBatchSize, IndexResult[] allResults) throws IOException {
+        // origin and primaryTerm are uniform across the whole batch (enforced by EngineBatch.fromIndexOperations)
+        final var origin = batch.origin();
+        final var primaryTerm = batch.primaryTerm();
+        final boolean fromTranslog = origin.isFromTranslog();
         final Index[] subBatchOps = new Index[subBatchSize];
         final IndexingStrategy[] plans = new IndexingStrategy[subBatchSize];
 
@@ -1458,27 +1451,14 @@ public class InternalEngine extends Engine {
         int reservedDocs = 0;
         long maxStartNanos = lastWriteNanos;
 
-        final var origin = operations.get(subBatchIdx).origin(); // all origins must be uniform, so grab the first one as "the" origin
-        final var primaryTerm = operations.get(subBatchIdx).primaryTerm();
         for (int i = 0; i < subBatchSize; i++) {
-            Index op = operations.get(subBatchIdx + i);
-            if (origin != op.origin()) { // verify that origins are uniform
-                final var message = "mixed origins in sub-batch: " + origin + " vs " + op.origin();
-                assert false : message;
-                throw new IllegalStateException(message);
+            final int idx = subBatchIdx + i;
+            final long startTime = batch.startTime(idx);
+            if (startTime - maxStartNanos > 0) {
+                maxStartNanos = startTime;
             }
-
-            if (primaryTerm != op.primaryTerm()) { // verify that primary terms are same
-                final var message = "mixed primary terms in sub-batch: " + primaryTerm + " vs " + op.primaryTerm();
-                assert false : message;
-                throw new IllegalStateException(message);
-            }
-
-            if (op.startTime() - maxStartNanos > 0) {
-                maxStartNanos = op.startTime();
-            }
-            assert assertIncomingSequenceNumber(op.origin(), op.seqNo());
-            subBatchOps[i] = op;
+            assert assertIncomingSequenceNumber(origin, batch.seqNo(idx));
+            subBatchOps[i] = batch.materializeIndex(idx);
         }
         lastWriteNanos = maxStartNanos;
 
@@ -1524,20 +1504,8 @@ public class InternalEngine extends Engine {
 
                 if (origin == Operation.Origin.PRIMARY) {
                     final long seqNo = firstPrimarySeqNo + batchSeqNoIdx++;
-                    index = new Index(
-                        index.uid(),
-                        index.parsedDoc(),
-                        seqNo,
-                        index.primaryTerm(),
-                        index.version(),
-                        index.versionType(),
-                        index.origin(),
-                        index.startTime(),
-                        index.getAutoGeneratedIdTimestamp(),
-                        index.isRetry(),
-                        index.getIfSeqNo(),
-                        index.getIfPrimaryTerm()
-                    );
+                    batch.setSeqNo(subBatchIdx + i, seqNo);
+                    index = batch.materializeIndex(subBatchIdx + i);
                     subBatchOps[i] = index;
 
                     final boolean toAppend = plan.indexIntoLucene && plan.useLuceneUpdateDocument == false;
@@ -1582,30 +1550,28 @@ public class InternalEngine extends Engine {
             // Translog
             final Translog.Location batchLocation;
             if (fromTranslog == false) {
-                final long batchPrimaryTerm = subBatchOps[0].primaryTerm();
-                final SourceBatch slicedBatch = batch.slice(subBatchIdx, subBatchIdx + subBatchSize);
+                final SourceBatch slicedSource = batch.sourceSlice(subBatchIdx, subBatchIdx + subBatchSize);
                 final List<Translog.IndexBatch.Op> translogOps = new ArrayList<>(subBatchSize);
                 for (int i = 0; i < subBatchSize; i++) {
-                    Index index = subBatchOps[i];
-                    IndexResult result = allResults[subBatchIdx + i];
-                    assert index.origin().isFromTranslog() == false;
+                    final int idx = subBatchIdx + i;
+                    IndexResult result = allResults[idx];
                     if (result.getResultType() == Result.Type.SUCCESS) {
                         translogOps.add(
                             new Translog.IndexBatch.IndexOp(
                                 result.getVersion(),
                                 result.getSeqNo(),
-                                index.getAutoGeneratedIdTimestamp(),
+                                batch.autoGeneratedIdTimestamp(idx),
                                 i,
-                                index.parsedDoc().getXContentType(),
-                                index.uid(),
-                                index.routing()
+                                batch.xContentType(idx),
+                                batch.uid(idx),
+                                batch.routing(idx)
                             )
                         );
                     } else if (result.getSeqNo() != UNASSIGNED_SEQ_NO) {
                         final long seqNo = result.getSeqNo();
                         final String reason = result.getFailure().toString();
                         try (Releasable ignored = noOpKeyedLock.acquire(seqNo)) {
-                            applyNoOpToLucene(new NoOp(seqNo, index.primaryTerm(), index.origin(), index.startTime(), reason));
+                            applyNoOpToLucene(new NoOp(seqNo, primaryTerm, origin, batch.startTime(idx), reason));
                         }
                         translogOps.add(new Translog.IndexBatch.NoOpOp(seqNo, reason));
                     }
@@ -1613,7 +1579,7 @@ public class InternalEngine extends Engine {
                 }
                 batchLocation = translogOps.isEmpty()
                     ? null
-                    : translog.add(new Translog.IndexBatch(slicedBatch.data(), batchPrimaryTerm, translogOps));
+                    : translog.add(new Translog.IndexBatch(slicedSource.data(), primaryTerm, translogOps));
             } else {
                 batchLocation = null;
             }
