@@ -24,6 +24,7 @@ import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.elasticsearch.cluster.metadata.IndexMetadata.SETTING_INDEX_VERSION_CREATED;
@@ -95,11 +96,19 @@ public class RoutingPathExtractorTests extends ESTestCase {
         assertExtractorMatchesSourceParser(doc, "dim.*,other.*");
     }
 
-    public void testThrowsOnArrayAtRoutingField() throws IOException {
-        // Arrays at routing-path fields can't be replayed from the encoder's packed-array column;
-        // the extractor throws and the caller (BulkBatchEncoders) abandons the bulk's batch.
+    public void testParityForStringArrayAtRoutingField() throws IOException {
+        // A multi-valued string routing field: both paths hash each element's raw UTF-8 bytes, in order.
         Map<String, Object> doc = new LinkedHashMap<>();
-        doc.put("dim.tags", new String[] { "a", "b", "c" });
+        doc.put("dim.tags", List.of("a", "b", "c"));
+        doc.put("metric", "x");
+        assertExtractorMatchesSourceParser(doc, "dim.*");
+    }
+
+    public void testThrowsOnNumericArrayAtRoutingField() throws IOException {
+        // Raw-text routing hashing needs each element's textual form, which the encoder's packed array does
+        // not retain for non-string elements; the extractor throws so the caller falls back to row-major.
+        Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("dim.ports", List.of(80, 443));
         doc.put("metric", "x");
         IndexRouting.ExtractFromSource.ForRoutingPath strategy = forRoutingPath("dim.*");
         try (EirfEncoder encoder = new EirfEncoder()) {

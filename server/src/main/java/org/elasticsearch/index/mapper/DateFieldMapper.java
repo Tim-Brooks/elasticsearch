@@ -1322,20 +1322,35 @@ public final class DateFieldMapper extends FieldMapper {
             columnFieldType(),
             LongColumn.NumericKind.LONG
         );
+        // For a TSDB data-stream timestamp field, record each doc's parsed @timestamp into ctx.doc() so the
+        // batch metadata mappers (TsidExtractingIdFieldMapper / TimeSeriesIdFieldMapper) can read it via
+        // DataStreamTimestampFieldMapper.extractTimestampValue, mirroring the row path's DateFieldMapper ->
+        // storeTimestampValueForReuse. Guarded to the @timestamp field in TIME_SERIES mode so no other date
+        // field populates the shared timestamp key.
+        final boolean storeTimestamp = docCount > 0
+            && contexts[0].indexSettings().getMode() == IndexMode.TIME_SERIES
+            && fullPath().equals(DataStreamTimestampFieldMapper.DEFAULT_PATH);
         final SourceColumnCursor cursor = column.cursor();
-        while (cursor.advance()) {
+        for (int d = 0; cursor.advance(); d++) {
+            boolean added = false;
             if (cursor.type() == EirfType.STRING) {
                 try {
-                    builder.addLong(fieldType().parse(cursor.stringValue().string()));
-                    continue;
+                    final long timestamp = fieldType().parse(cursor.stringValue().string());
+                    builder.addLong(timestamp);
+                    if (storeTimestamp) {
+                        DataStreamTimestampFieldMapper.storeTimestampValueForReuse(contexts[d].doc(), timestamp);
+                    }
+                    added = true;
                 } catch (IllegalArgumentException | ElasticsearchParseException | DateTimeException | ArithmeticException e) {
                     // fall through to the null_value / absent handling below
                 }
             }
-            if (nullValue != null) {
-                builder.addLong(nullValue);
-            } else {
-                builder.addAbsent();
+            if (added == false) {
+                if (nullValue != null) {
+                    builder.addLong(nullValue);
+                } else {
+                    builder.addAbsent();
+                }
             }
         }
         out.addColumn(builder.build());

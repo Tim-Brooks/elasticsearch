@@ -11,6 +11,7 @@ package org.elasticsearch.index.mapper;
 
 import org.apache.lucene.document.Field;
 import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.cluster.routing.IndexRouting;
 import org.elasticsearch.cluster.routing.RoutingHashBuilder;
@@ -18,6 +19,7 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.hash.MurmurHash3;
 import org.elasticsearch.common.hash.MurmurHash3.Hash128;
 import org.elasticsearch.common.util.ByteUtils;
+import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.index.fielddata.FieldDataContext;
 import org.elasticsearch.index.fielddata.IndexFieldData;
 
@@ -114,6 +116,49 @@ public class TsidExtractingIdFieldMapper extends IdFieldMapper {
 
         context.doc().add(idField);
         return idField.binaryValue();
+    }
+
+    // Reused field-type singletons for the columnar batch _id column, matching the row path:
+    // synthetic ids use the DOCS + BINARY SyntheticIdField type (reconstructed at read time from _tsid +
+    // @timestamp), standard ids use the indexed + stored StringField type.
+    private static final IndexableFieldType SYNTHETIC_ID_COLUMN_TYPE = new SyntheticIdField(new BytesRef()).fieldType();
+    private static final IndexableFieldType STANDARD_ID_COLUMN_TYPE = standardIdField(new BytesRef(), Field.Store.YES).fieldType();
+
+    /**
+     * Columnar batch-indexing path for {@code _id} in a {@code time_series} index. Mirrors
+     * {@link #createField}: the tsid is precomputed on the coordinating node ({@code ctx.getTsid()}), the
+     * routing hash comes from {@code SourceToParse#routing()}, and the {@code @timestamp} is read from
+     * {@code ctx.doc()} (recorded by {@link DateFieldMapper#mapColumnBatch}). Each doc's id is computed and
+     * set on its context (for the {@code Engine.Index}/{@code ParsedDocument}) and emitted as one {@code _id}
+     * column.
+     */
+    @Override
+    public void mapMetadataColumns(BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        if (contexts.length == 0) {
+            return;
+        }
+        final boolean synthetic = contexts[0].indexSettings().useTimeSeriesSyntheticId();
+        final BytesRef[] ids = new BytesRef[contexts.length];
+        for (int d = 0; d < contexts.length; d++) {
+            final BatchDocumentParserContext ctx = contexts[d];
+            final String routing = ctx.sourceToParse().routing();
+            final String id;
+            if (routing != null) {
+                final BytesRef tsid = ctx.getTsid();
+                final long timestamp = DataStreamTimestampFieldMapper.extractTimestampValue(ctx.doc());
+                final int routingHash = TimeSeriesRoutingHashFieldMapper.decode(routing);
+                id = synthetic ? createSyntheticId(tsid, timestamp, routingHash) : createId(routingHash, tsid, timestamp);
+            } else if (ctx.sourceToParse().id() != null) {
+                // Translog/replica-style operations: the id was already generated from the (no longer present)
+                // routing hash, so reuse it verbatim.
+                id = ctx.sourceToParse().id();
+            } else {
+                throw new IllegalArgumentException("_ts_routing_hash was null but must be set for time_series batch indexing");
+            }
+            ctx.id(id);
+            ids[d] = Uid.encodeId(id);
+        }
+        out.addColumn(EicfLuceneColumns.arrayBinaryColumn(ids, NAME, synthetic ? SYNTHETIC_ID_COLUMN_TYPE : STANDARD_ID_COLUMN_TYPE));
     }
 
     public static String createId(int routingHash, BytesRef tsid, long timestamp) {

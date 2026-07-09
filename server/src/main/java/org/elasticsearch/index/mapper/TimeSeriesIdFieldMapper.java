@@ -14,6 +14,7 @@ import org.apache.lucene.document.LongField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.cluster.routing.RoutingHashBuilder;
@@ -21,6 +22,7 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.IndexVersions;
@@ -230,6 +232,32 @@ public class TimeSeriesIdFieldMapper extends MetadataFieldMapper {
 
     private IndexVersion getIndexVersionCreated(final DocumentParserContext context) {
         return context.indexSettings().getIndexVersionCreated();
+    }
+
+    // SORTED doc-values field-type singletons for the columnar batch _tsid column, matching postParse
+    // (SortedDocValuesField, or its skip-index variant when the index uses a doc-values skipper). The
+    // flush-time TSDB index sort on _tsid requires SORTED doc values.
+    private static final IndexableFieldType TSID_DV_TYPE = SortedDocValuesField.TYPE;
+    private static final IndexableFieldType TSID_DV_SKIP_TYPE = SortedDocValuesField.indexedField("f", new BytesRef()).fieldType();
+
+    /**
+     * Columnar batch-indexing path for {@code _tsid}. The tsid is precomputed on the coordinating node and
+     * reachable via {@code ctx.getTsid()} (the same value {@link #postParse} uses for modern indices), so this
+     * simply emits one SORTED {@code _tsid} column over the per-document tsids.
+     */
+    @Override
+    public void mapMetadataColumns(BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        final BytesRef[] tsids = new BytesRef[contexts.length];
+        for (int d = 0; d < contexts.length; d++) {
+            final BytesRef tsid = contexts[d].getTsid();
+            if (tsid == null) {
+                // The batch path relies on the coordinating node computing the tsid; without it _tsid cannot
+                // be built, so abandon the columnar path for this batch (caller falls back to row-major).
+                throw new IllegalStateException("batch time_series indexing requires a coordinating-node _tsid");
+            }
+            tsids[d] = tsid;
+        }
+        out.addColumn(EicfLuceneColumns.arrayBinaryColumn(tsids, NAME, useDocValuesSkipper ? TSID_DV_SKIP_TYPE : TSID_DV_TYPE));
     }
 
     @Override

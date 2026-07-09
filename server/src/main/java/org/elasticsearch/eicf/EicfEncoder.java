@@ -291,7 +291,7 @@ public final class EicfEncoder implements Releasable {
                     scratchType[colIdx] = arr.arrayType();
                     scratchVar[colIdx] = arr.packed();
                     if (firePathSink) {
-                        sink.onArrayLeaf(colIdx, columnPath(colIdx));
+                        sink.onArrayLeaf(colIdx, columnPath(colIdx), arr);
                     }
                 }
                 // The UTF-8 slice points into the parser's reusable buffer; it stays valid until the

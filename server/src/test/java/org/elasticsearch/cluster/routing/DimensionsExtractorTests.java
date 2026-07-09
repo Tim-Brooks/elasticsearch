@@ -23,7 +23,9 @@ import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.elasticsearch.cluster.metadata.IndexMetadata.SETTING_INDEX_VERSION_CREATED;
@@ -102,10 +104,33 @@ public class DimensionsExtractorTests extends ESTestCase {
         assertExtractorMatchesSourceParser(doc, "dim.*");
     }
 
-    public void testThrowsOnArrayAtDimensionField() throws IOException {
+    public void testParityForStringArrayDimension() throws IOException {
+        // The original failing case: a multi-valued keyword dimension (e.g. resource.attributes.host.ip).
         Map<String, Object> doc = new LinkedHashMap<>();
-        doc.put("dim.tags", new String[] { "a", "b", "c" });
+        doc.put("dim.host.ip", List.of("10.0.0.1", "10.0.0.2", "192.168.1.1"));
+        doc.put("dim.region", "us-west-2");
         doc.put("metric", "x");
+        assertExtractorMatchesSourceParser(doc, "dim.*");
+    }
+
+    public void testParityForNumericArrayDimension() throws IOException {
+        Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("dim.ports", List.of(80, 443, 8080));
+        doc.put("dim.epochs", List.of(1700000000123L, 1700000000456L));
+        assertExtractorMatchesSourceParser(doc, "dim.*");
+    }
+
+    public void testParityForMixedTypeArrayDimension() throws IOException {
+        // A UNION array (mixed element types) must add each element in order, matching the funnel.
+        Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("dim.mixed", Arrays.asList("alpha", 42, 1.5, true));
+        assertExtractorMatchesSourceParser(doc, "dim.*");
+    }
+
+    public void testThrowsOnCompoundElementInArrayDimension() throws IOException {
+        // An object element inside a dimension array is not reproduced by the extractor; it must fall back.
+        Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("dim.nested", List.of(Map.of("k", "v")));
         IndexRouting.ExtractFromSource.ForIndexDimensions strategy = forIndexDimensions("dim.*");
         try (EirfEncoder encoder = new EirfEncoder()) {
             DimensionsExtractor extractor = new DimensionsExtractor(strategy);

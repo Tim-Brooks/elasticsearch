@@ -336,23 +336,9 @@ public final class ShardBatchMapper {
         }
 
         final ColumnBatchBuilder builder = new ColumnBatchBuilder(docCount, contexts);
-        try {
-            for (MetadataFieldMapper metadataMapper : metadataMappers) {
-                if (metadataMapper != null) {
-                    metadataMapper.mapMetadataColumns(contexts, builder);
-                }
-            }
-        } catch (Exception e) {
-            // INFO so a columnar benchmark can see exactly which step abandoned the fast path (the stack
-            // trace identifies the metadata mapper). Deduped by exception type so a repeatedly-failing
-            // metadata mapper logs once rather than on every batch.
-            logFallbackOnce(
-                "metadata-map-fail:" + e.getClass().getName(),
-                "batch indexing fallback: a metadata mapper failed to assemble column batch, falling back to row-major",
-                e
-            );
-            return null;
-        }
+        // Field (and group) mappers run BEFORE metadata mappers: TSDB metadata columns (_id/_tsid) depend on
+        // the @timestamp value that DateFieldMapper.mapColumnBatch records into each ctx.doc() for the
+        // data-stream timestamp field. Column order within the batch does not matter (Lucene keys by field name).
         for (int leaf = 0; leaf < columnMappers.length; leaf++) {
             final FieldMapper mapper = columnMappers[leaf];
             if (mapper == null) {
@@ -392,6 +378,24 @@ public final class ShardBatchMapper {
                 );
                 return null;
             }
+        }
+
+        try {
+            for (MetadataFieldMapper metadataMapper : metadataMappers) {
+                if (metadataMapper != null) {
+                    metadataMapper.mapMetadataColumns(contexts, builder);
+                }
+            }
+        } catch (Exception e) {
+            // INFO so a columnar benchmark can see exactly which step abandoned the fast path (the stack
+            // trace identifies the metadata mapper). Deduped by exception type so a repeatedly-failing
+            // metadata mapper logs once rather than on every batch.
+            logFallbackOnce(
+                "metadata-map-fail:" + e.getClass().getName(),
+                "batch indexing fallback: a metadata mapper failed to assemble column batch, falling back to row-major",
+                e
+            );
+            return null;
         }
 
         chunkBatch.setColumnBatchProvider(builder);

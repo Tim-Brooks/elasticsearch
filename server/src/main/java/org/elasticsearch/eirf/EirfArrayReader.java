@@ -10,6 +10,7 @@
 package org.elasticsearch.eirf;
 
 import org.elasticsearch.common.util.ByteUtils;
+import org.elasticsearch.xcontent.XContentString;
 
 import java.nio.charset.StandardCharsets;
 
@@ -130,6 +131,16 @@ public final class EirfArrayReader {
     public String stringValue() {
         int len = ByteUtils.readIntLE(data, currentStart);
         return new String(data, currentStart + 4, len, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Returns the current STRING element's raw UTF-8 bytes as a slice into the backing array, without
+     * decoding to a {@link String}. Used by routing extraction to feed a dimension's array elements to
+     * a {@link org.elasticsearch.eirf.EirfEncoder.LeafSink} with the exact bytes the parser emitted.
+     */
+    public XContentString.UTF8Bytes stringBytes() {
+        int len = ByteUtils.readIntLE(data, currentStart);
+        return new XContentString.UTF8Bytes(data, currentStart + 4, len);
     }
 
     /**

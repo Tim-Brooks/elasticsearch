@@ -182,7 +182,7 @@ public class EirfEncoderPartitionedTests extends ESTestCase {
         }
 
         @Override
-        public void onArrayLeaf(int columnIndex, String dottedPath) {
+        public void onArrayLeaf(int columnIndex, String dottedPath, EirfEncoder.PackedArray array) {
             events.add("array:" + dottedPath);
             lastDottedPath = dottedPath;
         }

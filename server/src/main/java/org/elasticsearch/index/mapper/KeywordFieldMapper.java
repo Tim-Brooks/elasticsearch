@@ -1455,9 +1455,13 @@ public final class KeywordFieldMapper extends FieldMapper {
 
     @Override
     public boolean supportsBatchIndexing() {
-        // Only plain keyword fields are eligible. Scripts, copy_to, multi-fields, dimensions, or a custom
-        // normalizer all require per-value handling the columnar batch path does not reproduce, so those
-        // configurations fall back to the row-major path.
+        // Scripts, copy_to, multi-fields, or a custom normalizer all require per-value handling the columnar
+        // batch path does not reproduce, so those configurations fall back to the row-major path.
+        //
+        // Dimensions ARE eligible: the batch path assumes the _tsid is always computed on the coordinating
+        // node (stashed on the request and threaded through SourceToParse), so no dimension collection is
+        // needed at the mapping level. mapColumnBatch still writes the value column reusing the field's own
+        // Lucene field type (which reflects the dimension doc-values skipper), matching the row path.
         //
         // NOTE(benchmark): ignore_above is intentionally NOT gated here. logsdb defaults ignore_above to 8191,
         // which would otherwise disqualify essentially every keyword field. mapColumnBatch instead drops any
@@ -1466,7 +1470,6 @@ public final class KeywordFieldMapper extends FieldMapper {
         return hasScript() == false
             && copyTo().copyToFields().isEmpty()
             && multiFields().iterator().hasNext() == false
-            && fieldType().isDimension() == false
             && fieldType().normalizer() == Lucene.KEYWORD_ANALYZER;
     }
 

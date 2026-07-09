@@ -11,7 +11,9 @@ package org.elasticsearch.cluster.routing;
 
 import org.apache.lucene.util.FixedBitSet;
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.eirf.EirfArrayReader;
 import org.elasticsearch.eirf.EirfEncoder;
+import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.xcontent.XContentString;
 
 /**
@@ -67,11 +69,48 @@ public abstract class RoutingExtractor implements EirfEncoder.LeafSink {
     }
 
     @Override
-    public final void onArrayLeaf(int columnIndex, String dottedPath) {
-        // Both routing strategies' source-parser paths descend into arrays at matched columns and
-        // emit one entry per element.
-        if (isMatchedColumn(columnIndex, dottedPath)) {
-            throw new RoutingExtractionException("array at routing column [" + dottedPath + "] is not supported in batch encoding");
+    public final void onArrayLeaf(int columnIndex, String dottedPath, EirfEncoder.PackedArray array) {
+        // Both routing strategies' source-parser paths descend into arrays at matched columns and emit one
+        // entry per element (see XContentParserTsidFunnel.extractArray). Mirror that by iterating the packed
+        // array and feeding each primitive element to the same per-type handler a scalar leaf would hit; the
+        // element order is preserved, so the resulting tsid / routing hash matches the source-parser path.
+        if (isMatchedColumn(columnIndex, dottedPath) == false) {
+            return;
+        }
+        final boolean rawText = passRawText();
+        final EirfArrayReader reader = new EirfArrayReader(array.packed(), array.arrayType() == EirfType.FIXED_ARRAY);
+        while (reader.next()) {
+            final byte type = reader.type();
+            switch (type) {
+                case EirfType.STRING -> handleTextPrimitive(dottedPath, EirfType.STRING, reader.stringBytes());
+                // The funnel skips explicit nulls in arrays; they contribute no dimension value.
+                case EirfType.NULL -> {
+                }
+                case EirfType.INT, EirfType.LONG, EirfType.FLOAT, EirfType.DOUBLE, EirfType.TRUE, EirfType.FALSE -> {
+                    if (rawText) {
+                        // Raw-text strategies (RoutingPathExtractor) hash the parser's textual form of each
+                        // primitive, which the packed array does not retain for non-string elements. Fall back
+                        // rather than risk a routing-hash mismatch with the source-parser path.
+                        throw new RoutingExtractionException(
+                            "non-string element in array at routing column [" + dottedPath + "] is not supported in batch encoding"
+                        );
+                    }
+                    switch (type) {
+                        case EirfType.INT -> handleLongPrimitive(dottedPath, EirfType.INT, reader.intValue());
+                        case EirfType.LONG -> handleLongPrimitive(dottedPath, EirfType.LONG, reader.longValue());
+                        case EirfType.FLOAT -> handleDoublePrimitive(dottedPath, EirfType.FLOAT, reader.floatValue());
+                        case EirfType.DOUBLE -> handleDoublePrimitive(dottedPath, EirfType.DOUBLE, reader.doubleValue());
+                        case EirfType.TRUE -> handleBooleanPrimitive(dottedPath, true);
+                        case EirfType.FALSE -> handleBooleanPrimitive(dottedPath, false);
+                        default -> throw new AssertionError("unreachable primitive type " + type);
+                    }
+                }
+                // Nested arrays / objects (KEY_VALUE) at a routing column: the source-parser funnel recurses,
+                // but that is not reproduced here. Fall back to the row-major path.
+                default -> throw new RoutingExtractionException(
+                    "compound element in array at routing column [" + dottedPath + "] is not supported in batch encoding"
+                );
+            }
         }
     }
 

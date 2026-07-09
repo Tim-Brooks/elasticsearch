@@ -305,11 +305,14 @@ public class EirfEncoder implements Releasable {
 
         /**
          * Invoked once per array encountered as a direct leaf value under an object. The encoder
-         * still encodes the array into scratch as a {@code FIXED_ARRAY} or {@code UNION_ARRAY};
-         * this hook simply tells the caller that a complex value was seen at that column so it can
-         * decide how to react.
+         * still encodes the array into scratch as a {@code FIXED_ARRAY} or {@code UNION_ARRAY}; the
+         * same {@link PackedArray} is handed here so a sink that needs the element values (e.g. a
+         * routing extractor building a tsid from a multi-valued dimension) can iterate them with an
+         * {@link org.elasticsearch.eirf.EirfArrayReader} rather than re-parsing the source.
+         *
+         * @param array the packed array (type + element bytes) the encoder produced for this leaf
          */
-        default void onArrayLeaf(int columnIndex, String dottedPath) {}
+        default void onArrayLeaf(int columnIndex, String dottedPath, PackedArray array) {}
     }
 
     static final class ScratchBuffers {
@@ -412,7 +415,7 @@ public class EirfEncoder implements Releasable {
                     scratch.totalVarSize += arr.packed.length;
                     scratch.varColumnCount++;
                     if (firePathSink) {
-                        sink.onArrayLeaf(colIdx, encoder.columnPath(colIdx));
+                        sink.onArrayLeaf(colIdx, encoder.columnPath(colIdx), arr);
                     }
                 }
                 case VALUE_STRING -> {

@@ -10,11 +10,13 @@
 package org.elasticsearch.index.mapper;
 
 import org.apache.lucene.document.SortedDocValuesField;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.util.ByteUtils;
+import org.elasticsearch.eicf.EicfLuceneColumns;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexVersions;
 import org.elasticsearch.index.fielddata.FieldData;
@@ -139,6 +141,36 @@ public class TimeSeriesRoutingHashFieldMapper extends MetadataFieldMapper {
             var field = new SortedDocValuesField(NAME, Uid.encodeId(routingHash));
             context.rootDoc().add(field);
         }
+    }
+
+    // SORTED doc-values field-type singleton for the columnar batch _ts_routing_hash column (matches postParse).
+    private static final IndexableFieldType TS_ROUTING_HASH_DV_TYPE = SortedDocValuesField.TYPE;
+
+    /**
+     * Columnar batch-indexing path for {@code _ts_routing_hash}. Mirrors {@link #postParse}: the routing hash
+     * is set on the request by the coordinating node and read from {@code SourceToParse#routing()}. Only
+     * emitted for {@code time_series} indices on or after {@link IndexVersions#TIME_SERIES_ROUTING_HASH_IN_ID}.
+     */
+    @Override
+    public void mapMetadataColumns(BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        if (contexts.length == 0) {
+            return;
+        }
+        final var indexSettings = contexts[0].indexSettings();
+        if (indexSettings.getMode() != IndexMode.TIME_SERIES
+            || indexSettings.getIndexVersionCreated().before(IndexVersions.TIME_SERIES_ROUTING_HASH_IN_ID)) {
+            return;
+        }
+        final BytesRef[] values = new BytesRef[contexts.length];
+        for (int d = 0; d < contexts.length; d++) {
+            final String routingHash = contexts[d].sourceToParse().routing();
+            if (routingHash == null) {
+                // The batch path expects the coordinating node to have set the routing hash on the request.
+                throw new IllegalArgumentException("_ts_routing_hash was null but must be set for time_series batch indexing");
+            }
+            values[d] = Uid.encodeId(routingHash);
+        }
+        out.addColumn(EicfLuceneColumns.arrayBinaryColumn(values, NAME, TS_ROUTING_HASH_DV_TYPE));
     }
 
     @Override

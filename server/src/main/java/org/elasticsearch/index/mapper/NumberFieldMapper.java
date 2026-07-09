@@ -2544,12 +2544,15 @@ public class NumberFieldMapper extends FieldMapper {
     public boolean supportsBatchIndexing() {
         // Plain number mappers can be driven through parseCreateField by the bulk batch path.
         // ignore_malformed is allowed — parseCreateField handles it and only needs
-        // addIgnoredField on the context. Dimensions, copy_to, multi-fields, and scripts pull
-        // in behavior that the v1 batch path does not support.
-        return hasScript() == false
-            && copyTo().copyToFields().isEmpty()
-            && multiFields().iterator().hasNext() == false
-            && dimension == false;
+        // addIgnoredField on the context. copy_to, multi-fields, and scripts pull in behavior
+        // the v1 batch path does not support.
+        //
+        // Dimensions ARE allowed: the batch path assumes the _tsid is always computed on the
+        // coordinating node (stashed on the request and threaded through SourceToParse), so no
+        // dimension collection is needed at the mapping level. mapColumnBatch still writes the
+        // value column with the field's own IndexableFieldType (columnFieldType honours the
+        // dimension doc-values skipper), which matches the row path.
+        return hasScript() == false && copyTo().copyToFields().isEmpty() && multiFields().iterator().hasNext() == false;
     }
 
     @Override
