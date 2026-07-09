@@ -13,6 +13,7 @@ import org.apache.lucene.document.InetAddressPoint;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
@@ -29,6 +30,9 @@ import org.elasticsearch.common.network.InetAddresses;
 import org.elasticsearch.common.network.NetworkAddress;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Tuple;
+import org.elasticsearch.eicf.EicfLuceneColumns;
+import org.elasticsearch.eirf.EirfArrayReader;
+import org.elasticsearch.eirf.EirfType;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.IndexVersion;
@@ -56,6 +60,8 @@ import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.aggregations.support.CoreValuesSourceType;
 import org.elasticsearch.search.lookup.FieldValues;
 import org.elasticsearch.search.lookup.SearchLookup;
+import org.elasticsearch.sourcebatch.SourceColumn;
+import org.elasticsearch.xcontent.Text;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentString;
 
@@ -870,6 +876,74 @@ public class IpFieldMapper extends FieldMapper {
         if (stored) {
             doc.add(new StoredField(fieldType().name(), address.binaryValue()));
         }
+    }
+
+    @Override
+    public boolean supportsBatchIndexing() {
+        // Only doc-values-only ip fields are eligible: the columnar model has no points column, so an ip
+        // field that also indexes points (range-searchable) cannot be reproduced. Dimensions ARE allowed —
+        // the _tsid is computed on the coordinating node, so mapColumnBatch only writes the value column.
+        // Scripts, copy_to and multi-fields pull in behavior the columnar batch path does not reproduce.
+        // Only the SORTED_SET (non-binary-doc-values) encoding is implemented here; a high-cardinality
+        // BINARY ip field falls back.
+        return hasScript() == false
+            && copyTo().copyToFields().isEmpty()
+            && multiFields().iterator().hasNext() == false
+            && fieldType().indexType.hasPoints() == false
+            && fieldType().hasDocValues()
+            && fieldType().usesBinaryDocValues() == false;
+    }
+
+    // SORTED_SET doc-values field-type singletons for the columnar ip column, reusing the exact types the
+    // document path writes (see DocValuesFieldFactory.addSortedField): plain SORTED_SET, or the skip-index
+    // variant when the field uses a doc-values skipper (e.g. a time-series dimension).
+    private static final IndexableFieldType SORTED_SET_DV_TYPE = SortedSetDocValuesField.TYPE;
+    private static final IndexableFieldType SORTED_SET_DV_SKIP_TYPE = SortedSetDocValuesField.indexedField("f", new BytesRef()).fieldType();
+
+    @Override
+    public void mapColumnBatch(SourceColumn column, BatchDocumentParserContext[] contexts, ColumnBatchBuilder out) {
+        // Build a SORTED_SET column of the 16-byte IPv6-encoded addresses, mirroring indexValue's addSortedField.
+        // Each source value is fully parsed (InetAddresses.encodeAsIpv6) to reflect real mapping/parse load;
+        // multi-valued documents (ip arrays, e.g. host.ip) emit one column tuple per value. Unparseable values
+        // are dropped (ignore_malformed shortcut).
+        // TODO(production): dropping malformed values is a benchmark shortcut — they must instead be routed to
+        // _ignored and stored for synthetic source, as IpFieldMapper.parseCreateField does on the row path.
+        final IndexableFieldType fieldType = fieldType().indexType.hasDocValuesSkipper() ? SORTED_SET_DV_SKIP_TYPE : SORTED_SET_DV_TYPE;
+        final int docCount = column.docCount();
+        final EicfLuceneColumns.MultiValueBinaryColumnBuilder builder = EicfLuceneColumns.multiValueBinaryColumnBuilder(
+            docCount,
+            fullPath(),
+            fieldType
+        );
+        for (int d = 0; d < docCount; d++) {
+            builder.startDoc();
+            final byte type = column.getTypeByte(d);
+            if (type == EirfType.STRING) {
+                addIp(builder, column.getStringValue(d));
+            } else if (type == EirfType.FIXED_ARRAY || type == EirfType.UNION_ARRAY) {
+                final EirfArrayReader reader = column.getArrayValue(d);
+                while (reader.next()) {
+                    if (reader.type() == EirfType.STRING) {
+                        addIp(builder, new Text(reader.stringBytes()));
+                    }
+                    // Non-string array elements are not valid ip values; drop them (ignore_malformed shortcut).
+                }
+            }
+            // ABSENT / NULL / any other scalar type: the document has no ip value.
+            builder.endDoc();
+        }
+        out.addColumn(builder.build());
+    }
+
+    /** Fully parses {@code value} to its 16-byte IPv6 encoding and adds it to the current document, dropping malformed values. */
+    private static void addIp(EicfLuceneColumns.MultiValueBinaryColumnBuilder builder, XContentString value) {
+        final byte[] encoded;
+        try {
+            encoded = InetAddresses.encodeAsIpv6(value);
+        } catch (IllegalArgumentException e) {
+            return; // ignore_malformed shortcut: drop this value
+        }
+        builder.addValue(encoded, 0, encoded.length);
     }
 
     @Override

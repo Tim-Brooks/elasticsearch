@@ -10,6 +10,7 @@
 package org.elasticsearch.eicf;
 
 import org.apache.lucene.document.FieldType;
+import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.column.BinaryColumn;
 import org.apache.lucene.document.column.BytesRefValuesCursor;
 import org.apache.lucene.document.column.Column;
@@ -165,6 +166,39 @@ public class EicfLuceneColumnsTests extends ESTestCase {
                 assertEquals(s, values.nextValue().utf8ToString());
             }
         }
+    }
+
+    public void testMultiValueBinaryColumnSortsDedupsAndSkipsAbsent() {
+        // doc 0: unsorted with a duplicate -> sorted, unique; doc 1: no values -> absent (no tuple);
+        // doc 2: single value. The SPARSE tuple cursor must emit (docId, value) in non-decreasing doc order
+        // with the same doc repeated for the multi-valued document.
+        EicfLuceneColumns.MultiValueBinaryColumnBuilder builder = EicfLuceneColumns.multiValueBinaryColumnBuilder(
+            3,
+            "ip",
+            SortedSetDocValuesField.TYPE
+        );
+        builder.startDoc();
+        builder.addValue(new BytesRef("b"));
+        builder.addValue(new BytesRef("a"));
+        builder.addValue(new BytesRef("b")); // duplicate, dropped
+        builder.endDoc();
+        builder.startDoc();
+        builder.endDoc(); // absent
+        builder.startDoc();
+        builder.addValue(new BytesRef("c"));
+        builder.endDoc();
+
+        BinaryColumn col = builder.build();
+        assertEquals(Column.Density.SPARSE, col.density());
+
+        ObjectTupleCursor<BytesRef> tuples = col.tuples();
+        assertEquals(0, tuples.nextDoc());
+        assertEquals("a", tuples.value().utf8ToString());
+        assertEquals(0, tuples.nextDoc());
+        assertEquals("b", tuples.value().utf8ToString());
+        assertEquals(2, tuples.nextDoc());
+        assertEquals("c", tuples.value().utf8ToString());
+        assertEquals(DocIdSetIterator.NO_MORE_DOCS, tuples.nextDoc());
     }
 
     public void testBinaryFixedWidthPackedPointsFastPath() throws IOException {

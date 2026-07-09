@@ -645,6 +645,219 @@ public final class EicfLuceneColumns {
     }
 
     /**
+     * Builds a SPARSE, multi-valued {@link BinaryColumn} for a {@code SORTED} / {@code SORTED_SET}
+     * doc-values field. Per document the caller begins a doc ({@link MultiValueBinaryColumnBuilder#startDoc}),
+     * adds zero or more values, then ends it ({@link MultiValueBinaryColumnBuilder#endDoc}); the builder
+     * sorts each document's values (unsigned byte order) and drops adjacent duplicates — {@code SORTED_SET}
+     * requires sorted, unique values per document — then emits one {@code (docId, value)} tuple per surviving
+     * value. Documents with no values contribute no tuple (absent).
+     *
+     * <p>Unlike the {@code BINARY} {@link SeparateCountColumnBuilder} (which packs several values into a
+     * single blob plus a {@code .counts} companion), this represents multiple values natively as repeated,
+     * non-decreasing doc-ids in the column's {@link BinaryColumn#tuples() tuple cursor} — the representation
+     * Lucene uses for multi-valued {@code SORTED_SET} doc values.
+     */
+    public static MultiValueBinaryColumnBuilder multiValueBinaryColumnBuilder(int docCount, String name, IndexableFieldType fieldType) {
+        return new MultiValueBinaryColumnBuilder(docCount, name, fieldType);
+    }
+
+    /** @see #multiValueBinaryColumnBuilder */
+    public static final class MultiValueBinaryColumnBuilder {
+        private final int docCount;
+        private final String name;
+        private final IndexableFieldType fieldType;
+        // Per-document scratch: values are copied here, then sorted/deduped by index without moving bytes.
+        private byte[] scratch = new byte[64];
+        private int scratchLen;
+        private int[] entryOff = new int[8];
+        private int[] entryLen = new int[8];
+        private int[] order = new int[8];
+        private int entryCount;
+        // Global tuple storage (one entry per emitted value; docs may repeat for multi-valued documents).
+        private byte[] data = new byte[64];
+        private int dataLen;
+        private int[] tupleDoc = new int[16];
+        private int[] tupleOff = new int[16];
+        private int[] tupleLen = new int[16];
+        private int tupleCount;
+        private int doc = -1;
+
+        MultiValueBinaryColumnBuilder(int docCount, String name, IndexableFieldType fieldType) {
+            this.docCount = docCount;
+            this.name = name;
+            this.fieldType = fieldType;
+        }
+
+        /** Begins accumulating values for the next document. Must be called once per document, in order. */
+        public void startDoc() {
+            doc++;
+            scratchLen = 0;
+            entryCount = 0;
+        }
+
+        /** Adds one value for the current document. */
+        public void addValue(byte[] bytes, int off, int len) {
+            if (entryCount == entryOff.length) {
+                entryOff = ArrayUtil.grow(entryOff, entryCount + 1);
+                entryLen = ArrayUtil.grow(entryLen, entryCount + 1);
+                order = ArrayUtil.grow(order, entryCount + 1);
+            }
+            if (scratchLen + len > scratch.length) {
+                scratch = ArrayUtil.grow(scratch, scratchLen + len);
+            }
+            System.arraycopy(bytes, off, scratch, scratchLen, len);
+            entryOff[entryCount] = scratchLen;
+            entryLen[entryCount] = len;
+            scratchLen += len;
+            entryCount++;
+        }
+
+        /** Adds one value for the current document from a {@link BytesRef}. */
+        public void addValue(BytesRef value) {
+            addValue(value.bytes, value.offset, value.length);
+        }
+
+        /** Finishes the current document, emitting its sorted, de-duplicated values as column tuples. */
+        public void endDoc() {
+            if (entryCount == 0) {
+                return; // absent: no tuple for this document
+            }
+            sortEntries();
+            int prevOff = -1;
+            int prevLen = -1;
+            for (int i = 0; i < entryCount; i++) {
+                final int e = order[i];
+                // SORTED_SET values must be unique per document; drop adjacent duplicates after sorting.
+                if (prevOff >= 0 && equalEntry(entryOff[e], entryLen[e], prevOff, prevLen)) {
+                    continue;
+                }
+                appendTuple(scratch, entryOff[e], entryLen[e]);
+                prevOff = entryOff[e];
+                prevLen = entryLen[e];
+            }
+        }
+
+        private void appendTuple(byte[] src, int off, int len) {
+            if (tupleCount == tupleDoc.length) {
+                tupleDoc = ArrayUtil.grow(tupleDoc, tupleCount + 1);
+                tupleOff = ArrayUtil.grow(tupleOff, tupleCount + 1);
+                tupleLen = ArrayUtil.grow(tupleLen, tupleCount + 1);
+            }
+            if (dataLen + len > data.length) {
+                data = ArrayUtil.grow(data, dataLen + len);
+            }
+            System.arraycopy(src, off, data, dataLen, len);
+            tupleDoc[tupleCount] = doc;
+            tupleOff[tupleCount] = dataLen;
+            tupleLen[tupleCount] = len;
+            dataLen += len;
+            tupleCount++;
+        }
+
+        /** Finishes the accumulated tuples into a SPARSE {@link BinaryColumn}. Call exactly once. */
+        public BinaryColumn build() {
+            assert doc + 1 == docCount : "added [" + (doc + 1) + "] documents but expected [" + docCount + "]";
+            return new MultiValueBinaryColumnAdapter(name, fieldType, data, tupleDoc, tupleOff, tupleLen, tupleCount);
+        }
+
+        // Insertion sort of entry indices by unsigned byte order; per-document value counts are small.
+        private void sortEntries() {
+            for (int i = 0; i < entryCount; i++) {
+                order[i] = i;
+            }
+            for (int i = 1; i < entryCount; i++) {
+                final int current = order[i];
+                int j = i - 1;
+                while (j >= 0 && compareEntries(order[j], current) > 0) {
+                    order[j + 1] = order[j];
+                    j--;
+                }
+                order[j + 1] = current;
+            }
+        }
+
+        private int compareEntries(int a, int b) {
+            final int aOff = entryOff[a];
+            final int bOff = entryOff[b];
+            final int len = Math.min(entryLen[a], entryLen[b]);
+            for (int i = 0; i < len; i++) {
+                final int cmp = (scratch[aOff + i] & 0xFF) - (scratch[bOff + i] & 0xFF);
+                if (cmp != 0) {
+                    return cmp;
+                }
+            }
+            return entryLen[a] - entryLen[b];
+        }
+
+        private boolean equalEntry(int aOff, int aLen, int bOff, int bLen) {
+            if (aLen != bLen) {
+                return false;
+            }
+            for (int i = 0; i < aLen; i++) {
+                if (scratch[aOff + i] != scratch[bOff + i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /**
+     * A SPARSE {@link BinaryColumn} backed by an explicit list of {@code (docId, value)} tuples in
+     * non-decreasing doc-id order, with the same doc-id repeated for multi-valued documents. Feeds
+     * {@code SORTED} / {@code SORTED_SET} doc values via {@link #tuples()}.
+     */
+    private static final class MultiValueBinaryColumnAdapter extends BinaryColumn {
+        private final byte[] data;
+        private final int[] tupleDoc;
+        private final int[] tupleOff;
+        private final int[] tupleLen;
+        private final int tupleCount;
+
+        MultiValueBinaryColumnAdapter(
+            String name,
+            IndexableFieldType fieldType,
+            byte[] data,
+            int[] tupleDoc,
+            int[] tupleOff,
+            int[] tupleLen,
+            int tupleCount
+        ) {
+            super(name, fieldType, Density.SPARSE);
+            this.data = data;
+            this.tupleDoc = tupleDoc;
+            this.tupleOff = tupleOff;
+            this.tupleLen = tupleLen;
+            this.tupleCount = tupleCount;
+        }
+
+        @Override
+        public ObjectTupleCursor<BytesRef> tuples() {
+            return new ObjectTupleCursor<>() {
+                private final BytesRef scratch = new BytesRef();
+                private int i = -1;
+
+                @Override
+                public int nextDoc() {
+                    i++;
+                    if (i >= tupleCount) {
+                        return DocIdSetIterator.NO_MORE_DOCS;
+                    }
+                    scratch.bytes = data;
+                    scratch.offset = tupleOff[i];
+                    scratch.length = tupleLen[i];
+                    return tupleDoc[i];
+                }
+
+                @Override
+                public BytesRef value() {
+                    return scratch;
+                }
+            };
+        }
+    }
+
+    /**
      * Adapts an arbitrary {@link SourceColumn} to a {@link BinaryColumn}. An {@link EicfStringColumn} or
      * {@link EicfBinaryColumn} is wrapped directly (fast path); any other column — typically a
      * heterogeneous {@code UNION} (e.g. a keyword field that received explicit nulls) or an all-absent
