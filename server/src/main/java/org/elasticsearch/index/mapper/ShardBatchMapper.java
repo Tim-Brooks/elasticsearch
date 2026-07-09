@@ -28,6 +28,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Batch-time mapper resolution and columnar field mapping for the bulk batch-indexing fast path.
@@ -54,7 +56,29 @@ public final class ShardBatchMapper {
 
     private static final Logger logger = LogManager.getLogger(ShardBatchMapper.class);
 
+    /**
+     * De-duplicates fallback log lines across batches. {@link #resolveMappers} and {@link #mapColumnBatch}
+     * run once per batch, so without this a stable unsupported mapping would re-log the same reasons on
+     * every batch (the dynamic-mapping warmup "unmapped leaf" lines are especially noisy). Keyed by a
+     * compact signature so each distinct fact — e.g. one line per unsupported mapper type — is logged
+     * exactly once per node lifetime, which is enough for a benchmark to capture the full backlog of
+     * unsupported mappers in a single run. Never cleared: it is a diagnostic aid and the set of distinct
+     * signatures (bounded by field paths / type names) stays small.
+     */
+    private static final Set<String> LOGGED_FALLBACKS = ConcurrentHashMap.newKeySet();
+
     private ShardBatchMapper() {}
+
+    /**
+     * Logs {@code message} at INFO the first time {@code signatureKey} is seen, and suppresses every
+     * later occurrence of the same signature (see {@link #LOGGED_FALLBACKS}). The signature key is a
+     * set key, not a log message, so the call site keeps parameterized logging.
+     */
+    private static void logFallbackOnce(String signatureKey, String message, Object... params) {
+        if (LOGGED_FALLBACKS.add(signatureKey)) {
+            logger.info(message, params);
+        }
+    }
 
     /**
      * Result of {@link #resolveMappers(EirfSchema, MappingLookup)}. {@code columnMappers} holds one
@@ -79,15 +103,22 @@ public final class ShardBatchMapper {
      * sequential path.
      */
     public static BatchMapperResolution resolveMappers(EirfSchema schema, MappingLookup lookup) {
+        // Every problem is logged and scanning continues (rather than returning on the first) so a single
+        // benchmark run surfaces EVERY reason the batch path fell back — the full backlog of unsupported
+        // mappers — not just the first one encountered. `eligible` flips to false on any problem and the
+        // method returns null at the end. Log lines are de-duplicated via logFallbackOnce so a stable
+        // mapping does not re-log the same reasons on every batch.
+        boolean eligible = true;
+
         // Runtime fields or index-time scripts anywhere in the mapping would require the normal
         // parsing flow; the batch path does not support them.
         if (lookup.getMapping().getRoot().runtimeFields().isEmpty() == false) {
-            logger.info("batch indexing fallback: mapping defines runtime fields");
-            return null;
+            logFallbackOnce("runtime-fields", "batch indexing fallback: mapping defines runtime fields");
+            eligible = false;
         }
         if (lookup.indexTimeScriptMappers().isEmpty() == false) {
-            logger.info("batch indexing fallback: mapping defines index-time scripts");
-            return null;
+            logFallbackOnce("index-scripts", "batch indexing fallback: mapping defines index-time scripts");
+            eligible = false;
         }
 
         final int leafCount = schema.leafCount();
@@ -117,8 +148,10 @@ public final class ShardBatchMapper {
                 }
                 // A field type without a mapper indicates a runtime field shadow.
                 if (lookup.getFieldType(fullPath) != null) {
-                    logger.info("batch indexing fallback: runtime-field shadow at [{}]", fullPath);
-                    return null;
+                    logFallbackOnce("runtime-shadow:" + fullPath, "batch indexing fallback: runtime-field shadow at [{}]", fullPath);
+                    eligible = false;
+                    columnMappers[leaf] = null;
+                    continue;
                 }
                 final ObjectMapper.Dynamic parentDynamic = findNearestParentDynamic(fullPath, lookup);
                 if (parentDynamic == ObjectMapper.Dynamic.FALSE) {
@@ -127,26 +160,44 @@ public final class ShardBatchMapper {
                     columnMappers[leaf] = null;
                     continue;
                 }
-                logger.info("batch indexing fallback: unmapped leaf [{}] under dynamic={} parent", fullPath, parentDynamic);
-                return null;
+                logFallbackOnce(
+                    "unmapped-leaf:" + fullPath,
+                    "batch indexing fallback: unmapped leaf [{}] under dynamic={} parent",
+                    fullPath,
+                    parentDynamic
+                );
+                eligible = false;
+                columnMappers[leaf] = null;
+                continue;
             }
 
             if ((resolved instanceof FieldMapper) == false) {
-                logger.info("batch indexing fallback: non-field mapper at [{}]", fullPath);
-                return null;
+                logFallbackOnce("non-field:" + fullPath, "batch indexing fallback: non-field mapper at [{}]", fullPath);
+                eligible = false;
+                columnMappers[leaf] = null;
+                continue;
             }
             final FieldMapper fieldMapper = (FieldMapper) resolved;
 
             if (fieldMapper.supportsBatchIndexing() == false) {
-                logger.info(
+                // Keyed by type name (not path) so the many fields of one unsupported type collapse to a
+                // single line — the "list of mapper types to implement" the benchmark is after.
+                logFallbackOnce(
+                    "unsupported-type:" + fieldMapper.typeName(),
                     "batch indexing fallback: mapper at [{}] of type [{}] does not support batch indexing",
                     fullPath,
                     fieldMapper.typeName()
                 );
-                return null;
+                eligible = false;
+                columnMappers[leaf] = null;
+                continue;
             }
 
             columnMappers[leaf] = fieldMapper;
+        }
+
+        if (eligible == false) {
+            return null;
         }
 
         final List<ColumnGroup> groups;
@@ -293,8 +344,13 @@ public final class ShardBatchMapper {
             }
         } catch (Exception e) {
             // INFO so a columnar benchmark can see exactly which step abandoned the fast path (the stack
-            // trace identifies the metadata mapper).
-            logger.info("batch indexing fallback: a metadata mapper failed to assemble column batch, falling back to row-major", e);
+            // trace identifies the metadata mapper). Deduped by exception type so a repeatedly-failing
+            // metadata mapper logs once rather than on every batch.
+            logFallbackOnce(
+                "metadata-map-fail:" + e.getClass().getName(),
+                "batch indexing fallback: a metadata mapper failed to assemble column batch, falling back to row-major",
+                e
+            );
             return null;
         }
         for (int leaf = 0; leaf < columnMappers.length; leaf++) {
@@ -306,7 +362,9 @@ public final class ShardBatchMapper {
                 mapper.mapColumnBatch(chunkBatch.column(leaf), contexts, builder);
             } catch (Exception e) {
                 // Names the offending field + type so the document/field forcing the fallback is identifiable.
-                logger.info(
+                // Deduped by field/type/exception so a repeatedly-failing field logs once, not per batch.
+                logFallbackOnce(
+                    "field-map-fail:" + schema.getFullPath(leaf) + ':' + mapper.typeName() + ':' + e.getClass().getName(),
                     "batch indexing fallback: field [{}] of type [{}] failed columnar mapping, falling back to row-major",
                     schema.getFullPath(leaf),
                     mapper.typeName(),
@@ -324,7 +382,9 @@ public final class ShardBatchMapper {
             try {
                 group.mapper().mapColumnGroupBatch(groupColumns, group.relativeKeys(), contexts, builder);
             } catch (Exception e) {
-                logger.info(
+                // Deduped by group field/type/exception so a repeatedly-failing group logs once, not per batch.
+                logFallbackOnce(
+                    "group-map-fail:" + group.mapper().fullPath() + ':' + group.mapper().typeName() + ':' + e.getClass().getName(),
                     "batch indexing fallback: group field [{}] of type [{}] failed columnar mapping, falling back to row-major",
                     group.mapper().fullPath(),
                     group.mapper().typeName(),

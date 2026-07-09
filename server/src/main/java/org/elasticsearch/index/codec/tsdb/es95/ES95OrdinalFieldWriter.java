@@ -12,10 +12,11 @@ package org.elasticsearch.index.codec.tsdb.es95;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.util.packed.PackedInts;
 import org.elasticsearch.core.Nullable;
-import org.elasticsearch.index.codec.tsdb.AbstractTSDBDocValuesConsumer;
 import org.elasticsearch.index.codec.tsdb.DocValueFieldCountStats;
 import org.elasticsearch.index.codec.tsdb.NumericWriteContext;
+import org.elasticsearch.index.codec.tsdb.OffsetsAccumulatorBase;
 import org.elasticsearch.index.codec.tsdb.OrdinalFieldWriter;
+import org.elasticsearch.index.codec.tsdb.SkipIndexBuilder;
 import org.elasticsearch.index.codec.tsdb.SortedFieldObserver;
 import org.elasticsearch.index.codec.tsdb.TSDBDocValuesBlockWriter;
 import org.elasticsearch.index.codec.tsdb.TSDBDocValuesEncoder;
@@ -65,8 +66,9 @@ final class ES95OrdinalFieldWriter implements OrdinalFieldWriter {
         final FieldInfo field,
         final TsdbDocValuesProducer valuesSource,
         long maxOrd,
-        final AbstractTSDBDocValuesConsumer.DocValueCountConsumer docValueCountConsumer,
-        final SortedFieldObserver sortedFieldObserver
+        final OffsetsAccumulatorBase offsetsAccumulator,
+        final SortedFieldObserver sortedFieldObserver,
+        final SkipIndexBuilder skipIndexBuilder
     ) throws IOException {
         final FieldContext context = fieldContextResolver.resolve(field.name, ctx.blockSize());
         final int blockSize = resolver.resolve(context).blockSize();
@@ -78,10 +80,12 @@ final class ES95OrdinalFieldWriter implements OrdinalFieldWriter {
             field,
             valuesSource,
             maxOrd,
-            docValueCountConsumer,
+            offsetsAccumulator,
             sortedFieldObserver,
             (buffer, data) -> encoder.encodeOrdinals(buffer, data, bitsPerOrd),
             () -> ctx.meta().writeByte((byte) blockShift),
+            skipIndexBuilder,
+            false,
             blockSize
         );
     }
