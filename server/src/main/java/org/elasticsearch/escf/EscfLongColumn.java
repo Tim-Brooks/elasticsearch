@@ -75,31 +75,29 @@ final class EscfLongColumn extends AbstractFixed64Column {
     }
 
     private static final class LongCursor extends LongTupleCursor {
-        private final EscfLongColumn column;
+        private final PresentDocIterator present;
         private final DenseLongValuesCursor values;
-        private int row = -1;
+        private int lastRow = -1;
         private long currentValue;
 
         LongCursor(EscfLongColumn column) {
-            this.column = column;
+            this.present = column.presentDocs();
             this.values = new DenseLongValuesCursor(column.docCount, column);
         }
 
         @Override
         public int nextDoc() {
-            int toSkip = 0;
-            while (++row < column.docCount) {
-                if (column.isAbsent(row)) {
-                    toSkip++;
-                } else {
-                    if (toSkip > 0) {
-                        values.skip(toSkip);
-                    }
-                    currentValue = values.nextLong();
-                    return row;
-                }
+            int doc = present.nextDoc();
+            if (doc == DocIdSetIterator.NO_MORE_DOCS) {
+                return doc;
             }
-            return DocIdSetIterator.NO_MORE_DOCS;
+            int toSkip = doc - lastRow - 1; // absent rows between the previous present row and this one
+            if (toSkip > 0) {
+                values.skip(toSkip);
+            }
+            currentValue = values.nextLong();
+            lastRow = doc;
+            return doc;
         }
 
         @Override

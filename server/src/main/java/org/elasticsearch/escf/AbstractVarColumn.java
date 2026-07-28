@@ -11,7 +11,6 @@ package org.elasticsearch.escf;
 
 import org.apache.lucene.document.column.BytesRefValuesCursor;
 import org.apache.lucene.document.column.ObjectTupleCursor;
-import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.IntsRef;
@@ -79,20 +78,17 @@ abstract class AbstractVarColumn extends EscfColumn {
 
     private static final class BytesRefTupleCursor extends ObjectTupleCursor<BytesRef> {
         private final AbstractVarColumn column;
+        private final PresentDocIterator present;
         private int row = -1;
 
         BytesRefTupleCursor(AbstractVarColumn column) {
             this.column = column;
+            this.present = column.presentDocs();
         }
 
         @Override
         public int nextDoc() {
-            while (++row < column.docCount) {
-                if (column.isAbsent(row) == false) {
-                    return row;
-                }
-            }
-            return DocIdSetIterator.NO_MORE_DOCS;
+            return row = present.nextDoc();
         }
 
         @Override

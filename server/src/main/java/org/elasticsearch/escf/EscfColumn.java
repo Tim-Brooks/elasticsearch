@@ -78,6 +78,11 @@ public abstract class EscfColumn implements SliceableColumn {
         };
     }
 
+    /** A forward-only iterator over this column's present (non-absent) doc ids. */
+    final PresentDocIterator presentDocs() {
+        return new PresentDocIterator(validity, docCount);
+    }
+
     final boolean isAbsent(int row) {
         if (row < 0 || row >= docCount) {
             return true;
