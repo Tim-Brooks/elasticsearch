@@ -19,6 +19,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
+import org.elasticsearch.index.mapper.ShardBatchMapper;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.sort.SortOrder;
@@ -172,6 +173,147 @@ public class BatchBulkIT extends ESIntegTestCase {
                     ShardBatchIndexer.class.getName(),
                     Level.TRACE,
                     "batch indexed * operations on primary shard *"
+                )
+            );
+
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
+            assertNoFailures(bulkResponse);
+            assertThat(bulkResponse.getItems().length, equalTo(numDocs));
+
+            mockLog.assertAllExpectationsMatched();
+        }
+
+        refresh(index);
+
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+
+        // Spot-check a specific doc by id.
+        var getResponse = client().get(new org.elasticsearch.action.get.GetRequest(index).id("doc-0")).actionGet();
+        assertTrue(getResponse.isExists());
+    }
+
+    /**
+     * Verifies that a ClickBench-shaped document (keyword + integer/long + date fields) indexes
+     * through the columnar batch path without falling back to the row-major parse path.
+     * <p>
+     * The MockLog assertions are the key check:
+     * <ul>
+     *   <li>A {@code SeenEventExpectation} on {@link ShardBatchIndexer} TRACE confirms the batch
+     *       path actually ran at least once.</li>
+     *   <li>An {@code UnseenEventExpectation} on {@link ShardBatchMapper} WARN confirms that no
+     *       mapper threw an exception that caused an exception-based columnar fallback.</li>
+     *   <li>An {@code UnseenEventExpectation} on {@link ShardBatchMapper} DEBUG confirms that no
+     *       mapper's {@code supportsColumnarParse} returned false (which would disable the columnar
+     *       path for the whole chunk).</li>
+     * </ul>
+     */
+    public void testColumnarClickBenchBatchMode() throws IOException {
+        String index = "test-columnar-clickbench";
+
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            {
+                mapping.field("dynamic", "strict");
+                mapping.startObject("properties");
+                {
+                    // keyword fields
+                    mapping.startObject("Title").field("type", "keyword").endObject();
+                    mapping.startObject("URL").field("type", "keyword").endObject();
+                    mapping.startObject("HitColor").field("type", "keyword").endObject();
+                    // long fields
+                    mapping.startObject("WatchID").field("type", "long").endObject();
+                    mapping.startObject("UserID").field("type", "long").endObject();
+                    // integer fields
+                    mapping.startObject("JavaEnable").field("type", "integer").endObject();
+                    mapping.startObject("OS").field("type", "integer").endObject();
+                    mapping.startObject("Age").field("type", "integer").endObject();
+                    // date fields — two different string formats, matching ClickBench
+                    mapping.startObject("EventTime").field("type", "date").field("format", "yyyy-MM-dd HH:mm:ss").endObject();
+                    mapping.startObject("EventDate").field("type", "date").field("format", "yyyy-MM-dd").endObject();
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+        }
+        mapping.endObject();
+
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    Settings.builder()
+                        .put("index.number_of_shards", 2)
+                        .put("index.number_of_replicas", 1)
+                        .put(IndexSettings.MODE.getKey(), IndexMode.COLUMNAR.getName())
+                        .put(IndexSettings.RECOVERY_USE_SYNTHETIC_SOURCE_SETTING.getKey(), true)
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+
+        String coordinatingNode = findCoordinatingNode();
+
+        int numDocs = randomIntBetween(20, 100);
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int i = 0; i < numDocs; i++) {
+            bulkRequest.add(
+                new IndexRequest(index).id("doc-" + i)
+                    .source(
+                        XContentType.JSON,
+                        "Title",
+                        "Example title " + i,
+                        "URL",
+                        "http://example.com/" + i,
+                        "HitColor",
+                        i % 3 == 0 ? "" : "W",
+                        "WatchID",
+                        8940174697547602584L + i,
+                        "UserID",
+                        1234567890123456789L + i,
+                        "JavaEnable",
+                        i % 2,
+                        "OS",
+                        i % 5,
+                        "Age",
+                        i % 100,
+                        "EventTime",
+                        "2013-07-15 03:39:17",
+                        "EventDate",
+                        "2013-07-15"
+                    )
+                    .opType(DocWriteRequest.OpType.CREATE)
+            );
+        }
+
+        // Assert that the batch path ran (SeenEvent) and that no mapper caused a columnar fallback
+        // (UnseenEvent — neither a supportsColumnarParse==false nor an exception-based fallback).
+        try (var mockLog = MockLog.capture(ShardBatchIndexer.class, ShardBatchMapper.class)) {
+            mockLog.addExpectation(
+                new MockLog.SeenEventExpectation(
+                    "batch indexed on primary",
+                    ShardBatchIndexer.class.getName(),
+                    Level.TRACE,
+                    "batch indexed * operations on primary shard *"
+                )
+            );
+            mockLog.addExpectation(
+                new MockLog.UnseenEventExpectation(
+                    "no columnar parse disabled (supportsColumnarParse returned false)",
+                    ShardBatchMapper.class.getName(),
+                    Level.DEBUG,
+                    "columnar batch mapping disabled: mapper of type * does not support columnar parsing"
+                )
+            );
+            mockLog.addExpectation(
+                new MockLog.UnseenEventExpectation(
+                    "no columnar fallback (mapColumnBatch exception)",
+                    ShardBatchMapper.class.getName(),
+                    Level.WARN,
+                    "columnar batch mapping failed on *, falling back"
                 )
             );
 

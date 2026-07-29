@@ -197,7 +197,14 @@ public final class ShardBatchMapper {
                 for (int c = 0; c < columnMappers.length; c++) {
                     final FieldMapper mapper = columnMappers[c];
                     if (mapper != null) {
-                        mapper.mapColumnBatch(context, escfChunk.column(c));
+                        try {
+                            mapper.mapColumnBatch(context, escfChunk.column(c));
+                        } catch (Exception e) {
+                            throw new RuntimeException(
+                                "mapColumnBatch failed for field [" + mapper.fullPath() + "] of type [" + mapper.typeName() + "]",
+                                e
+                            );
+                        }
                     }
                 }
             } else {

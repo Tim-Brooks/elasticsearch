@@ -33,17 +33,29 @@ public final class NumberColumnTransform {
 
     private NumberColumnTransform() {}
 
+    /**
+     * Converts a numeric {@link EscfColumn} into an {@link EscfColumnData} of LONG kind holding
+     * the sortable-long doc-values encoding for {@code type}.
+     *
+     * @param nullSortableLong the sortable-long encoding of the mapper's configured {@code null_value}
+     *                         (i.e. {@code type.toSortableLong(nullValue)}), or {@code null} if no
+     *                         {@code null_value} is configured. Used only for STRING columns: an empty
+     *                         string with {@code coerce=true} is substituted with this value (matching
+     *                         the row path's {@code NumberFieldMapper.value()} behaviour), or left
+     *                         absent when {@code null}.
+     */
     public static EscfColumnData toSortableLongColumn(
         EscfColumn source,
         NumberFieldMapper.NumberType type,
         boolean coerce,
-        Recycler<BytesRef> recycler
+        Recycler<BytesRef> recycler,
+        Long nullSortableLong
     ) {
         return switch (source.kind()) {
             case EscfColumnKind.LONG -> fromLong(source, type, recycler);
             case EscfColumnKind.DOUBLE -> fromDouble(source, type, coerce, recycler);
-            case EscfColumnKind.STRING -> fromString(source, type, coerce, recycler);
-            case EscfColumnKind.ARRAY -> fromArray(source, type, coerce, recycler);
+            case EscfColumnKind.STRING -> fromString(source, type, coerce, recycler, nullSortableLong);
+            case EscfColumnKind.ARRAY -> fromArray(source, type, coerce, recycler, nullSortableLong);
             default -> throw new UnsupportedOperationException(
                 "toSortableLongColumn: unsupported ESCF column kind ["
                     + EscfColumnKind.name(source.kind())
@@ -56,7 +68,8 @@ public final class NumberColumnTransform {
         EscfColumn source,
         NumberFieldMapper.NumberType type,
         boolean coerce,
-        Recycler<BytesRef> recycler
+        Recycler<BytesRef> recycler,
+        Long nullSortableLong
     ) {
         // Materialize the array structure: offsets + child data. The child is always dense (all
         // elements present — absent rows are represented by an empty offset range, not a child gap).
@@ -66,7 +79,7 @@ public final class NumberColumnTransform {
         EscfColumnData transformedChild = switch (child.kind()) {
             case EscfColumnKind.LONG -> fromLong(child, type, recycler);
             case EscfColumnKind.DOUBLE -> fromDouble(child, type, coerce, recycler);
-            case EscfColumnKind.STRING -> fromString(child, type, coerce, recycler);
+            case EscfColumnKind.STRING -> fromString(child, type, coerce, recycler, nullSortableLong);
             default -> throw new UnsupportedOperationException(
                 "toSortableLongColumn: ARRAY child kind ["
                     + EscfColumnKind.name(child.kind())
@@ -80,7 +93,8 @@ public final class NumberColumnTransform {
         EscfColumn source,
         NumberFieldMapper.NumberType type,
         boolean coerce,
-        Recycler<BytesRef> recycler
+        Recycler<BytesRef> recycler,
+        Long nullSortableLong
     ) {
         AbstractXContentParser.checkCoerceString(coerce, classForType(type));
         EscfColumnBuilder builder = newLongBuilder(recycler);
@@ -89,7 +103,17 @@ public final class NumberColumnTransform {
         final long max = integerMaxForType(type);
         final long[] scratch = new long[1];
         for (int doc = cursor.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = cursor.nextDoc()) {
-            builder.setLong(doc, stringToSortableLong(cursor.value(), type, min, max, scratch));
+            final BytesRef value = cursor.value();
+            // Empty string with coerce=true mirrors the row path: NumberFieldMapper.value() returns
+            // nullValue for an empty coerced string. Substitute null_value when configured; otherwise
+            // leave the slot absent (validity bit stays clear).
+            if (coerce && value.length == 0) {
+                if (nullSortableLong != null) {
+                    builder.setLong(doc, nullSortableLong);
+                }
+                continue;
+            }
+            builder.setLong(doc, stringToSortableLong(value, type, min, max, scratch));
         }
         return builder.finish(source.docCount());
     }
