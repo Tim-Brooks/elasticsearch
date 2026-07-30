@@ -19,7 +19,6 @@ import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.index.mapper.NumberFieldMapper;
 import org.elasticsearch.xcontent.support.AbstractXContentParser;
 
-import java.math.BigInteger;
 import java.util.function.DoubleToLongFunction;
 import java.util.function.LongUnaryOperator;
 
@@ -34,37 +33,6 @@ public final class NumberColumnTransform {
 
     private NumberColumnTransform() {}
 
-    /**
-     * Converts a numeric {@link EscfColumn} into an {@link EscfColumnData} of LONG kind holding
-     * the sortable-long doc-values encoding for {@code type}.
-     *
-     * @param nullSortableLong the sortable-long encoding of the mapper's configured {@code null_value}
-     *                         (i.e. {@code type.toSortableLong(nullValue)}), or {@code null} if no
-     *                         {@code null_value} is configured. Used only for STRING columns: an empty
-     *                         string with {@code coerce=true} is substituted with this value (matching
-     *                         the row path's {@code NumberFieldMapper.value()} behaviour), or left
-     *                         absent when {@code null}.
-     */
-    public static EscfColumnData toSortableLongColumn(
-        EscfColumn source,
-        NumberFieldMapper.NumberType type,
-        boolean coerce,
-        Recycler<BytesRef> recycler,
-        Long nullSortableLong
-    ) {
-        return switch (source.kind()) {
-            case EscfColumnKind.LONG -> fromLong(source, type, recycler);
-            case EscfColumnKind.DOUBLE -> fromDouble(source, type, coerce, recycler);
-            case EscfColumnKind.STRING -> fromString(source, type, coerce, recycler, nullSortableLong);
-            case EscfColumnKind.ARRAY -> fromArray(source, type, coerce, recycler, nullSortableLong);
-            default -> throw new UnsupportedOperationException(
-                "toSortableLongColumn: unsupported ESCF column kind ["
-                    + EscfColumnKind.name(source.kind())
-                    + "] — only LONG, DOUBLE, STRING, and ARRAY are supported"
-            );
-        };
-    }
-
     public static EscfColumnData toSortableLongColumn(
         EscfColumn source,
         NumberFieldMapper.NumberType type,
@@ -74,29 +42,58 @@ public final class NumberColumnTransform {
         return toSortableLongColumn(source, type, coerce, recycler, null);
     }
 
+    public static EscfColumnData toSortableLongColumn(
+        EscfColumn source,
+        NumberFieldMapper.NumberType type,
+        boolean coerce,
+        Recycler<BytesRef> recycler,
+        Long nullReplacement
+    ) {
+        return switch (source.kind()) {
+            case EscfColumnKind.LONG -> fromLong(source, type, recycler);
+            case EscfColumnKind.DOUBLE -> fromDouble(source, type, coerce, recycler);
+            case EscfColumnKind.STRING -> fromString(source, type, coerce, recycler, nullReplacement);
+            case EscfColumnKind.ARRAY -> fromArray(source, type, coerce, recycler, nullReplacement);
+            default -> throw new UnsupportedOperationException(
+                "toSortableLongColumn: unsupported ESCF column kind ["
+                    + EscfColumnKind.name(source.kind())
+                    + "] — only LONG, DOUBLE, STRING, and ARRAY are supported"
+            );
+        };
+    }
+
     private static EscfColumnData fromArray(
         EscfColumn source,
         NumberFieldMapper.NumberType type,
         boolean coerce,
         Recycler<BytesRef> recycler,
-        Long nullSortableLong
+        Long nullReplacement
     ) {
         // Materialize the array structure: offsets + child data. The child is always dense (all
         // elements present — absent rows are represented by an empty offset range, not a child gap).
         EscfColumnData sourceData = source.toColumnData();
         EscfColumnData childData = sourceData.child();
         EscfColumn child = EscfColumn.from(childData);
-        EscfColumnData transformedChild = switch (child.kind()) {
-            case EscfColumnKind.LONG -> fromLong(child, type, recycler);
-            case EscfColumnKind.DOUBLE -> fromDouble(child, type, coerce, recycler);
-            case EscfColumnKind.STRING -> fromString(child, type, coerce, recycler, nullSortableLong);
+        return switch (child.kind()) {
+            case EscfColumnKind.STRING -> fromString(source, type, coerce, recycler, nullReplacement);
+            case EscfColumnKind.LONG -> EscfColumnData.ofArray(
+                sourceData.docCount(),
+                sourceData.validity(),
+                sourceData.offsets(),
+                fromLong(child, type, recycler)
+            );
+            case EscfColumnKind.DOUBLE -> EscfColumnData.ofArray(
+                sourceData.docCount(),
+                sourceData.validity(),
+                sourceData.offsets(),
+                fromDouble(child, type, coerce, recycler)
+            );
             default -> throw new UnsupportedOperationException(
                 "toSortableLongColumn: ARRAY child kind ["
                     + EscfColumnKind.name(child.kind())
                     + "] is not supported — child must be LONG, DOUBLE, or STRING"
             );
         };
-        return EscfColumnData.ofArray(sourceData.docCount(), sourceData.validity(), sourceData.offsets(), transformedChild);
     }
 
     private static EscfColumnData fromString(
@@ -104,7 +101,7 @@ public final class NumberColumnTransform {
         NumberFieldMapper.NumberType type,
         boolean coerce,
         Recycler<BytesRef> recycler,
-        Long nullSortableLong
+        Long nullReplacement
     ) {
         AbstractXContentParser.checkCoerceString(coerce, classForType(type));
         EscfColumnBuilder builder = newLongBuilder(recycler);
@@ -113,13 +110,10 @@ public final class NumberColumnTransform {
         final long max = integerMaxForType(type);
         final long[] scratch = new long[1];
         for (int doc = cursor.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = cursor.nextDoc()) {
-            final BytesRef value = cursor.value();
-            // Empty string with coerce=true mirrors the row path: NumberFieldMapper.value() returns
-            // nullValue for an empty coerced string. Substitute null_value when configured; otherwise
-            // leave the slot absent (validity bit stays clear).
+            BytesRef value = cursor.value();
             if (coerce && value.length == 0) {
-                if (nullSortableLong != null) {
-                    builder.setLong(doc, nullSortableLong);
+                if (nullReplacement != null) {
+                    builder.setLong(doc, nullReplacement);
                 }
                 continue;
             }
@@ -172,18 +166,7 @@ public final class NumberColumnTransform {
     private static long stringSlowPath(BytesRef ref, NumberFieldMapper.NumberType type) {
         String s = ref.utf8ToString();
         return switch (type) {
-            // For LONG, out-of-range integers (e.g. UInt64 values > Long.MAX_VALUE encoded as
-            // strings by the ESCF encoder) must match the row path's behaviour: the row path calls
-            // parser.getLongValue() on a BIG_INTEGER token, which delegates to BigInteger.longValue()
-            // and silently returns the low-order 64 bits without throwing. toLong() would throw for
-            // out-of-range values, so catch that and fall back to the same BigInteger truncation.
-            case LONG -> {
-                try {
-                    yield AbstractXContentParser.toLong(s, true);
-                } catch (IllegalArgumentException e) {
-                    yield new BigInteger(s).longValue();
-                }
-            }
+            case LONG -> AbstractXContentParser.toLong(s, true);
             case INTEGER -> AbstractXContentParser.parseInt(s);
             case SHORT -> AbstractXContentParser.parseShort(s);
             case BYTE -> {
