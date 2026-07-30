@@ -65,6 +65,15 @@ public final class NumberColumnTransform {
         };
     }
 
+    public static EscfColumnData toSortableLongColumn(
+        EscfColumn source,
+        NumberFieldMapper.NumberType type,
+        boolean coerce,
+        Recycler<BytesRef> recycler
+    ) {
+        return toSortableLongColumn(source, type, coerce, recycler, null);
+    }
+
     private static EscfColumnData fromArray(
         EscfColumn source,
         NumberFieldMapper.NumberType type,
