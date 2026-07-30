@@ -10,11 +10,13 @@
 package org.elasticsearch.action.bulk;
 
 import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
 import org.elasticsearch.Build;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.delete.DeleteRequest;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
+import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.IndexMode;
@@ -165,7 +167,10 @@ public class BatchBulkIT extends ESIntegTestCase {
         }
 
         // Assert that the trace log fires at least once, proving the columnar path was taken.
-        // MockLog.capture enables TRACE-level capture for ShardBatchIndexer for the duration of the block.
+        // TRACE is filtered at INFO root level by default; set it explicitly and restore after.
+        var batchIndexerLog = LogManager.getLogger(ShardBatchIndexer.class);
+        var origIndexerLevel = batchIndexerLog.getLevel();
+        Loggers.setLevel(batchIndexerLog, Level.TRACE);
         try (var mockLog = MockLog.capture(ShardBatchIndexer.class)) {
             mockLog.addExpectation(
                 new MockLog.SeenEventExpectation(
@@ -181,6 +186,8 @@ public class BatchBulkIT extends ESIntegTestCase {
             assertThat(bulkResponse.getItems().length, equalTo(numDocs));
 
             mockLog.assertAllExpectationsMatched();
+        } finally {
+            Loggers.setLevel(batchIndexerLog, origIndexerLevel);
         }
 
         refresh(index);
@@ -221,20 +228,64 @@ public class BatchBulkIT extends ESIntegTestCase {
                 mapping.field("dynamic", "strict");
                 mapping.startObject("properties");
                 {
-                    // keyword fields
+                    // keyword fields — multi_value defaults to true, needed for ArrayOrderInlineNull doc values
                     mapping.startObject("Title").field("type", "keyword").endObject();
                     mapping.startObject("URL").field("type", "keyword").endObject();
                     mapping.startObject("HitColor").field("type", "keyword").endObject();
-                    // long fields
-                    mapping.startObject("WatchID").field("type", "long").endObject();
-                    mapping.startObject("UserID").field("type", "long").endObject();
-                    // integer fields
-                    mapping.startObject("JavaEnable").field("type", "integer").endObject();
-                    mapping.startObject("OS").field("type", "integer").endObject();
-                    mapping.startObject("Age").field("type", "integer").endObject();
-                    // date fields — two different string formats, matching ClickBench
-                    mapping.startObject("EventTime").field("type", "date").field("format", "yyyy-MM-dd HH:mm:ss").endObject();
-                    mapping.startObject("EventDate").field("type", "date").field("format", "yyyy-MM-dd").endObject();
+                    // long fields — doc-values only (no points index); multi_value=false enables supportsColumnarParse
+                    mapping.startObject("WatchID")
+                        .field("type", "long")
+                        .field("index", false)
+                        .startObject("doc_values")
+                        .field("multi_value", false)
+                        .endObject()
+                        .endObject();
+                    mapping.startObject("UserID")
+                        .field("type", "long")
+                        .field("index", false)
+                        .startObject("doc_values")
+                        .field("multi_value", false)
+                        .endObject()
+                        .endObject();
+                    // integer fields — doc-values only, multi_value=false for columnar path
+                    mapping.startObject("JavaEnable")
+                        .field("type", "integer")
+                        .field("index", false)
+                        .startObject("doc_values")
+                        .field("multi_value", false)
+                        .endObject()
+                        .endObject();
+                    mapping.startObject("OS")
+                        .field("type", "integer")
+                        .field("index", false)
+                        .startObject("doc_values")
+                        .field("multi_value", false)
+                        .endObject()
+                        .endObject();
+                    mapping.startObject("Age")
+                        .field("type", "integer")
+                        .field("index", false)
+                        .startObject("doc_values")
+                        .field("multi_value", false)
+                        .endObject()
+                        .endObject();
+                    // date fields — doc-values only; multi_value=false and ClickBench-matching string formats
+                    mapping.startObject("EventTime")
+                        .field("type", "date")
+                        .field("format", "yyyy-MM-dd HH:mm:ss")
+                        .field("index", false)
+                        .startObject("doc_values")
+                        .field("multi_value", false)
+                        .endObject()
+                        .endObject();
+                    mapping.startObject("EventDate")
+                        .field("type", "date")
+                        .field("format", "yyyy-MM-dd")
+                        .field("index", false)
+                        .startObject("doc_values")
+                        .field("multi_value", false)
+                        .endObject()
+                        .endObject();
                 }
                 mapping.endObject();
             }
@@ -290,7 +341,14 @@ public class BatchBulkIT extends ESIntegTestCase {
         }
 
         // Assert that the batch path ran (SeenEvent) and that no mapper caused a columnar fallback
-        // (UnseenEvent — neither a supportsColumnarParse==false nor an exception-based fallback).
+        // (UnseenEvents — neither a supportsColumnarParse==false nor an exception-based fallback).
+        // TRACE/DEBUG are filtered at the INFO root level by default; set levels explicitly and restore after.
+        var batchIndexerLog = LogManager.getLogger(ShardBatchIndexer.class);
+        var batchMapperLog = LogManager.getLogger(ShardBatchMapper.class);
+        var origIndexerLevel = batchIndexerLog.getLevel();
+        var origMapperLevel = batchMapperLog.getLevel();
+        Loggers.setLevel(batchIndexerLog, Level.TRACE);
+        Loggers.setLevel(batchMapperLog, Level.DEBUG);
         try (var mockLog = MockLog.capture(ShardBatchIndexer.class, ShardBatchMapper.class)) {
             mockLog.addExpectation(
                 new MockLog.SeenEventExpectation(
@@ -322,6 +380,9 @@ public class BatchBulkIT extends ESIntegTestCase {
             assertThat(bulkResponse.getItems().length, equalTo(numDocs));
 
             mockLog.assertAllExpectationsMatched();
+        } finally {
+            Loggers.setLevel(batchIndexerLog, origIndexerLevel);
+            Loggers.setLevel(batchMapperLog, origMapperLevel);
         }
 
         refresh(index);
