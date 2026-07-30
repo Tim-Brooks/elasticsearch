@@ -147,6 +147,15 @@ public class SemanticInferenceMetadataFieldsMapperTests extends MapperServiceTes
         return new SemanticInferenceMetadataFieldsMapper.FieldType();
     }
 
+    public void testSupportsColumnarParseAsMetadataMapper() throws Exception {
+        var mapperService = createMapperService(randomIndexSettings(false), mapping(b -> {}));
+        var mapper = mapperService.mappingLookup().getMapping().getMetadataMapperByName(InferenceMetadataFieldsMapper.NAME);
+
+        assertTrue(mapper instanceof SemanticInferenceMetadataFieldsMapper);
+        assertTrue(mapper.supportsColumnarMetadataParse(mapperService.getIndexSettings()));
+        assertFalse(mapper.supportsColumnarParse(mapperService.getIndexSettings()));
+    }
+
     public void testLegacyFormatRejectedForNewIndices() {
         var indexScopedSettings = new IndexScopedSettings(
             Settings.EMPTY,
