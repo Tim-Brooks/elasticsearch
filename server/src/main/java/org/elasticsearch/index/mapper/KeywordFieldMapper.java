@@ -57,6 +57,7 @@ import org.elasticsearch.core.Nullable;
 import org.elasticsearch.escf.EscfColumn;
 import org.elasticsearch.escf.EscfColumnBuilder;
 import org.elasticsearch.escf.EscfColumnBuilder.CollisionPolicy;
+import org.elasticsearch.escf.EscfColumnData;
 import org.elasticsearch.escf.EscfColumnKind;
 import org.elasticsearch.escf.EscfColumnTransforms;
 import org.elasticsearch.escf.LuceneBinaryColumn;
@@ -641,6 +642,7 @@ public final class KeywordFieldMapper extends FieldMapper {
 
         private final IgnoreAbove ignoreAbove;
         private final String nullValue;
+        private final BytesRef nullUtf8Value;
         private final NamedAnalyzer normalizer;
         private final boolean eagerGlobalOrdinals;
         private final FieldValues<String> scriptValues;
@@ -677,6 +679,7 @@ public final class KeywordFieldMapper extends FieldMapper {
                 builder.indexSettings.getIndexVersionCreated()
             );
             this.nullValue = builder.nullValue.getValue();
+            this.nullUtf8Value = this.nullValue == null ? null : new BytesRef(this.nullValue);
             this.scriptValues = builder.scriptValues();
             this.isDimension = builder.dimension.getValue();
             this.usesBinaryDocValues = builder.usesBinaryDocValues();
@@ -708,6 +711,7 @@ public final class KeywordFieldMapper extends FieldMapper {
             this.normalizer = Lucene.KEYWORD_ANALYZER;
             this.ignoreAbove = IGNORE_ABOVE_DEFAULT;
             this.nullValue = null;
+            this.nullUtf8Value = null;
             this.eagerGlobalOrdinals = false;
             this.scriptValues = null;
             this.isDimension = false;
@@ -732,6 +736,7 @@ public final class KeywordFieldMapper extends FieldMapper {
             this.normalizer = Lucene.KEYWORD_ANALYZER;
             this.ignoreAbove = IGNORE_ABOVE_DEFAULT;
             this.nullValue = null;
+            this.nullUtf8Value = null;
             this.eagerGlobalOrdinals = false;
             this.scriptValues = null;
             this.isDimension = false;
@@ -756,6 +761,7 @@ public final class KeywordFieldMapper extends FieldMapper {
             this.normalizer = Lucene.KEYWORD_ANALYZER;
             this.ignoreAbove = IGNORE_ABOVE_DEFAULT;
             this.nullValue = null;
+            this.nullUtf8Value = null;
             this.eagerGlobalOrdinals = false;
             this.scriptValues = null;
             this.isDimension = false;
@@ -1490,19 +1496,17 @@ public final class KeywordFieldMapper extends FieldMapper {
     }
 
     @Override
-    public boolean supportsBatchIndexing() {
-        // Plain keyword mappers can be driven through parseCreateField by the bulk batch path.
-        // ignore_above is allowed — it's handled by indexValue and only needs addIgnoredField on
-        // the context, which BatchDocumentParserContext records. Dimensions, non-default
-        // normalizers, copy_to, multi-fields, and scripts all pull in behavior that the v1 batch
-        // path does not support.
-        return hasScript() == false
+    public boolean supportsColumnarParse(IndexSettings indexSettings) {
+        return indexSettings.getMode().isStrictColumnar()
+            && supportsColumnarDocValues()
+            && hasScript() == false
             && copyTo().copyToFields().isEmpty()
             && multiFields().iterator().hasNext() == false
             && normalizerName == null
             && fieldType().isDimension() == false;
     }
 
+<<<<<<< HEAD
     @Override
     public boolean supportsColumnarParse(IndexSettings indexSettings) {
         return indexSettings.getMode().isStrictColumnar()
@@ -1512,6 +1516,24 @@ public final class KeywordFieldMapper extends FieldMapper {
             && multiFields().iterator().hasNext() == false
             && normalizerName == null
             && fieldType().isDimension() == false;
+=======
+    /**
+     * Returns true when this keyword field's doc-values encoding is supported on the columnar batch
+     * path. Accepts both the array-order (multi_value=true, offsetsFieldName set) and single-valued
+     * binary (multi_value=false) encoding. Other combinations fall back to the row path.
+     */
+    private boolean supportsColumnarDocValues() {
+        if (fieldType().usesBinaryDocValues() == false) {
+            return false;
+        }
+
+        if (fieldType().usesArrayOrderBinaryDocValues()) {
+            return true;
+        }
+
+        // Only support single valued when not ArrayOrderBinaryDocValues
+        return docValuesParameters().multiValue() == false;
+>>>>>>> escf_expanded_keyword_support
     }
 
     /**
@@ -1546,6 +1568,7 @@ public final class KeywordFieldMapper extends FieldMapper {
 
     @Override
     public void mapColumnBatch(BatchMappingContext ctx, EscfColumn source) {
+<<<<<<< HEAD
         if (fieldType().usesArrayOrderBinaryDocValues()) {
             mapColumnBatchArrayOrder(ctx, source);
         } else {
@@ -1565,24 +1588,48 @@ public final class KeywordFieldMapper extends FieldMapper {
         // numeric literals.
         final ObjectTupleCursor<BytesRef> cursor = EscfColumnTransforms.utf8Cursor(source);
 
+=======
+>>>>>>> escf_expanded_keyword_support
         final boolean emitTerms = fieldType.indexOptions() != IndexOptions.NONE || fieldType.stored();
         final boolean emitFallback = storeIgnoredValuesForSyntheticSource();
         final boolean emitDvs = fieldType().hasDocValues();
-
-        // Nothing to emit.
         if (emitTerms == false && emitDvs == false && emitFallback == false) {
             return;
         }
+
+        // These paths build a scan cursor that converts all ESCF column kinds to BytesRef strings:
+        // longs/doubles via canonical toString, booleans as "true"/"false", strings as-is, arrays
+        // element-by-element. BINARY and KEY_VALUE columns are unsupported and throw when the cursor is
+        // iterated.
+        // NOTE: numbers are converted from their parsed values (Long/Double), so non-canonical source
+        // literals (e.g. "1.50", "1e3") will produce the canonical toString form rather than the original
+        // source characters (which the row path preserves via parser.getText()).
+        // In order to support the original string representations we would need to keep the columns as
+        // strings. This is possible as an eventual user option.
+
+        if (fieldType().usesArrayOrderBinaryDocValues()) {
+            mapColumnBatchArrayOrder(ctx, EscfColumnTransforms.utf8Cursor(source), emitTerms, emitDvs, emitFallback);
+        } else {
+            mapColumnBatchSingleValue(ctx, source, emitTerms, emitDvs, emitFallback);
+        }
+    }
+
+    private void mapColumnBatchArrayOrder(
+        BatchMappingContext ctx,
+        ObjectTupleCursor<BytesRef> cursor,
+        boolean emitTerms,
+        boolean emitDvs,
+        boolean emitFallback
+    ) {
+        final int docCount = ctx.docCount();
+
         // TODO: make the batch return these column builders to wire up recycling
         final EscfColumnBuilder terms = emitTerms ? mergeStringColumn() : null;
         final EscfColumnBuilder binaryDvs = emitDvs ? mergeStringColumn() : null;
         final EscfColumnBuilder dvCounts = emitDvs ? mergeLongColumn() : null;
         final EscfColumnBuilder fallback = emitFallback ? mergeStringColumn() : null;
         final EscfColumnBuilder fallbackCounts = emitFallback ? mergeLongColumn() : null;
-
-        // Pre-compute the null_value substitution bytes once for the whole batch.
-        // TODO: Store this as BytesRef on field type eventually
-        final BytesRef nullValueBytes = fieldType().nullValue != null ? new BytesRef(fieldType().nullValue) : null;
+        final BytesRef nullValueBytes = fieldType().nullUtf8Value;
 
         int currentDoc = -1;
         boolean ignoredThisDoc = false;
@@ -1712,6 +1759,7 @@ public final class KeywordFieldMapper extends FieldMapper {
         }
     }
 
+<<<<<<< HEAD
     /**
      * Columnar batch path for single-valued ({@code multi_value=false}) keyword fields. Emits one
      * plain {@link BinaryDocValuesField} per present doc — no {@code ArrayOrderInlineNull} blob, no
@@ -1735,6 +1783,25 @@ public final class KeywordFieldMapper extends FieldMapper {
         int currentDoc = -1;
         boolean valueSeenThisDoc = false;
         boolean ignoredThisDoc = false;
+=======
+    private void mapColumnBatchSingleValue(
+        BatchMappingContext ctx,
+        EscfColumn source,
+        boolean emitTerms,
+        boolean emitDvs,
+        boolean emitFallback
+    ) {
+        final int docCount = ctx.docCount();
+        boolean valuesProduced = false;
+
+        final ObjectTupleCursor<BytesRef> cursor = EscfColumnTransforms.utf8Cursor(source);
+        EscfColumnBuilder values = source.leafValueKind() != EscfColumnKind.STRING && (emitTerms || emitDvs) ? mergeStringColumn() : null;
+        final EscfColumnBuilder fallback = emitFallback ? mergeStringColumn() : null;
+        final BytesRef nullValueBytes = fieldType().nullUtf8Value;
+
+        int currentDoc = -1;
+        boolean valueSeenThisDoc = false;
+>>>>>>> escf_expanded_keyword_support
         while (true) {
             final int nextDoc = cursor.nextDoc();
             if (nextDoc == DocIdSetIterator.NO_MORE_DOCS) {
@@ -1743,7 +1810,10 @@ public final class KeywordFieldMapper extends FieldMapper {
             if (nextDoc != currentDoc) {
                 currentDoc = nextDoc;
                 valueSeenThisDoc = false;
+<<<<<<< HEAD
                 ignoredThisDoc = false;
+=======
+>>>>>>> escf_expanded_keyword_support
             }
             BytesRef binaryValue = cursor.value();
             if (binaryValue == null) {
@@ -1753,6 +1823,7 @@ public final class KeywordFieldMapper extends FieldMapper {
                     continue;  // null without null_value -> absent (row-path parity)
                 }
             }
+<<<<<<< HEAD
             if (fieldType().ignoreAbove().isIgnored(binaryValue)) {
                 if (ignoredThisDoc == false) {
                     ctx.addIgnoredFieldColumnar(currentDoc, fullPath());
@@ -1774,6 +1845,10 @@ public final class KeywordFieldMapper extends FieldMapper {
             if (binaryValue.length > MAX_TERM_LENGTH) {
                 throw largeTermException(binaryValue);
             }
+=======
+
+            // TODO: Can move this validation earlier based on array type
+>>>>>>> escf_expanded_keyword_support
             if (valueSeenThisDoc) {
                 // multi_value=false violation: bail so ShardBatchMapper falls back to the row path,
                 // which raises the correct per-doc error (on_failure=FAIL).
@@ -1782,21 +1857,58 @@ public final class KeywordFieldMapper extends FieldMapper {
                 );
             }
             valueSeenThisDoc = true;
+<<<<<<< HEAD
             if (terms != null) {
                 terms.setString(currentDoc, binaryValue);
             }
             if (binaryDvs != null) {
                 binaryDvs.setString(currentDoc, binaryValue);
+=======
+
+            if (fieldType().ignoreAbove().isIgnored(binaryValue)) {
+                ctx.addIgnoredFieldColumnar(currentDoc, fullPath());
+                // Deoptimize: we were planning to zero-copy the source column, but now we must
+                // exclude this doc's value from the output. Lazily create the builder and backfill
+                // all accepted values from before this doc, then continue building per-value.
+                if (values == null && (emitTerms || emitDvs)) {
+                    values = mergeStringColumn();
+                    EscfColumnTransforms.backfillUtf8Before(values, source, currentDoc);
+                }
+                if (fallback != null) {
+                    fallback.setString(currentDoc, binaryValue);
+                }
+                continue;
+            }
+            if (binaryValue.length > MAX_TERM_LENGTH) {
+                throw largeTermException(binaryValue);
+            }
+
+            valuesProduced = true;
+            if (values != null) {
+                values.setString(currentDoc, binaryValue);
+>>>>>>> escf_expanded_keyword_support
             }
         }
 
         // Emit one term column (frozen fieldType, DocValuesType=NONE for HIGH cardinality) and one
         // plain binary DV column (BinaryDocValuesField.TYPE, omitNorms=false) — no .counts sidecar.
+<<<<<<< HEAD
         if (terms != null && terms.isEmpty() == false) {
             ctx.addColumn(LuceneBinaryColumn.of(terms.finish(docCount), fieldType().name(), fieldType));
         }
         if (binaryDvs != null && binaryDvs.isEmpty() == false) {
             ctx.addColumn(LuceneBinaryColumn.of(binaryDvs.finish(docCount), fieldType().name(), BinaryDocValuesField.TYPE));
+=======
+        // Both columns share the same finished EscfColumnData (one serialization, two field-type wrappers).
+        if (valuesProduced) {
+            final EscfColumnData data = values != null ? values.finish(docCount) : source.columnData();
+            if (emitTerms) {
+                ctx.addColumn(LuceneBinaryColumn.of(data, fieldType().name(), fieldType));
+            }
+            if (emitDvs) {
+                ctx.addColumn(LuceneBinaryColumn.of(data, fieldType().name(), BinaryDocValuesField.TYPE));
+            }
+>>>>>>> escf_expanded_keyword_support
         }
         // Synthetic-source fallback for ignore_above values: single BinaryDocValuesField (no counts),
         // mirroring the row-path's addBinaryFieldLegacyEncodingAware isSingleValued() branch.
