@@ -241,7 +241,7 @@ public class NumberFieldMapperColumnarCompatibilityTests extends AbstractColumna
             batch("double big decimal token", 1L, doc("d1", 1L, "{\"f\":1.2345678901234567890123456789}"))
         );
     }
-    
+
     public void testIntegerField_stringColumn() throws IOException {
         assertColumnarMatchesXContent(
             mapping(b -> b.startObject(FIELD).field("type", "integer").endObject()),

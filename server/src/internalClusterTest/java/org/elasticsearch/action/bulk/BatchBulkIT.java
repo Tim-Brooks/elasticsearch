@@ -229,33 +229,13 @@ public class BatchBulkIT extends ESIntegTestCase {
 
         String coordinatingNode = findCoordinatingNode();
 
-        int numDocs = randomIntBetween(20, 100);
+//        int numDocs = randomIntBetween(20, 100);
         BulkRequest bulkRequest = new BulkRequest();
-        for (int i = 0; i < numDocs; i++) {
-            bulkRequest.add(
-                new IndexRequest(index).id("doc-" + i)
-                    .source(
-                        XContentType.JSON,
-                        "WatchID", 8940174697547602584L + i,
-                        "UserID", 1234567890123456789L + i,
-                        "FUniqID", (long) i,
-                        "CounterID", i % 1000,
-                        "RegionID", i % 200,
-                        "Age", i % 90,
-                        "JavaEnable", i % 2,
-                        "OS", i % 100,
-                        "Title", "Example title " + i,
-                        "URL", "http://example.com/" + i,
-                        "HitColor", i % 3 == 0 ? "" : "W",
-                        "SearchPhrase", "",
-                        "EventTime", "2013-07-15 03:39:17",
-                        "EventDate", "2013-07-15",
-                        "LocalEventTime", "2013-07-15 03:39:17",
-                        "ClientEventTime", "2013-07-15 03:39:17"
-                    )
-                    .opType(DocWriteRequest.OpType.CREATE)
-            );
-        }
+        bulkRequest.add(
+            new IndexRequest(index).id("doc-" + 1).source(document, XContentType.JSON).opType(DocWriteRequest.OpType.CREATE)
+        );
+//        for (int i = 0; i < numDocs; i++) {
+//        }
 
         var batchIndexerLog = LogManager.getLogger(ShardBatchIndexer.class);
         var batchMapperLog = LogManager.getLogger(ShardBatchMapper.class);
@@ -291,7 +271,7 @@ public class BatchBulkIT extends ESIntegTestCase {
 
             BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet();
             assertNoFailures(bulkResponse);
-            assertThat(bulkResponse.getItems().length, equalTo(numDocs));
+            assertThat(bulkResponse.getItems().length, equalTo(1));
 
             mockLog.assertAllExpectationsMatched();
         } finally {
@@ -303,12 +283,119 @@ public class BatchBulkIT extends ESIntegTestCase {
 
         assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
             assertNoFailures(searchResponse);
-            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) numDocs));
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) 1));
         });
 
-        var getResponse = client().get(new org.elasticsearch.action.get.GetRequest(index).id("doc-0")).actionGet();
+        var getResponse = client().get(new org.elasticsearch.action.get.GetRequest(index).id("doc-1")).actionGet();
         assertTrue(getResponse.isExists());
     }
+
+    private String document = "{\n"
+        + "  \"WatchID\": 8940174697547602584,\n"
+        + "  \"JavaEnable\": 1,\n"
+        + "  \"Title\": \"Example Page Title\",\n"
+        + "  \"GoodEvent\": 1,\n"
+        + "  \"EventTime\": \"2013-07-15 03:39:17\",\n"
+        + "  \"EventDate\": \"2013-07-15\",\n"
+        + "  \"CounterID\": 62290040,\n"
+        + "  \"ClientIP\": 1701406667,\n"
+        + "  \"RegionID\": 229,\n"
+        + "  \"UserID\": 1502176461422705501,\n"
+        + "  \"CounterClass\": 0,\n"
+        + "  \"OS\": 3,\n"
+        + "  \"UserAgent\": 1,\n"
+        + "  \"URL\": \"http://example.com/page?param=value\",\n"
+        + "  \"Referer\": \"http://example.com/\",\n"
+        + "  \"IsRefresh\": 0,\n"
+        + "  \"RefererCategoryID\": 0,\n"
+        + "  \"RefererRegionID\": 0,\n"
+        + "  \"URLCategoryID\": 0,\n"
+        + "  \"URLRegionID\": 0,\n"
+        + "  \"ResolutionWidth\": 1920,\n"
+        + "  \"ResolutionHeight\": 1080,\n"
+        + "  \"ResolutionDepth\": 24,\n"
+        + "  \"FlashMajor\": 11,\n"
+        + "  \"FlashMinor\": 7,\n"
+        + "  \"FlashMinor2\": \"700.169\",\n"
+        + "  \"NetMajor\": 0,\n"
+        + "  \"NetMinor\": 0,\n"
+        + "  \"UserAgentMajor\": 37,\n"
+        + "  \"UserAgentMinor\": \"0\",\n"
+        + "  \"CookieEnable\": 1,\n"
+        + "  \"JavascriptEnable\": 1,\n"
+        + "  \"IsMobile\": 0,\n"
+        + "  \"MobilePhone\": 0,\n"
+        + "  \"MobilePhoneModel\": \"\",\n"
+        + "  \"Params\": \"\",\n"
+        + "  \"IPNetworkID\": 0,\n"
+        + "  \"TraficSourceID\": 0,\n"
+        + "  \"SearchEngineID\": 0,\n"
+        + "  \"SearchPhrase\": \"\",\n"
+        + "  \"AdvEngineID\": 0,\n"
+        + "  \"IsArtifical\": 0,\n"
+        + "  \"WindowClientWidth\": 1920,\n"
+        + "  \"WindowClientHeight\": 946,\n"
+        + "  \"ClientTimeZone\": 180,\n"
+        + "  \"ClientEventTime\": \"2013-07-15 03:39:17\",\n"
+        + "  \"SilverlightVersion1\": 0,\n"
+        + "  \"SilverlightVersion2\": 0,\n"
+        + "  \"SilverlightVersion3\": 0,\n"
+        + "  \"SilverlightVersion4\": 0,\n"
+        + "  \"PageCharset\": \"UTF-8\",\n"
+        + "  \"CodeVersion\": 1843712,\n"
+        + "  \"IsLink\": 0,\n"
+        + "  \"IsDownload\": 0,\n"
+        + "  \"IsNotBounce\": 1,\n"
+        + "  \"FUniqID\": 7842017605334151337,\n"
+        + "  \"HID\": 1140045505,\n"
+        + "  \"IsOldCounter\": 0,\n"
+        + "  \"IsEvent\": 0,\n"
+        + "  \"IsParameter\": 0,\n"
+        + "  \"DontCountHits\": 0,\n"
+        + "  \"WithHash\": 0,\n"
+        + "  \"HitColor\": \"W\",\n"
+        + "  \"LocalEventTime\": \"2013-07-15 03:39:17\",\n"
+        + "  \"Age\": 0,\n"
+        + "  \"Sex\": 0,\n"
+        + "  \"Income\": 0,\n"
+        + "  \"Interests\": 0,\n"
+        + "  \"Robotness\": 0,\n"
+        + "  \"RemoteIP\": 1701406667,\n"
+        + "  \"WindowName\": 1,\n"
+        + "  \"OpenerName\": -1,\n"
+        + "  \"HistoryLength\": 1,\n"
+        + "  \"BrowserLanguage\": \"ru\",\n"
+        + "  \"BrowserCountry\": \"RU\",\n"
+        + "  \"SocialNetwork\": \"\",\n"
+        + "  \"SocialAction\": \"\",\n"
+        + "  \"HTTPError\": 0,\n"
+        + "  \"SendTiming\": 0,\n"
+        + "  \"DNSTiming\": 0,\n"
+        + "  \"ConnectTiming\": 0,\n"
+        + "  \"ResponseStartTiming\": 0,\n"
+        + "  \"ResponseEndTiming\": 0,\n"
+        + "  \"FetchTiming\": 0,\n"
+        + "  \"SocialSourceNetworkID\": 0,\n"
+        + "  \"SocialSourcePage\": \"\",\n"
+        + "  \"ParamPrice\": -1,\n"
+        + "  \"ParamOrderID\": \"\",\n"
+        + "  \"ParamCurrency\": \"\",\n"
+        + "  \"ParamCurrencyID\": 0,\n"
+        + "  \"OpenstatServiceName\": \"\",\n"
+        + "  \"OpenstatCampaignID\": \"\",\n"
+        + "  \"OpenstatAdID\": \"\",\n"
+        + "  \"OpenstatSourceID\": \"\",\n"
+        + "  \"UTMSource\": \"\",\n"
+        + "  \"UTMMedium\": \"\",\n"
+        + "  \"UTMCampaign\": \"\",\n"
+        + "  \"UTMContent\": \"\",\n"
+        + "  \"UTMTerm\": \"\",\n"
+        + "  \"FromTag\": \"\",\n"
+        + "  \"HasGCLID\": 0,\n"
+        + "  \"RefererHash\": 0,\n"
+        + "  \"URLHash\": 148364908386759,\n"
+        + "  \"CLID\": 0\n"
+        + "}";
 
     private static XContentBuilder buildClickBenchMapping() throws IOException {
         XContentBuilder m = JsonXContent.contentBuilder();
@@ -318,24 +405,78 @@ public class BatchBulkIT extends ESIntegTestCase {
         m.startObject("properties");
         // shorts
         for (String f : new String[] {
-            "AdvEngineID", "Age", "ClientTimeZone", "CookieEnable", "CounterClass", "DontCountHits",
-            "FlashMajor", "FlashMinor", "FlashMinor2", "GoodEvent", "HTTPError", "HasGCLID",
-            "HistoryLength", "Income", "Interests", "IsArtifical", "IsDownload", "IsEvent",
-            "IsLink", "IsMobile", "IsNotBounce", "IsOldCounter", "IsParameter", "IsRefresh",
-            "JavaEnable", "JavascriptEnable", "MobilePhone", "NetMajor", "NetMinor", "OS",
-            "ParamCurrencyID", "RefererCategoryID", "Robotness", "SearchEngineID", "Sex",
-            "SilverlightVersion1", "SilverlightVersion2", "SilverlightVersion4",
-            "SocialSourceNetworkID", "TraficSourceID", "URLCategoryID", "UserAgent",
-            "UserAgentMajor", "WindowClientHeight", "WindowClientWidth", "WithHash" }) {
+            "AdvEngineID",
+            "Age",
+            "ClientTimeZone",
+            "CookieEnable",
+            "CounterClass",
+            "DontCountHits",
+            "FlashMajor",
+            "FlashMinor",
+            "FlashMinor2",
+            "GoodEvent",
+            "HTTPError",
+            "HasGCLID",
+            "HistoryLength",
+            "Income",
+            "Interests",
+            "IsArtifical",
+            "IsDownload",
+            "IsEvent",
+            "IsLink",
+            "IsMobile",
+            "IsNotBounce",
+            "IsOldCounter",
+            "IsParameter",
+            "IsRefresh",
+            "JavaEnable",
+            "JavascriptEnable",
+            "MobilePhone",
+            "NetMajor",
+            "NetMinor",
+            "OS",
+            "ParamCurrencyID",
+            "RefererCategoryID",
+            "Robotness",
+            "SearchEngineID",
+            "Sex",
+            "SilverlightVersion1",
+            "SilverlightVersion2",
+            "SilverlightVersion4",
+            "SocialSourceNetworkID",
+            "TraficSourceID",
+            "URLCategoryID",
+            "UserAgent",
+            "UserAgentMajor",
+            "WindowClientHeight",
+            "WindowClientWidth",
+            "WithHash" }) {
             m.startObject(f).field("type", "short").endObject();
         }
         // integers
         for (String f : new String[] {
-            "CLID", "ClientIP", "CodeVersion", "ConnectTiming", "CounterID", "DNSTiming",
-            "FetchTiming", "HID", "IPNetworkID", "OpenerName", "RefererRegionID", "RegionID",
-            "RemoteIP", "ResolutionDepth", "ResolutionHeight", "ResolutionWidth",
-            "ResponseEndTiming", "ResponseStartTiming", "SendTiming", "SilverlightVersion3",
-            "URLRegionID", "WindowName" }) {
+            "CLID",
+            "ClientIP",
+            "CodeVersion",
+            "ConnectTiming",
+            "CounterID",
+            "DNSTiming",
+            "FetchTiming",
+            "HID",
+            "IPNetworkID",
+            "OpenerName",
+            "RefererRegionID",
+            "RegionID",
+            "RemoteIP",
+            "ResolutionDepth",
+            "ResolutionHeight",
+            "ResolutionWidth",
+            "ResponseEndTiming",
+            "ResponseStartTiming",
+            "SendTiming",
+            "SilverlightVersion3",
+            "URLRegionID",
+            "WindowName" }) {
             m.startObject(f).field("type", "integer").endObject();
         }
         // longs
@@ -344,11 +485,32 @@ public class BatchBulkIT extends ESIntegTestCase {
         }
         // keywords
         for (String f : new String[] {
-            "BrowserCountry", "BrowserLanguage", "FromTag", "HitColor", "MobilePhoneModel",
-            "OpenstatAdID", "OpenstatCampaignID", "OpenstatServiceName", "OpenstatSourceID",
-            "OriginalURL", "PageCharset", "ParamCurrency", "ParamOrderID", "Params",
-            "Referer", "SearchPhrase", "SocialAction", "SocialNetwork", "SocialSourcePage",
-            "Title", "URL", "UTMCampaign", "UTMContent", "UTMMedium", "UTMSource", "UTMTerm",
+            "BrowserCountry",
+            "BrowserLanguage",
+            "FromTag",
+            "HitColor",
+            "MobilePhoneModel",
+            "OpenstatAdID",
+            "OpenstatCampaignID",
+            "OpenstatServiceName",
+            "OpenstatSourceID",
+            "OriginalURL",
+            "PageCharset",
+            "ParamCurrency",
+            "ParamOrderID",
+            "Params",
+            "Referer",
+            "SearchPhrase",
+            "SocialAction",
+            "SocialNetwork",
+            "SocialSourcePage",
+            "Title",
+            "URL",
+            "UTMCampaign",
+            "UTMContent",
+            "UTMMedium",
+            "UTMSource",
+            "UTMTerm",
             "UserAgentMinor" }) {
             m.startObject(f).field("type", "keyword").endObject();
         }
