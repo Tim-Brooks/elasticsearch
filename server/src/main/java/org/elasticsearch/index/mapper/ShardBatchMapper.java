@@ -22,6 +22,8 @@ import org.elasticsearch.logging.Logger;
 import org.elasticsearch.sourcebatch.SourceBatch;
 import org.elasticsearch.sourcebatch.SourceSchema;
 
+import java.util.Arrays;
+
 /**
  * Batch-time mapper resolution and columnar batch mapping for the bulk batch-indexing fast path.
  *
@@ -164,6 +166,7 @@ public final class ShardBatchMapper {
                     "columnar batch mapping disabled: metadata mapper of type [{}] does not support columnar parsing",
                     mapper.typeName()
                 );
+                logger.warn("metadata mappers [{}]", Arrays.stream(metadataMappers).map(FieldMapper::typeName).toList());
                 return null;
             }
         }
