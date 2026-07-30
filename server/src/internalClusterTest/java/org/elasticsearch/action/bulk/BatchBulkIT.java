@@ -203,106 +203,27 @@ public class BatchBulkIT extends ESIntegTestCase {
     }
 
     /**
-     * Verifies that a ClickBench-shaped document (keyword + integer/long + date fields) indexes
-     * through the columnar batch path without falling back to the row-major parse path.
-     * <p>
-     * The MockLog assertions are the key check:
-     * <ul>
-     *   <li>A {@code SeenEventExpectation} on {@link ShardBatchIndexer} TRACE confirms the batch
-     *       path actually ran at least once.</li>
-     *   <li>An {@code UnseenEventExpectation} on {@link ShardBatchMapper} WARN confirms that no
-     *       mapper threw an exception that caused an exception-based columnar fallback.</li>
-     *   <li>An {@code UnseenEventExpectation} on {@link ShardBatchMapper} DEBUG confirms that no
-     *       mapper's {@code supportsColumnarParse} returned false (which would disable the columnar
-     *       path for the whole chunk).</li>
-     * </ul>
+     * Verifies that the full ClickBench mapping (keyword + short/integer/long + date) indexes through
+     * the columnar batch path without falling back to the row-major parse path.
+     * Index-level {@code index.mapping.doc_values.multi_value=false} applies to all fields; in columnar
+     * mode, numeric and date fields default to {@code index=false} so the columnar path is used for all.
      */
     public void testColumnarClickBenchBatchMode() throws IOException {
         String index = "test-columnar-clickbench";
-
-        XContentBuilder mapping = JsonXContent.contentBuilder();
-        mapping.startObject();
-        {
-            mapping.startObject("_doc");
-            {
-                mapping.field("dynamic", "strict");
-                mapping.startObject("properties");
-                {
-                    // keyword fields — multi_value defaults to true, needed for ArrayOrderInlineNull doc values
-                    mapping.startObject("Title").field("type", "keyword").endObject();
-                    mapping.startObject("URL").field("type", "keyword").endObject();
-                    mapping.startObject("HitColor").field("type", "keyword").endObject();
-                    // long fields — doc-values only (no points index); multi_value=false enables supportsColumnarParse
-                    mapping.startObject("WatchID")
-                        .field("type", "long")
-                        .field("index", false)
-                        .startObject("doc_values")
-                        .field("multi_value", false)
-                        .endObject()
-                        .endObject();
-                    mapping.startObject("UserID")
-                        .field("type", "long")
-                        .field("index", false)
-                        .startObject("doc_values")
-                        .field("multi_value", false)
-                        .endObject()
-                        .endObject();
-                    // integer fields — doc-values only, multi_value=false for columnar path
-                    mapping.startObject("JavaEnable")
-                        .field("type", "integer")
-                        .field("index", false)
-                        .startObject("doc_values")
-                        .field("multi_value", false)
-                        .endObject()
-                        .endObject();
-                    mapping.startObject("OS")
-                        .field("type", "integer")
-                        .field("index", false)
-                        .startObject("doc_values")
-                        .field("multi_value", false)
-                        .endObject()
-                        .endObject();
-                    mapping.startObject("Age")
-                        .field("type", "integer")
-                        .field("index", false)
-                        .startObject("doc_values")
-                        .field("multi_value", false)
-                        .endObject()
-                        .endObject();
-                    // date fields — doc-values only; multi_value=false and ClickBench-matching string formats
-                    mapping.startObject("EventTime")
-                        .field("type", "date")
-                        .field("format", "yyyy-MM-dd HH:mm:ss")
-                        .field("index", false)
-                        .startObject("doc_values")
-                        .field("multi_value", false)
-                        .endObject()
-                        .endObject();
-                    mapping.startObject("EventDate")
-                        .field("type", "date")
-                        .field("format", "yyyy-MM-dd")
-                        .field("index", false)
-                        .startObject("doc_values")
-                        .field("multi_value", false)
-                        .endObject()
-                        .endObject();
-                }
-                mapping.endObject();
-            }
-            mapping.endObject();
-        }
-        mapping.endObject();
 
         assertAcked(
             indicesAdmin().prepareCreate(index)
                 .setSettings(
                     Settings.builder()
                         .put("index.number_of_shards", 2)
-                        .put("index.number_of_replicas", 1)
+                        .put("index.number_of_replicas", 0)
                         .put(IndexSettings.MODE.getKey(), IndexMode.COLUMNAR.getName())
                         .put(IndexSettings.RECOVERY_USE_SYNTHETIC_SOURCE_SETTING.getKey(), true)
+                        .put("index.mapping.doc_values.multi_value", false)
+                        .put("index.sort.field", "CounterID,EventDate,UserID,EventTime,WatchID")
+                        .put("index.sort.order", "desc,desc,desc,desc,desc")
                 )
-                .setMapping(mapping)
+                .setMapping(buildClickBenchMapping())
         );
         ensureGreen(index);
 
@@ -315,34 +236,27 @@ public class BatchBulkIT extends ESIntegTestCase {
                 new IndexRequest(index).id("doc-" + i)
                     .source(
                         XContentType.JSON,
-                        "Title",
-                        "Example title " + i,
-                        "URL",
-                        "http://example.com/" + i,
-                        "HitColor",
-                        i % 3 == 0 ? "" : "W",
-                        "WatchID",
-                        8940174697547602584L + i,
-                        "UserID",
-                        1234567890123456789L + i,
-                        "JavaEnable",
-                        i % 2,
-                        "OS",
-                        i % 5,
-                        "Age",
-                        i % 100,
-                        "EventTime",
-                        "2013-07-15 03:39:17",
-                        "EventDate",
-                        "2013-07-15"
+                        "WatchID", 8940174697547602584L + i,
+                        "UserID", 1234567890123456789L + i,
+                        "FUniqID", (long) i,
+                        "CounterID", i % 1000,
+                        "RegionID", i % 200,
+                        "Age", i % 90,
+                        "JavaEnable", i % 2,
+                        "OS", i % 100,
+                        "Title", "Example title " + i,
+                        "URL", "http://example.com/" + i,
+                        "HitColor", i % 3 == 0 ? "" : "W",
+                        "SearchPhrase", "",
+                        "EventTime", "2013-07-15 03:39:17",
+                        "EventDate", "2013-07-15",
+                        "LocalEventTime", "2013-07-15 03:39:17",
+                        "ClientEventTime", "2013-07-15 03:39:17"
                     )
                     .opType(DocWriteRequest.OpType.CREATE)
             );
         }
 
-        // Assert that the batch path ran (SeenEvent) and that no mapper caused a columnar fallback
-        // (UnseenEvents — neither a supportsColumnarParse==false nor an exception-based fallback).
-        // TRACE/DEBUG are filtered at the INFO root level by default; set levels explicitly and restore after.
         var batchIndexerLog = LogManager.getLogger(ShardBatchIndexer.class);
         var batchMapperLog = LogManager.getLogger(ShardBatchMapper.class);
         var origIndexerLevel = batchIndexerLog.getLevel();
@@ -360,7 +274,7 @@ public class BatchBulkIT extends ESIntegTestCase {
             );
             mockLog.addExpectation(
                 new MockLog.UnseenEventExpectation(
-                    "no columnar parse disabled (supportsColumnarParse returned false)",
+                    "no columnar parse disabled",
                     ShardBatchMapper.class.getName(),
                     Level.DEBUG,
                     "columnar batch mapping disabled: mapper of type * does not support columnar parsing"
@@ -368,7 +282,7 @@ public class BatchBulkIT extends ESIntegTestCase {
             );
             mockLog.addExpectation(
                 new MockLog.UnseenEventExpectation(
-                    "no columnar fallback (mapColumnBatch exception)",
+                    "no columnar fallback",
                     ShardBatchMapper.class.getName(),
                     Level.WARN,
                     "columnar batch mapping failed on *, falling back"
@@ -392,9 +306,61 @@ public class BatchBulkIT extends ESIntegTestCase {
             assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) numDocs));
         });
 
-        // Spot-check a specific doc by id.
         var getResponse = client().get(new org.elasticsearch.action.get.GetRequest(index).id("doc-0")).actionGet();
         assertTrue(getResponse.isExists());
+    }
+
+    private static XContentBuilder buildClickBenchMapping() throws IOException {
+        XContentBuilder m = JsonXContent.contentBuilder();
+        m.startObject();
+        m.startObject("_doc");
+        m.field("dynamic", "strict");
+        m.startObject("properties");
+        // shorts
+        for (String f : new String[] {
+            "AdvEngineID", "Age", "ClientTimeZone", "CookieEnable", "CounterClass", "DontCountHits",
+            "FlashMajor", "FlashMinor", "FlashMinor2", "GoodEvent", "HTTPError", "HasGCLID",
+            "HistoryLength", "Income", "Interests", "IsArtifical", "IsDownload", "IsEvent",
+            "IsLink", "IsMobile", "IsNotBounce", "IsOldCounter", "IsParameter", "IsRefresh",
+            "JavaEnable", "JavascriptEnable", "MobilePhone", "NetMajor", "NetMinor", "OS",
+            "ParamCurrencyID", "RefererCategoryID", "Robotness", "SearchEngineID", "Sex",
+            "SilverlightVersion1", "SilverlightVersion2", "SilverlightVersion4",
+            "SocialSourceNetworkID", "TraficSourceID", "URLCategoryID", "UserAgent",
+            "UserAgentMajor", "WindowClientHeight", "WindowClientWidth", "WithHash" }) {
+            m.startObject(f).field("type", "short").endObject();
+        }
+        // integers
+        for (String f : new String[] {
+            "CLID", "ClientIP", "CodeVersion", "ConnectTiming", "CounterID", "DNSTiming",
+            "FetchTiming", "HID", "IPNetworkID", "OpenerName", "RefererRegionID", "RegionID",
+            "RemoteIP", "ResolutionDepth", "ResolutionHeight", "ResolutionWidth",
+            "ResponseEndTiming", "ResponseStartTiming", "SendTiming", "SilverlightVersion3",
+            "URLRegionID", "WindowName" }) {
+            m.startObject(f).field("type", "integer").endObject();
+        }
+        // longs
+        for (String f : new String[] { "FUniqID", "ParamPrice", "RefererHash", "URLHash", "UserID", "WatchID" }) {
+            m.startObject(f).field("type", "long").endObject();
+        }
+        // keywords
+        for (String f : new String[] {
+            "BrowserCountry", "BrowserLanguage", "FromTag", "HitColor", "MobilePhoneModel",
+            "OpenstatAdID", "OpenstatCampaignID", "OpenstatServiceName", "OpenstatSourceID",
+            "OriginalURL", "PageCharset", "ParamCurrency", "ParamOrderID", "Params",
+            "Referer", "SearchPhrase", "SocialAction", "SocialNetwork", "SocialSourcePage",
+            "Title", "URL", "UTMCampaign", "UTMContent", "UTMMedium", "UTMSource", "UTMTerm",
+            "UserAgentMinor" }) {
+            m.startObject(f).field("type", "keyword").endObject();
+        }
+        // dates
+        m.startObject("ClientEventTime").field("type", "date").field("format", "yyyy-MM-dd HH:mm:ss").endObject();
+        m.startObject("EventDate").field("type", "date").field("format", "yyyy-MM-dd").endObject();
+        m.startObject("EventTime").field("type", "date").field("format", "yyyy-MM-dd HH:mm:ss").endObject();
+        m.startObject("LocalEventTime").field("type", "date").field("format", "yyyy-MM-dd HH:mm:ss").endObject();
+        m.endObject(); // properties
+        m.endObject(); // _doc
+        m.endObject();
+        return m;
     }
 
     public void testBulkIndexingViaBatchMode() throws IOException {
