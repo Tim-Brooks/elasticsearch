@@ -997,7 +997,7 @@ public final class EscfColumnBuilder {
     private static final class VarBuilder extends BaseBuilder {
         private final byte kind;
         private RecyclerBytesStreamOutput data;
-        private int[] offsets = new int[16];
+        private int[] offsets = new int[1024];
         private int dataLen;
 
         VarBuilder(byte kind, Recycler<BytesRef> recycler) {
