@@ -16,6 +16,7 @@ import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.IntsRef;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.bytes.ReleasableBytesReference;
 
 /**
  * Shared base for the variable-length columns (STRING and BINARY), whose values are a contiguous
@@ -29,7 +30,7 @@ abstract class AbstractVarColumn extends EscfColumn {
 
     AbstractVarColumn(int docCount, FixedBitSet validity, BytesReference data, IntsRef offsets) {
         super(docCount, validity);
-        this.data = data;
+        this.data = ReleasableBytesReference.unwrap(data);
         this.offsets = offsets;
         assert offsets.length == docCount + 1;
     }
