@@ -19,6 +19,7 @@ import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.index.mapper.NumberFieldMapper;
 import org.elasticsearch.xcontent.support.AbstractXContentParser;
 
+import java.math.BigInteger;
 import java.util.function.DoubleToLongFunction;
 import java.util.function.LongUnaryOperator;
 
@@ -162,7 +163,18 @@ public final class NumberColumnTransform {
     private static long stringSlowPath(BytesRef ref, NumberFieldMapper.NumberType type) {
         String s = ref.utf8ToString();
         return switch (type) {
-            case LONG -> AbstractXContentParser.toLong(s, true);
+            // For LONG, out-of-range integers (e.g. UInt64 values > Long.MAX_VALUE encoded as
+            // strings by the ESCF encoder) must match the row path's behaviour: the row path calls
+            // parser.getLongValue() on a BIG_INTEGER token, which delegates to BigInteger.longValue()
+            // and silently returns the low-order 64 bits without throwing. toLong() would throw for
+            // out-of-range values, so catch that and fall back to the same BigInteger truncation.
+            case LONG -> {
+                try {
+                    yield AbstractXContentParser.toLong(s, true);
+                } catch (IllegalArgumentException e) {
+                    yield new BigInteger(s).longValue();
+                }
+            }
             case INTEGER -> AbstractXContentParser.parseInt(s);
             case SHORT -> AbstractXContentParser.parseShort(s);
             case BYTE -> {
