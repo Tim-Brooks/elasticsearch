@@ -384,13 +384,16 @@ public final class IndexOperationBatch {
         final String routing = routings != null && routings[absIdx] != null ? routings[absIdx].utf8ToString() : null;
         // TODO: The SourceToParse using a size of 0 makes estimated sizes off in index listeners.
         // We will eventually replace those listeners with batch calls.
+        // Hack: encode the total batch RAM usage on the last op so IndexingMemoryController
+        // sees the correct byte count via recordOperationBytes.
+        final int estimatedSize = (i == docCount - 1 && sourceBatch != null) ? (int) sourceBatch.ramBytesUsed() : -1;
         final ParsedDocument doc = new ParsedDocument(
             null,
             null,
             ids[absIdx],
             routing,
             List.of(),
-            SourceToParse.Source.fromBytes(BytesArray.EMPTY, XContentType.JSON),
+            SourceToParse.Source.fromBytes(BytesArray.EMPTY, XContentType.JSON, estimatedSize),
             null,
             0
         );
@@ -422,5 +425,4 @@ public final class IndexOperationBatch {
         }
         return List.of(ops);
     }
-
 }

@@ -188,6 +188,8 @@ public class SourceToParse {
         private final SourceRow row;
         private final XContentType xContentType;
         private BytesReference originalSourceBytes;
+        // -1 means "not set"; use default logic in estimatedSizeInBytes().
+        private final int estimatedSizeOverride;
 
         private Source(
             EirfRowXContentParser.SchemaNode schemaTree,
@@ -195,6 +197,17 @@ public class SourceToParse {
             BytesReference originalSourceBytes,
             XContentType xContentType,
             boolean includeSourceOnError
+        ) {
+            this(schemaTree, row, originalSourceBytes, xContentType, includeSourceOnError, -1);
+        }
+
+        private Source(
+            EirfRowXContentParser.SchemaNode schemaTree,
+            SourceRow row,
+            BytesReference originalSourceBytes,
+            XContentType xContentType,
+            boolean includeSourceOnError,
+            int estimatedSizeOverride
         ) {
             // originalSourceBytes must be null if row is not null. And vice versa.
             assert originalSourceBytes == null || row == null;
@@ -207,10 +220,15 @@ public class SourceToParse {
                 : new BytesArray(originalSourceBytes.toBytesRef());
             this.xContentType = Objects.requireNonNull(xContentType);
             this.includeSourceOnError = includeSourceOnError;
+            this.estimatedSizeOverride = estimatedSizeOverride;
         }
 
         public static Source fromBytes(BytesReference originalSourceBytes, XContentType xContentType) {
-            return new Source(null, null, originalSourceBytes, xContentType, false);
+            return new Source(null, null, originalSourceBytes, xContentType, false, -1);
+        }
+
+        public static Source fromBytes(BytesReference originalSourceBytes, XContentType xContentType, int estimatedSizeOverride) {
+            return new Source(null, null, originalSourceBytes, xContentType, false, estimatedSizeOverride);
         }
 
         public boolean isEmpty() {
@@ -235,6 +253,9 @@ public class SourceToParse {
         }
 
         public int estimatedSizeInBytes() {
+            if (estimatedSizeOverride != -1) {
+                return estimatedSizeOverride;
+            }
             if (originalSourceBytes != null) {
                 return originalSourceBytes.length();
             }
