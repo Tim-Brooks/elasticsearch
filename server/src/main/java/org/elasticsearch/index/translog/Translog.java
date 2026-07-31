@@ -110,6 +110,8 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
 
     public static final TransportVersion REORDERED_TRANSLOG_OPERATIONS = TransportVersion.fromName("reordered_translog_operations");
 
+    public static final boolean DISABLED = true;
+
     /*
      * TODO
      *  - we might need something like a deletion policy to hold on to more than one translog eventually (I think sequence IDs needs this)
@@ -630,6 +632,10 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      * @throws IOException if adding the operation to the translog resulted in an I/O exception
      */
     public Location add(final Operation operation) throws IOException {
+        if (DISABLED) {
+            // No-op: returning null makes the engine mark the seqNo as persisted immediately (no fsync, no lock).
+            return null;
+        }
         try (RecyclerBytesStreamOutput out = new RecyclerBytesStreamOutput(bigArrays.bytesRefRecycler())) {
             writeHeaderWithSize(out, operation);
             final BytesReference header = out.bytes();
@@ -680,6 +686,10 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      * {@code batchRowIndex}.
      **/
     public Location add(final IndexBatch batch) throws IOException {
+        if (DISABLED) {
+            // No-op: returning null makes the engine mark the batch seqNos as persisted immediately.
+            return null;
+        }
         try (RecyclerBytesStreamOutput out = new RecyclerBytesStreamOutput(bigArrays.bytesRefRecycler())) {
             writeBatchHeaderWithSize(out, batch);
             final BytesReference header = out.bytes();
@@ -775,6 +785,9 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      * @return {@code true} if the current generation should be rolled to a new generation
      */
     public boolean shouldRollGeneration() {
+        if (DISABLED) {
+            return false;
+        }
         final long threshold = this.indexSettings.getGenerationThresholdSize().getBytes();
         readLock.lock();
         try {
@@ -808,6 +821,11 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      * @return the last synced checkpoint
      */
     public long getLastSyncedGlobalCheckpoint() {
+        if (DISABLED) {
+            // We never sync, so the synced checkpoint never advances; return the live global checkpoint instead so
+            // the value persisted into the Lucene commit stays coherent.
+            return globalCheckpointSupplier.getAsLong();
+        }
         return getLastSyncedCheckpoint().globalCheckpoint;
     }
 
@@ -944,6 +962,9 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      * Sync's the translog.
      */
     public void sync() throws IOException {
+        if (DISABLED) {
+            return;
+        }
         try {
             readLock.lock();
             try {
@@ -963,6 +984,9 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      *  Returns <code>true</code> if an fsync is required to ensure durability of the translogs operations or it's metadata.
      */
     public boolean syncNeeded() {
+        if (DISABLED) {
+            return false;
+        }
         readLock.lock();
         try {
             return current.syncNeeded();
@@ -985,6 +1009,9 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      * Effectively it moves max visible seq# {@link Checkpoint#trimmedAboveSeqNo} therefore {@link TranslogSnapshot} skips those operations.
      */
     public void trimOperations(long belowTerm, long aboveSeqNo) throws IOException {
+        if (DISABLED) {
+            return;
+        }
         assert aboveSeqNo >= SequenceNumbers.NO_OPS_PERFORMED : "aboveSeqNo has to a valid sequence number";
 
         writeLock.lock();
@@ -1031,6 +1058,10 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      * @return Returns <code>true</code> iff this call caused an actual sync operation otherwise <code>false</code>
      */
     public boolean ensureSynced(Location location, long globalCheckpoint) throws IOException {
+        if (DISABLED) {
+            // Durability is already satisfied (seqNos marked persisted on add); nothing to sync.
+            return false;
+        }
         try {
             readLock.lock();
             try {
@@ -2315,6 +2346,10 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      * @throws IOException if an I/O exception occurred during any file operations
      */
     public void rollGeneration() throws IOException {
+        if (DISABLED) {
+            // No-op: avoids taking the write lock that blocks all concurrent add() calls.
+            return;
+        }
         syncBeforeRollGeneration();
         if (current.totalOperations() == 0 && primaryTermSupplier.getAsLong() == current.getPrimaryTerm()) {
             return;
@@ -2351,6 +2386,9 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
      * required generation
      */
     public void trimUnreferencedReaders() throws IOException {
+        if (DISABLED) {
+            return;
+        }
         // first check under read lock if any readers can be trimmed
         readLock.lock();
         try {
