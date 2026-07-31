@@ -13,10 +13,14 @@ import org.apache.lucene.document.column.BytesRefValuesCursor;
 import org.apache.lucene.document.column.ObjectTupleCursor;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.BytesRefIterator;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.IntsRef;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.bytes.ReleasableBytesReference;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
 
 /**
  * Shared base for the variable-length columns (STRING and BINARY), whose values are a contiguous
@@ -81,15 +85,19 @@ abstract class AbstractVarColumn extends EscfColumn {
 
     private static final class BytesRefTupleCursor extends ObjectTupleCursor<BytesRef> {
         private final AbstractVarColumn column;
+        private final DenseBytesRefValuesCursor values;
         private int row = -1;
+        private BytesRef currentValue;
 
         BytesRefTupleCursor(AbstractVarColumn column) {
             this.column = column;
+            this.values = new DenseBytesRefValuesCursor(column.docCount, column);
         }
 
         @Override
         public int nextDoc() {
             while (++row < column.docCount) {
+                currentValue = values.nextValue();
                 if (column.isAbsent(row) == false) {
                     return row;
                 }
@@ -99,17 +107,66 @@ abstract class AbstractVarColumn extends EscfColumn {
 
         @Override
         public BytesRef value() {
-            return column.getBinaryValue(row);
+            return currentValue;
         }
     }
 
     private static final class DenseBytesRefValuesCursor extends BytesRefValuesCursor {
-        private final AbstractVarColumn column;
+
+        private static final BytesRef EMPTY = new BytesRef();
+
+        private final BytesRefIterator iter;
+        private final IntsRef offsets;
+        private byte[] currentBytes = BytesRef.EMPTY_BYTES;
+        private int currentBytesOffset;
+        private int currentBytesEnd;
         private int pos;
 
         DenseBytesRefValuesCursor(int count, AbstractVarColumn column) {
             super(count);
-            this.column = column;
+            this.iter = sliceData(column.offsets, column.data, count).iterator();
+            this.offsets = column.offsets;
+        }
+
+        private void nextChunk() {
+            try {
+                BytesRef chunk = iter.next();
+                if (chunk == null) {
+                    throw new IllegalStateException("variable-width column data exhausted before all values were read");
+                }
+                currentBytes = chunk.bytes;
+                currentBytesOffset = chunk.offset;
+                currentBytesEnd = chunk.offset + chunk.length;
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        private BytesRef readNextValue(int valueSize) {
+            if (valueSize == 0) {
+                return EMPTY;
+            }
+            if (currentBytesOffset >= currentBytesEnd) {
+                nextChunk();
+            }
+            int remaining = currentBytesEnd - currentBytesOffset;
+            if (valueSize <= remaining) {
+                BytesRef value = new BytesRef(currentBytes, currentBytesOffset, valueSize);
+                currentBytesOffset += valueSize;
+                return value;
+            }
+
+            BytesRef value = new BytesRef(valueSize);
+            while (value.length < valueSize) {
+                if (currentBytesOffset >= currentBytesEnd) {
+                    nextChunk();
+                }
+                int toCopy = Math.min(valueSize - value.length, currentBytesEnd - currentBytesOffset);
+                System.arraycopy(currentBytes, currentBytesOffset, value.bytes, value.length, toCopy);
+                currentBytesOffset += toCopy;
+                value.length += toCopy;
+            }
+            return value;
         }
 
         @Override
@@ -117,7 +174,9 @@ abstract class AbstractVarColumn extends EscfColumn {
             if (pos >= size()) {
                 throw new IllegalStateException("nextValue() called more than size()=" + size() + " times");
             }
-            return column.getBinaryValue(pos++);
+            int valueSize = intAt(offsets, pos + 1) - intAt(offsets, pos);
+            pos++;
+            return readNextValue(valueSize);
         }
     }
 }

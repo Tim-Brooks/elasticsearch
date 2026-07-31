@@ -103,17 +103,6 @@ public final class LuceneBinaryColumn extends BinaryColumn implements LuceneColu
             // SPARSE columns are never consulted via the dense values cursor.
             return super.values();
         }
-        final int count = data.docCount;
-        return new BytesRefValuesCursor(count) {
-            private int pos;
-
-            @Override
-            public BytesRef nextValue() {
-                if (pos >= size()) {
-                    throw new IllegalStateException("nextValue() called more than size()=" + size() + " times");
-                }
-                return data.getBinaryValue(pos++);
-            }
-        };
+        return ((AbstractVarColumn) data).bytesRefValuesCursor();
     }
 }

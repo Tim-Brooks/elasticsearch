@@ -314,6 +314,77 @@ public class EscfCursorsTests extends ESTestCase {
         assertEquals(new BytesRef("abc"), BytesRef.deepCopyOf(cursor.nextValue()));
     }
 
+    public void testStringValuesCursorSlicesWithinChunksAndCopiesAcrossBoundary() {
+        byte[] firstChunk = "abcd".getBytes(StandardCharsets.UTF_8);
+        byte[] secondChunk = "efghi".getBytes(StandardCharsets.UTF_8);
+        BytesReference data = CompositeBytesReference.of(new BytesArray(firstChunk), new BytesArray(secondChunk));
+        AbstractVarColumn col = new EscfStringColumn(3, null, data, intsRef(new int[] { 0, 2, 6, 9 }));
+
+        BytesRefValuesCursor cursor = col.bytesRefValuesCursor();
+
+        BytesRef firstValue = cursor.nextValue();
+        assertEquals(new BytesRef("ab"), firstValue);
+        assertSame(firstChunk, firstValue.bytes);
+
+        BytesRef crossingValue = cursor.nextValue();
+        assertEquals(new BytesRef("cdef"), crossingValue);
+        assertNotSame(firstChunk, crossingValue.bytes);
+        assertNotSame(secondChunk, crossingValue.bytes);
+
+        BytesRef exactFit = cursor.nextValue();
+        assertEquals(new BytesRef("ghi"), exactFit);
+        assertSame(secondChunk, exactFit.bytes);
+    }
+
+    public void testStringValuesCursorCopiesAcrossMultipleChunks() {
+        byte[] firstChunk = "ab".getBytes(StandardCharsets.UTF_8);
+        byte[] secondChunk = "cd".getBytes(StandardCharsets.UTF_8);
+        byte[] thirdChunk = "efg".getBytes(StandardCharsets.UTF_8);
+        BytesReference data = CompositeBytesReference.of(
+            new BytesArray(firstChunk),
+            new BytesArray(secondChunk),
+            new BytesArray(thirdChunk)
+        );
+        AbstractVarColumn col = new EscfStringColumn(1, null, data, intsRef(new int[] { 0, 7 }));
+
+        BytesRef value = col.bytesRefValuesCursor().nextValue();
+        assertEquals(new BytesRef("abcdefg"), value);
+        assertNotSame(firstChunk, value.bytes);
+        assertNotSame(secondChunk, value.bytes);
+        assertNotSame(thirdChunk, value.bytes);
+    }
+
+    public void testStringValuesCursorEmptyValues() {
+        AbstractVarColumn col = new EscfStringColumn(5, null, new BytesArray("xy"), intsRef(new int[] { 0, 0, 1, 1, 2, 2 }));
+
+        BytesRefValuesCursor cursor = col.bytesRefValuesCursor();
+        assertEmptyBytesRef(cursor.nextValue());
+        assertEquals(new BytesRef("x"), cursor.nextValue());
+        assertEmptyBytesRef(cursor.nextValue());
+        assertEquals(new BytesRef("y"), cursor.nextValue());
+        assertEmptyBytesRef(cursor.nextValue());
+
+        AbstractVarColumn allEmpty = new EscfStringColumn(3, null, BytesArray.EMPTY, intsRef(new int[] { 0, 0, 0, 0 }));
+        BytesRefValuesCursor allEmptyCursor = allEmpty.bytesRefValuesCursor();
+        assertEmptyBytesRef(allEmptyCursor.nextValue());
+        assertEmptyBytesRef(allEmptyCursor.nextValue());
+        assertEmptyBytesRef(allEmptyCursor.nextValue());
+    }
+
+    public void testStringValuesCursorOverSliceStartingInsideChunk() {
+        byte[] firstChunk = "abc".getBytes(StandardCharsets.UTF_8);
+        byte[] secondChunk = "defgh".getBytes(StandardCharsets.UTF_8);
+        BytesReference data = CompositeBytesReference.of(new BytesArray(firstChunk), new BytesArray(secondChunk));
+        AbstractVarColumn col = new EscfStringColumn(3, null, data, intsRef(new int[] { 0, 1, 5, 8 }));
+        AbstractVarColumn slice = (AbstractVarColumn) col.sliceInternal(1, 2);
+
+        BytesRefValuesCursor cursor = slice.bytesRefValuesCursor();
+        assertEquals(new BytesRef("bcde"), cursor.nextValue());
+        BytesRef exactFit = cursor.nextValue();
+        assertEquals(new BytesRef("fgh"), exactFit);
+        assertSame(secondChunk, exactFit.bytes);
+    }
+
     public void testStringValuesCursorOverrunThrows() {
         var b = new EscfColumnBuilder(EscfColumnBuilder.CollisionPolicy.SPLIT);
         b.addString(utf8("only"));
@@ -458,6 +529,11 @@ public class EscfCursorsTests extends ESTestCase {
         byte[] out = new byte[ref.length];
         System.arraycopy(ref.bytes, ref.offset, out, 0, ref.length);
         return out;
+    }
+
+    private static void assertEmptyBytesRef(BytesRef ref) {
+        assertEquals(0, ref.length);
+        assertSame(BytesRef.EMPTY_BYTES, ref.bytes);
     }
 
     private static XContentString.UTF8Bytes utf8(String s) {

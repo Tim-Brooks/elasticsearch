@@ -146,8 +146,6 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
          * We *could* detect these cases and only fork in then, but that is complex
          * to get right and the fork is fairly low overhead.
          */
-        final int indexingOps = bulkRequest.numberOfActions();
-        final long indexingBytes = bulkRequest.ramBytesUsed();
         final boolean isOnlySystem = TransportBulkAction.isOnlySystem(
             bulkRequest,
             projectResolver.getProjectMetadata(clusterService.state()).getIndicesLookup(),
@@ -157,6 +155,8 @@ public abstract class TransportAbstractBulkAction extends HandledTransportAction
         if (bulkRequest.incrementalState().indexingPressureAccounted()) {
             releasable = () -> {};
         } else {
+            final int indexingOps = bulkRequest.numberOfActions();
+            final long indexingBytes = bulkRequest.ramBytesUsed();
             releasable = indexingPressure.markCoordinatingOperationStarted(indexingOps, indexingBytes, isOnlySystem);
         }
         final ActionListener<BulkResponse> releasingListener = ActionListener.runBefore(listener, releasable::close);
