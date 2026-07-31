@@ -12,6 +12,7 @@ package org.elasticsearch.escf;
 import org.apache.lucene.document.column.BytesRefValuesCursor;
 import org.apache.lucene.document.column.ObjectTupleCursor;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefIterator;
 import org.apache.lucene.util.FixedBitSet;
@@ -97,8 +98,9 @@ abstract class AbstractVarColumn extends EscfColumn {
         @Override
         public int nextDoc() {
             while (++row < column.docCount) {
-                currentValue = values.nextValue();
+                values.nextValue();
                 if (column.isAbsent(row) == false) {
+                    currentValue = values.stableValue();
                     return row;
                 }
             }
@@ -113,19 +115,23 @@ abstract class AbstractVarColumn extends EscfColumn {
 
     private static final class DenseBytesRefValuesCursor extends BytesRefValuesCursor {
 
-        private static final BytesRef EMPTY = new BytesRef();
-
         private final BytesRefIterator iter;
-        private final IntsRef offsets;
+        private final int[] offsets;
+        private final BytesRef value = new BytesRef();
         private byte[] currentBytes = BytesRef.EMPTY_BYTES;
+        private byte[] scratch = BytesRef.EMPTY_BYTES;
         private int currentBytesOffset;
         private int currentBytesEnd;
+        private int nextOffsetIndex;
+        private int valueOffset;
         private int pos;
 
         DenseBytesRefValuesCursor(int count, AbstractVarColumn column) {
             super(count);
             this.iter = sliceData(column.offsets, column.data, count).iterator();
-            this.offsets = column.offsets;
+            this.offsets = column.offsets.ints;
+            this.nextOffsetIndex = column.offsets.offset + 1;
+            this.valueOffset = offsets[column.offsets.offset];
         }
 
         private void nextChunk() {
@@ -144,29 +150,45 @@ abstract class AbstractVarColumn extends EscfColumn {
 
         private BytesRef readNextValue(int valueSize) {
             if (valueSize == 0) {
-                return EMPTY;
+                value.bytes = BytesRef.EMPTY_BYTES;
+                value.offset = 0;
+                value.length = 0;
+                return value;
             }
             if (currentBytesOffset >= currentBytesEnd) {
                 nextChunk();
             }
             int remaining = currentBytesEnd - currentBytesOffset;
             if (valueSize <= remaining) {
-                BytesRef value = new BytesRef(currentBytes, currentBytesOffset, valueSize);
+                value.bytes = currentBytes;
+                value.offset = currentBytesOffset;
+                value.length = valueSize;
                 currentBytesOffset += valueSize;
                 return value;
             }
 
-            BytesRef value = new BytesRef(valueSize);
-            while (value.length < valueSize) {
+            scratch = ArrayUtil.growNoCopy(scratch, valueSize);
+            int copied = 0;
+            while (copied < valueSize) {
                 if (currentBytesOffset >= currentBytesEnd) {
                     nextChunk();
                 }
-                int toCopy = Math.min(valueSize - value.length, currentBytesEnd - currentBytesOffset);
-                System.arraycopy(currentBytes, currentBytesOffset, value.bytes, value.length, toCopy);
+                int toCopy = Math.min(valueSize - copied, currentBytesEnd - currentBytesOffset);
+                System.arraycopy(currentBytes, currentBytesOffset, scratch, copied, toCopy);
                 currentBytesOffset += toCopy;
-                value.length += toCopy;
+                copied += toCopy;
             }
+            value.bytes = scratch;
+            value.offset = 0;
+            value.length = valueSize;
             return value;
+        }
+
+        private BytesRef stableValue() {
+            if (value.length > 0 && value.bytes == scratch) {
+                return BytesRef.deepCopyOf(value);
+            }
+            return value.clone();
         }
 
         @Override
@@ -174,7 +196,9 @@ abstract class AbstractVarColumn extends EscfColumn {
             if (pos >= size()) {
                 throw new IllegalStateException("nextValue() called more than size()=" + size() + " times");
             }
-            int valueSize = intAt(offsets, pos + 1) - intAt(offsets, pos);
+            int nextOffset = offsets[nextOffsetIndex++];
+            int valueSize = nextOffset - valueOffset;
+            valueOffset = nextOffset;
             pos++;
             return readNextValue(valueSize);
         }

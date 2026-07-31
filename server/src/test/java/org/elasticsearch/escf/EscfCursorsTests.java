@@ -328,11 +328,13 @@ public class EscfCursorsTests extends ESTestCase {
 
         BytesRef crossingValue = cursor.nextValue();
         assertEquals(new BytesRef("cdef"), crossingValue);
+        assertSame(firstValue, crossingValue);
         assertNotSame(firstChunk, crossingValue.bytes);
         assertNotSame(secondChunk, crossingValue.bytes);
 
         BytesRef exactFit = cursor.nextValue();
         assertEquals(new BytesRef("ghi"), exactFit);
+        assertSame(firstValue, exactFit);
         assertSame(secondChunk, exactFit.bytes);
     }
 
@@ -354,13 +356,31 @@ public class EscfCursorsTests extends ESTestCase {
         assertNotSame(thirdChunk, value.bytes);
     }
 
+    public void testStringValuesCursorReusesCrossChunkScratch() {
+        BytesReference data = CompositeBytesReference.of(new BytesArray("ab"), new BytesArray("cd"), new BytesArray("ef"));
+        AbstractVarColumn col = new EscfStringColumn(2, null, data, intsRef(new int[] { 0, 3, 6 }));
+
+        BytesRefValuesCursor cursor = col.bytesRefValuesCursor();
+        BytesRef firstValue = cursor.nextValue();
+        assertEquals(new BytesRef("abc"), firstValue);
+        byte[] scratch = firstValue.bytes;
+
+        BytesRef secondValue = cursor.nextValue();
+        assertEquals(new BytesRef("def"), secondValue);
+        assertSame(firstValue, secondValue);
+        assertSame(scratch, secondValue.bytes);
+    }
+
     public void testStringValuesCursorEmptyValues() {
         AbstractVarColumn col = new EscfStringColumn(5, null, new BytesArray("xy"), intsRef(new int[] { 0, 0, 1, 1, 2, 2 }));
 
         BytesRefValuesCursor cursor = col.bytesRefValuesCursor();
-        assertEmptyBytesRef(cursor.nextValue());
-        assertEquals(new BytesRef("x"), cursor.nextValue());
-        assertEmptyBytesRef(cursor.nextValue());
+        BytesRef value = cursor.nextValue();
+        assertEmptyBytesRef(value);
+        assertSame(value, cursor.nextValue());
+        assertEquals(new BytesRef("x"), value);
+        assertSame(value, cursor.nextValue());
+        assertEmptyBytesRef(value);
         assertEquals(new BytesRef("y"), cursor.nextValue());
         assertEmptyBytesRef(cursor.nextValue());
 

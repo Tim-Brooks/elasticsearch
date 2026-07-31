@@ -18,6 +18,8 @@ import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.bytes.BytesArray;
+import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.bytes.CompositeBytesReference;
 import org.elasticsearch.sourcebatch.LuceneColumn;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.transport.BytesRefRecycler;
@@ -218,6 +220,19 @@ public class LuceneBinaryColumnTests extends ESTestCase {
         assertEquals(List.of("alpha"), result.get(0));
         assertEquals(List.of("beta"), result.get(1));
         assertEquals(List.of("gamma"), result.get(2));
+    }
+
+    public void testStringRowCursorFieldRemainsStableWhileCursorAdvances() {
+        BytesReference bytes = CompositeBytesReference.of(new BytesArray("ab"), new BytesArray("cd"), new BytesArray("ef"));
+        EscfColumnData data = EscfColumnData.ofVarWidth(EscfColumnKind.STRING, 2, null, new int[] { 0, 3, 6 }, bytes);
+        LuceneColumn.RowFieldCursor cursor = LuceneBinaryColumn.stringColumn(data, "content", StringField.TYPE_NOT_STORED).rowFieldCursor();
+
+        assertEquals(0, cursor.nextDoc());
+        List<IndexableField> fields = new ArrayList<>();
+        cursor.appendCurrentFields(fields);
+        assertEquals(1, cursor.nextDoc());
+
+        assertEquals("abc", fields.get(0).binaryValue().utf8ToString());
     }
 
     /** Tuple cursor over a dense string column matches the row cursor. */
