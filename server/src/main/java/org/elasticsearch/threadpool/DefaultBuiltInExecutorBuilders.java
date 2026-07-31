@@ -134,7 +134,7 @@ public class DefaultBuiltInExecutorBuilders implements BuiltInExecutorBuilders {
         );
         result.put(
             ThreadPool.Names.FLUSH,
-            new ScalingExecutorBuilder(ThreadPool.Names.FLUSH, 1, halfProcMaxAt5, TimeValue.timeValueMinutes(5), false)
+            new ScalingExecutorBuilder(ThreadPool.Names.FLUSH, 1, allocatedProcessors, TimeValue.timeValueMinutes(5), false)
         );
         // TODO: remove (or refine) this temporary stateless custom refresh pool sizing once ES-7631 is solved.
         final int refreshThreads = DiscoveryNode.isStateless(settings) ? allocatedProcessors : halfProcMaxAt10;

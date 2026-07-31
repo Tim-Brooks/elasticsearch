@@ -3432,6 +3432,7 @@ public class InternalEngine extends Engine {
         iwc.setMaxFullFlushMergeWaitMillis(-1);
         iwc.setSimilarity(engineConfig.getSimilarity());
         iwc.setRAMBufferSizeMB(engineConfig.getIndexingBufferSize().getMbFrac());
+        iwc.setCheckPendingFlushUpdate(false);
 
         Codec codec = engineConfig.getCodec();
         if (DiscoveryNode.isStateless(engineConfig.getIndexSettings().getNodeSettings())) {

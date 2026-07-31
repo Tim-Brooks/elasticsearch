@@ -38,6 +38,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -125,6 +126,7 @@ public class IndexingMemoryController implements IndexingOperationListener, Clos
 
     private final Set<IndexShard> pendingWriteIndexingBufferSet = ConcurrentCollections.newConcurrentSet();
     private final Deque<IndexShard> pendingWriteIndexingBufferQueue = new ConcurrentLinkedDeque<>();
+    private final AtomicBoolean asyncFlushPending = new AtomicBoolean(false);
 
     IndexingMemoryController(Settings settings, ThreadPool threadPool, Iterable<IndexShard> indexServices) {
         this.indexShards = indexServices;
@@ -237,10 +239,20 @@ public class IndexingMemoryController implements IndexingOperationListener, Clos
         for (IndexShard shard = pendingWriteIndexingBufferQueue.pollFirst(); shard != null; shard = pendingWriteIndexingBufferQueue
             .pollFirst()) {
             final IndexShard finalShard = shard;
-            threadPool.executor(ThreadPool.Names.REFRESH).execute(() -> {
+            threadPool.executor(ThreadPool.Names.FLUSH).execute(() -> {
                 // Remove the shard from the set first, so that multiple threads can run writeIndexingBuffer concurrently on the same shard.
                 pendingWriteIndexingBufferSet.remove(finalShard);
                 finalShard.writeIndexingBuffer();
+                asyncFlushPending.set(false);
+            });
+        }
+    }
+
+    private void maybeScheduleAsyncFlush() {
+        if (asyncFlushPending.compareAndSet(false, true)) {
+            threadPool.executor(ThreadPool.Names.FLUSH).execute(() -> {
+                statusChecker.run();
+                asyncFlushPending.set(false);
             });
         }
     }
@@ -274,23 +286,13 @@ public class IndexingMemoryController implements IndexingOperationListener, Clos
 
     private void postOperation(Engine.Operation operation, Engine.Result result) {
         recordOperationBytes(operation, result);
-        // Piggy back on indexing threads to write segments. We're not submitting a task to the index threadpool because we want memory to
-        // be reclaimed rapidly. This has the downside of increasing the latency of _bulk requests though. Lucene does the same thing in
-        // DocumentsWriter#postUpdate, flushing a segment because the size limit on the RAM buffer was reached happens on the call to
-        // IndexWriter#addDocument.
-
-        while (writePendingIndexingBuffers()) {
-            // If we just wrote segments, then run the checker again if not already running to check if we released enough memory.
-            if (statusChecker.tryRun() == false) {
-                break;
-            }
-        }
     }
 
     /** called by IndexShard to record estimated bytes written to translog for the operation */
     private void recordOperationBytes(Engine.Operation operation, Engine.Result result) {
         if (result.getResultType() == Engine.Result.Type.SUCCESS) {
             statusChecker.bytesWritten(operation.estimatedSizeInBytes());
+            maybeScheduleAsyncFlush();
         }
     }
 
@@ -417,7 +419,7 @@ public class IndexingMemoryController implements IndexingOperationListener, Clos
             // throttle the top shards to send back-pressure to ongoing indexing:
             boolean doThrottle = (totalBytesWriting + totalBytesUsed) > 1.5 * indexingBuffer;
 
-            if (totalBytesUsed > indexingBuffer) {
+            if (totalBytesUsed > indexingBuffer / 2) {
                 // OK we are now over-budget; fill the priority queue and ask largest shard(s) to refresh:
                 List<ShardAndBytesUsed> queue = new ArrayList<>();
 
