@@ -1527,4 +1527,36 @@ public class DateFormattersTests extends ESTestCase {
         assertEquals("2025-09-12T08:12:12.123Z", Instant.ofEpochMilli(1757664732123L).toString());
         assertEquals("2025-09-12T08:12:00Z", Instant.ofEpochMilli(1757664720000L).toString());
     }
+
+    public void testFebruary30thEdgeCaseDateParsing() {
+        final TemporalAccessor marchSecond = DateFormatter.forPattern("date").parse("2026-03-02");
+
+        // will not parse with the 'date' format
+        {
+            final var formatter = DateFormatter.forPattern("date");
+            IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> formatter.parse("2026-02-30"));
+            assertThat(e.getMessage(), equalTo("failed to parse date field [2026-02-30] with format [date]"));
+        }
+
+        // for other formats: will parse, formats as March 2nd
+        {
+            DateFormatter formatter;
+            TemporalAccessor result;
+
+            formatter = DateFormatter.forPattern("strict_date");
+            result = formatter.parse("2026-02-30");
+            assertThat(result.getLong(ChronoField.EPOCH_DAY), equalTo(marchSecond.getLong(ChronoField.EPOCH_DAY)));
+            assertThat(formatter.format(result), equalTo("2026-03-02"));
+
+            formatter = DateFormatter.forPattern("yyyy-MM-dd");
+            formatter.parse("2026-02-30");
+            assertThat(result.getLong(ChronoField.EPOCH_DAY), equalTo(marchSecond.getLong(ChronoField.EPOCH_DAY)));
+            assertThat(formatter.format(result), equalTo("2026-03-02"));
+
+            formatter = DateFormatter.forPattern("MM-dd-yyyy");
+            formatter.parse("02-30-2026");
+            assertThat(result.getLong(ChronoField.EPOCH_DAY), equalTo(marchSecond.getLong(ChronoField.EPOCH_DAY)));
+            assertThat(formatter.format(result), equalTo("03-02-2026"));
+        }
+    }
 }
