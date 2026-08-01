@@ -88,7 +88,6 @@ abstract class AbstractVarColumn extends EscfColumn {
         private final AbstractVarColumn column;
         private final DenseBytesRefValuesCursor values;
         private int row = -1;
-        private BytesRef currentValue;
 
         BytesRefTupleCursor(AbstractVarColumn column) {
             this.column = column;
@@ -100,7 +99,6 @@ abstract class AbstractVarColumn extends EscfColumn {
             while (++row < column.docCount) {
                 values.nextValue();
                 if (column.isAbsent(row) == false) {
-                    currentValue = values.stableValue();
                     return row;
                 }
             }
@@ -109,7 +107,7 @@ abstract class AbstractVarColumn extends EscfColumn {
 
         @Override
         public BytesRef value() {
-            return currentValue;
+            return values.value;
         }
     }
 
@@ -182,13 +180,6 @@ abstract class AbstractVarColumn extends EscfColumn {
             value.offset = 0;
             value.length = valueSize;
             return value;
-        }
-
-        private BytesRef stableValue() {
-            if (value.length > 0 && value.bytes == scratch) {
-                return BytesRef.deepCopyOf(value);
-            }
-            return value.clone();
         }
 
         @Override
