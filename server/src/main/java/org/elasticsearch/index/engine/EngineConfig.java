@@ -244,7 +244,7 @@ public final class EngineConfig {
         this.indexCommitListener = indexCommitListener;
         this.promotableToPrimary = promotableToPrimary;
         // always use compound on flush - reduces # of file-handles on refresh
-        this.useCompoundFile = indexSettings.getSettings().getAsBoolean(USE_COMPOUND_FILE, true);
+        this.useCompoundFile = indexSettings.getSettings().getAsBoolean(USE_COMPOUND_FILE, false);
         this.engineResetLock = engineResetLock;
         this.mergeMetrics = mergeMetrics;
         this.indexDeletionPolicyWrapper = indexDeletionPolicyWrapper;
