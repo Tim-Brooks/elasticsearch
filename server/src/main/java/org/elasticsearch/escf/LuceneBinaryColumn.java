@@ -14,6 +14,7 @@ import org.apache.lucene.document.column.BinaryColumn;
 import org.apache.lucene.document.column.BytesRefValuesCursor;
 import org.apache.lucene.document.column.Column;
 import org.apache.lucene.document.column.ObjectTupleCursor;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.util.BytesRef;
@@ -83,13 +84,11 @@ public final class LuceneBinaryColumn extends BinaryColumn implements LuceneColu
 
             @Override
             public void appendCurrentFields(List<? super IndexableField> out) {
-                // A distinct Field per element: for multi-valued (array) rows appendCurrentFields is
-                // called more than once for the same document and every emitted field is retained in
-                // the caller's list, so a single reused field object would collapse all values to the
-                // last one. cursor.value() returns a fresh BytesRef per element (a new header over the
-                // immutable column payload, or a copy when the value straddles chunk boundaries), so it
-                // is safe to store by reference in the Field and retain past subsequent nextDoc() calls.
-                out.add(new Field(name(), cursor.value(), fieldType()));
+                if (fieldType().tokenized() && fieldType().indexOptions() != IndexOptions.NONE) {
+                    out.add(new Field(name(), cursor.value().utf8ToString(), fieldType()));
+                } else {
+                    out.add(new Field(name(), cursor.value(), fieldType()));
+                }
             }
         };
     }
