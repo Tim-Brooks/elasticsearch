@@ -65,7 +65,8 @@ class Iso8601Parser {
     private final ChronoField maxAllowedField;
     private final DecimalSeparator decimalSeparator;
     private final TimezonePresence timezonePresence;
-    private final Map<ChronoField, Integer> defaults;
+    @Nullable
+    private final EnumMap<ChronoField, Integer> defaults;
     private final char dateTimeSeparator;
 
     /**
@@ -141,7 +142,7 @@ class Iso8601Parser {
         this.maxAllowedField = maxAllowedField;
         this.decimalSeparator = Objects.requireNonNull(decimalSeparator);
         this.timezonePresence = Objects.requireNonNull(timezonePresence);
-        this.defaults = defaults.isEmpty() ? Map.of() : new EnumMap<>(defaults);
+        this.defaults = defaults.isEmpty() ? null : new EnumMap<>(defaults);
         this.dateTimeSeparator = dateTimeSeparator;
     }
 
@@ -183,8 +184,12 @@ class Iso8601Parser {
         return mandatoryFields.contains(field) == false;
     }
 
-    private Integer defaultZero(ChronoField field) {
-        return defaults.getOrDefault(field, 0);
+    private Integer defaultNull(ChronoField field) {
+        return defaults != null ? defaults.get(field) : null;
+    }
+
+    private int defaultZero(ChronoField field) {
+        return defaults != null ? defaults.getOrDefault(field, 0) : 0;
     }
 
     /**
@@ -250,12 +255,12 @@ class Iso8601Parser {
                 ? new ParseResult(
                     withZoneOffset(
                         years,
-                        defaults.get(ChronoField.MONTH_OF_YEAR),
-                        defaults.get(ChronoField.DAY_OF_MONTH),
-                        defaults.get(ChronoField.HOUR_OF_DAY),
-                        defaults.get(ChronoField.MINUTE_OF_HOUR),
-                        defaults.get(ChronoField.SECOND_OF_MINUTE),
-                        defaults.get(ChronoField.NANO_OF_SECOND),
+                        defaultNull(ChronoField.MONTH_OF_YEAR),
+                        defaultNull(ChronoField.DAY_OF_MONTH),
+                        defaultNull(ChronoField.HOUR_OF_DAY),
+                        defaultNull(ChronoField.MINUTE_OF_HOUR),
+                        defaultNull(ChronoField.SECOND_OF_MINUTE),
+                        defaultNull(ChronoField.NANO_OF_SECOND),
                         defaultTimezone
                     )
                 )
@@ -273,11 +278,11 @@ class Iso8601Parser {
                     withZoneOffset(
                         years,
                         months,
-                        defaults.get(ChronoField.DAY_OF_MONTH),
-                        defaults.get(ChronoField.HOUR_OF_DAY),
-                        defaults.get(ChronoField.MINUTE_OF_HOUR),
-                        defaults.get(ChronoField.SECOND_OF_MINUTE),
-                        defaults.get(ChronoField.NANO_OF_SECOND),
+                        defaultNull(ChronoField.DAY_OF_MONTH),
+                        defaultNull(ChronoField.HOUR_OF_DAY),
+                        defaultNull(ChronoField.MINUTE_OF_HOUR),
+                        defaultNull(ChronoField.SECOND_OF_MINUTE),
+                        defaultNull(ChronoField.NANO_OF_SECOND),
                         defaultTimezone
                     )
                 )
@@ -296,10 +301,10 @@ class Iso8601Parser {
                         years,
                         months,
                         days,
-                        defaults.get(ChronoField.HOUR_OF_DAY),
-                        defaults.get(ChronoField.MINUTE_OF_HOUR),
-                        defaults.get(ChronoField.SECOND_OF_MINUTE),
-                        defaults.get(ChronoField.NANO_OF_SECOND),
+                        defaultNull(ChronoField.HOUR_OF_DAY),
+                        defaultNull(ChronoField.MINUTE_OF_HOUR),
+                        defaultNull(ChronoField.SECOND_OF_MINUTE),
+                        defaultNull(ChronoField.NANO_OF_SECOND),
                         defaultTimezone
                     )
                 )
@@ -314,10 +319,10 @@ class Iso8601Parser {
                         years,
                         months,
                         days,
-                        defaults.get(ChronoField.HOUR_OF_DAY),
-                        defaults.get(ChronoField.MINUTE_OF_HOUR),
-                        defaults.get(ChronoField.SECOND_OF_MINUTE),
-                        defaults.get(ChronoField.NANO_OF_SECOND),
+                        defaultNull(ChronoField.HOUR_OF_DAY),
+                        defaultNull(ChronoField.MINUTE_OF_HOUR),
+                        defaultNull(ChronoField.SECOND_OF_MINUTE),
+                        defaultNull(ChronoField.NANO_OF_SECOND),
                         defaultTimezone
                     )
                 )

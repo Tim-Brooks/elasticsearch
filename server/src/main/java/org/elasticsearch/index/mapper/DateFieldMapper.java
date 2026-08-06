@@ -79,6 +79,7 @@ import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.text.NumberFormat;
 import java.time.DateTimeException;
 import java.time.Instant;
@@ -1321,7 +1322,7 @@ public final class DateFieldMapper extends FieldMapper {
                 }
                 // else leave absent — no slot written, validity bit stays clear
             } else {
-                builder.setLong(doc, fieldType().parse(value.utf8ToString()));
+                builder.setLong(doc, fieldType().parse(new String(value.bytes, value.offset, value.length, StandardCharsets.UTF_8)));
             }
         }
         return builder.finish(source.docCount());
