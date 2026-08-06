@@ -10,6 +10,7 @@
 package org.elasticsearch.index.mapper;
 
 import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.io.stream.ByteArrayStreamInput;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
@@ -239,6 +240,12 @@ public abstract class MultiValuedBinaryDocValuesField extends CustomDocValuesFie
     public static class SeparateCount extends MultiValuedBinaryDocValuesField {
 
         public static final String COUNT_FIELD_SUFFIX = ".counts";
+
+        /**
+         * The field type of the {@code .counts} companion, as produced by {@link NumericDocValuesField#indexedField}. Exposed so the
+         * columnar batch-mapping path can attach a {@code .counts} output column carrying exactly the type the row path writes.
+         */
+        public static final IndexableFieldType COUNT_FIELD_TYPE = NumericDocValuesField.indexedField("_sentinel", 0).fieldType();
 
         // Held here so addToDoc can update the count on each value without a second keyedFields lookup.
         NumericDocValuesField countField;
@@ -684,8 +691,7 @@ public abstract class MultiValuedBinaryDocValuesField extends CustomDocValuesFie
             for (BytesRef slot : slots) {
                 byteCount += slot.length;
             }
-            int streamSize = byteCount + slotCount * VINT_MAX_BYTES;
-            try (BytesStreamOutput out = new BytesStreamOutput(streamSize)) {
+            try (BytesStreamOutput out = new BytesStreamOutput(streamSize(byteCount, slotCount))) {
                 for (int i = 0; i < slotCount; i++) {
                     BytesRef slot = slots.get(i);
                     if (nullMarkers.get(i)) {
@@ -706,6 +712,55 @@ public abstract class MultiValuedBinaryDocValuesField extends CustomDocValuesFie
             } catch (IOException e) {
                 throw new UncheckedIOException("Failed to encode keyed inline null binary value", e);
             }
+        }
+
+        /**
+         * Encodes keyed slots from an interleaved tuple array. Interleaving: {@code tuples[2*i]} is the
+         * key prefix for slot {@code i} (key bytes + {@code \0}); {@code tuples[2*i+1]} is the value, or
+         * {@code null} for a null slot. Only the first {@code 2*slotCount} entries are read; callers may
+         * reuse an oversized buffer across documents.
+         *
+         * <p>Same wire format as {@link #encode(ArrayList, BitSet)}: {@code [valueLen+1][key\0value]...},
+         * with {@code [0][key\0]} for null slots. Every slot carries a VInt prefix (no single-slot raw
+         * passthrough); the separator byte is always written; slot order is load-bearing.
+         */
+        public static BytesRef encodeTuples(BytesRef[] tuples, int slotCount) {
+            assert slotCount >= 1 : "encodeTuples requires at least one slot";
+            assert tuples.length >= 2 * slotCount : "tuples array too short: " + tuples.length + " < " + (2 * slotCount);
+            int byteCount = 0;
+            for (int i = 0; i < slotCount; i++) {
+                byteCount += tuples[2 * i].length;
+                BytesRef value = tuples[2 * i + 1];
+                if (value != null) {
+                    byteCount += value.length;
+                }
+            }
+            try (BytesStreamOutput out = new BytesStreamOutput(streamSize(byteCount, slotCount))) {
+                for (int i = 0; i < slotCount; i++) {
+                    BytesRef keyPrefix = tuples[2 * i];
+                    BytesRef value = tuples[2 * i + 1];
+                    assert keyPrefix.length > 0 && keyPrefix.bytes[keyPrefix.offset + keyPrefix.length - 1] == 0
+                        : "key prefix for slot " + i + " must be non-empty and end with \\0";
+                    if (value == null) {
+                        // Null slot: [0]key\0
+                        out.writeVInt(0);
+                    } else {
+                        // Non-null slot: [valueLen+1]key\0value
+                        out.writeVInt(value.length + 1);
+                    }
+                    out.writeBytes(keyPrefix.bytes, keyPrefix.offset, keyPrefix.length);
+                    if (value != null) {
+                        out.writeBytes(value.bytes, value.offset, value.length);
+                    }
+                }
+                return out.bytes().toBytesRef();
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to encode keyed inline null binary value", e);
+            }
+        }
+
+        private static int streamSize(int byteCount, int slotCount) {
+            return byteCount + slotCount * VINT_MAX_BYTES;
         }
 
     }
