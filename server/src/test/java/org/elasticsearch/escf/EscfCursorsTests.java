@@ -320,7 +320,7 @@ public class EscfCursorsTests extends ESTestCase {
         BytesReference data = CompositeBytesReference.of(new BytesArray(firstChunk), new BytesArray(secondChunk));
         AbstractVarColumn col = new EscfStringColumn(3, null, data, intsRef(new int[] { 0, 2, 6, 9 }));
 
-        BytesRefValuesCursor cursor = col.bytesRefValuesCursor();
+        BytesRefValuesCursor cursor = col.bytesRefValuesCursor(false);
 
         BytesRef firstValue = cursor.nextValue();
         assertEquals(new BytesRef("ab"), firstValue);
@@ -349,7 +349,7 @@ public class EscfCursorsTests extends ESTestCase {
         );
         AbstractVarColumn col = new EscfStringColumn(1, null, data, intsRef(new int[] { 0, 7 }));
 
-        BytesRef value = col.bytesRefValuesCursor().nextValue();
+        BytesRef value = col.bytesRefValuesCursor(false).nextValue();
         assertEquals(new BytesRef("abcdefg"), value);
         assertNotSame(firstChunk, value.bytes);
         assertNotSame(secondChunk, value.bytes);
@@ -360,7 +360,7 @@ public class EscfCursorsTests extends ESTestCase {
         BytesReference data = CompositeBytesReference.of(new BytesArray("ab"), new BytesArray("cd"), new BytesArray("ef"));
         AbstractVarColumn col = new EscfStringColumn(2, null, data, intsRef(new int[] { 0, 3, 6 }));
 
-        BytesRefValuesCursor cursor = col.bytesRefValuesCursor();
+        BytesRefValuesCursor cursor = col.bytesRefValuesCursor(false);
         BytesRef firstValue = cursor.nextValue();
         assertEquals(new BytesRef("abc"), firstValue);
         byte[] scratch = firstValue.bytes;
@@ -374,7 +374,7 @@ public class EscfCursorsTests extends ESTestCase {
     public void testStringValuesCursorEmptyValues() {
         AbstractVarColumn col = new EscfStringColumn(5, null, new BytesArray("xy"), intsRef(new int[] { 0, 0, 1, 1, 2, 2 }));
 
-        BytesRefValuesCursor cursor = col.bytesRefValuesCursor();
+        BytesRefValuesCursor cursor = col.bytesRefValuesCursor(false);
         BytesRef value = cursor.nextValue();
         assertEmptyBytesRef(value);
         assertSame(value, cursor.nextValue());
@@ -385,7 +385,7 @@ public class EscfCursorsTests extends ESTestCase {
         assertEmptyBytesRef(cursor.nextValue());
 
         AbstractVarColumn allEmpty = new EscfStringColumn(3, null, BytesArray.EMPTY, intsRef(new int[] { 0, 0, 0, 0 }));
-        BytesRefValuesCursor allEmptyCursor = allEmpty.bytesRefValuesCursor();
+        BytesRefValuesCursor allEmptyCursor = allEmpty.bytesRefValuesCursor(false);
         assertEmptyBytesRef(allEmptyCursor.nextValue());
         assertEmptyBytesRef(allEmptyCursor.nextValue());
         assertEmptyBytesRef(allEmptyCursor.nextValue());
@@ -398,7 +398,7 @@ public class EscfCursorsTests extends ESTestCase {
         AbstractVarColumn col = new EscfStringColumn(3, null, data, intsRef(new int[] { 0, 1, 5, 8 }));
         AbstractVarColumn slice = (AbstractVarColumn) col.sliceInternal(1, 2);
 
-        BytesRefValuesCursor cursor = slice.bytesRefValuesCursor();
+        BytesRefValuesCursor cursor = slice.bytesRefValuesCursor(false);
         assertEquals(new BytesRef("bcde"), cursor.nextValue());
         BytesRef exactFit = cursor.nextValue();
         assertEquals(new BytesRef("fgh"), exactFit);

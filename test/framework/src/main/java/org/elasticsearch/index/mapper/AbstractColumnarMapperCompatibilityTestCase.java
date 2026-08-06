@@ -155,7 +155,7 @@ public abstract class AbstractColumnarMapperCompatibilityTestCase extends Mapper
                 } else if (mapper == null) {
                     // No mapper at this path: it may still belong to a mapper that owns a whole group of descendant leaves, such as
                     // a flattened field, whose object value the encoder explodes into one dotted leaf per key.
-                    final GroupMatch match = findColumnGroup(path, mappingLookup);
+                    final ShardBatchMapper.ColumnGroupMatch match = ShardBatchMapper.findColumnGroup(path, mappingLookup);
                     if (match != null) {
                         assertSupportsColumnarParse(match.mapper(), match.ownerPath(), indexSettings);
                         groups.computeIfAbsent(match.ownerPath(), p -> new ColumnGroup(match.mapper()))
@@ -275,28 +275,6 @@ public abstract class AbstractColumnarMapperCompatibilityTestCase extends Mapper
         String[] relativeKeys() {
             return relativeKeys.toArray(String[]::new);
         }
-    }
-
-    /** The group mapper that owns a leaf, its own path, and the leaf's path relative to it. */
-    private record GroupMatch(FieldMapper mapper, String ownerPath, String relativeKey) {}
-
-    /**
-     * Walks up the dotted ancestors of {@code leafPath}. If the nearest ancestor that has a mapper is a {@link FieldMapper} that
-     * {@link FieldMapper#resolvesColumnGroup() resolves a column group}, returns that match; otherwise returns {@code null}. A
-     * non-group {@link FieldMapper} ancestor cannot own descendant leaves, so the walk stops there.
-     */
-     // TODO: Work on combining this to the group resolution code that gets added in ShardBatchMapper
-    private static GroupMatch findColumnGroup(String leafPath, MappingLookup lookup) {
-        int dot = leafPath.lastIndexOf('.');
-        while (dot > 0) {
-            final String ancestorPath = leafPath.substring(0, dot);
-            final Mapper ancestor = lookup.getMapper(ancestorPath);
-            if (ancestor instanceof FieldMapper fieldMapper) {
-                return fieldMapper.resolvesColumnGroup() ? new GroupMatch(fieldMapper, ancestorPath, leafPath.substring(dot + 1)) : null;
-            }
-            dot = leafPath.lastIndexOf('.', dot - 1);
-        }
-        return null;
     }
 
     private void populateColumnBatchDescriptors(MappedColumns mc, List<List<FieldDescriptor>> perDoc) {

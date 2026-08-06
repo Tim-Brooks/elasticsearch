@@ -10,6 +10,7 @@
 package org.elasticsearch.action.bulk;
 
 import org.elasticsearch.cluster.metadata.IndexMetadata;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.escf.EscfBatch;
@@ -22,6 +23,8 @@ import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.MapperServiceTestCase;
 import org.elasticsearch.index.mapper.ShardBatchMapper;
 import org.elasticsearch.index.mapper.ShardBatchMapper.BatchMapperResolution;
+import org.elasticsearch.index.mapper.ShardBatchMapper.ColumnGroupResolution;
+import org.elasticsearch.index.mapper.flattened.FlattenedFieldMapper;
 import org.elasticsearch.indices.recovery.RecoverySettings;
 import org.elasticsearch.sourcebatch.SourceSchema;
 import org.elasticsearch.xcontent.XContentBuilder;
@@ -29,6 +32,7 @@ import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -221,5 +225,178 @@ public class ShardBatchMapperResolveTests extends MapperServiceTestCase {
         assertNotNull(resolution);
         assertNotNull(resolution.columnMappers()[schema.findLeaf("known", schema.findNonLeaf("outer", 0))]);
         assertNull(resolution.columnMappers()[schema.findLeaf("unknown", schema.findNonLeaf("outer", 0))]);
+    }
+
+    /** Builds a schema by encoding raw JSON, for shapes the other helpers cannot express. */
+    private static SourceSchema schemaOfJson(String... jsonDocs) throws IOException {
+        final List<BytesReference> sources = Arrays.stream(jsonDocs).map(j -> (BytesReference) new BytesArray(j)).toList();
+        try (EscfBatch batch = EscfEncoder.encode(sources, XContentType.JSON)) {
+            return batch.schema();
+        }
+    }
+
+    /** Returns a mapper service with a single top-level {@code flat} flattened field. */
+    private MapperService flattenedMapper() throws IOException {
+        return mapper(mapping(b -> b.startObject("flat").field("type", "flattened").endObject()));
+    }
+
+    /**
+     * A batch containing a flattened field's subkeys must resolve to a column group, not fall back due
+     * to the runtime-field-shadow check. This is the core regression test: {@code getFieldType("flat.key1")}
+     * is non-null (FlattenedFieldType is a DynamicFieldType), so the group check must run first.
+     */
+    public void testFlattenedGroupHappyPath() throws IOException {
+        MapperService ms = flattenedMapper();
+        SourceSchema schema = schemaOfNested("flat.key1", "flat.key2");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup(), indexSettings);
+        assertNotNull(resolution);
+
+        // Both leaves are owned by the group — not by a per-leaf mapper.
+        final int flatNonLeaf = schema.findNonLeaf("flat", 0);
+        final int key1Leaf = schema.findLeaf("key1", flatNonLeaf);
+        final int key2Leaf = schema.findLeaf("key2", flatNonLeaf);
+        assertNull(resolution.columnMappers()[key1Leaf]);
+        assertNull(resolution.columnMappers()[key2Leaf]);
+
+        assertEquals(1, resolution.columnGroups().length);
+        final ColumnGroupResolution group = resolution.columnGroups()[0];
+        assertThat(group.mapper(), org.hamcrest.Matchers.instanceOf(FlattenedFieldMapper.class));
+
+        // Relative keys and leaf indexes must correspond.
+        assertArrayEquals(new String[] { "key1", "key2" }, group.relativeKeys());
+        assertArrayEquals(new int[] { key1Leaf, key2Leaf }, group.leafIndexes());
+    }
+
+    /** A flattened group and an ordinary leaf mapper coexist in the same batch resolution. */
+    public void testFlattenedGroupCoexistsWithPlainLeaf() throws IOException {
+        MapperService ms = mapper(mapping(b -> {
+            b.startObject("host").field("type", "keyword").endObject();
+            b.startObject("flat").field("type", "flattened").endObject();
+        }));
+        SourceSchema schema = schemaOfJson("{\"host\":\"h\",\"flat\":{\"k\":\"v\"}}");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup(), indexSettings);
+        assertNotNull(resolution);
+
+        // The keyword leaf has its own mapper.
+        assertThat(resolution.columnMappers()[schema.findLeaf("host", 0)], org.hamcrest.Matchers.instanceOf(KeywordFieldMapper.class));
+        // The flattened subkey leaf is owned by the group.
+        assertNull(resolution.columnMappers()[schema.findLeaf("k", schema.findNonLeaf("flat", 0))]);
+        assertEquals(1, resolution.columnGroups().length);
+    }
+
+    /** A doc with only the flattened field at its own path (null or empty object) goes through mapColumnBatch, not the group path. */
+    public void testFlattenedLeafAtOwnPathUsesLeafMapper() throws IOException {
+        MapperService ms = flattenedMapper();
+        // {"flat":null} encodes the flattened field itself as a leaf at "flat", with no subkeys.
+        SourceSchema schemaNullDoc = schemaOfJson("{\"flat\":null}");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schemaNullDoc, ms.mappingLookup(), indexSettings);
+        assertNotNull(resolution);
+        assertThat(
+            resolution.columnMappers()[schemaNullDoc.findLeaf("flat", 0)],
+            org.hamcrest.Matchers.instanceOf(FlattenedFieldMapper.class)
+        );
+        assertEquals(0, resolution.columnGroups().length);
+    }
+
+    /**
+     * When both the own-path leaf and subkey leaves are present (e.g. one null doc + one object doc),
+     * the own-path leaf goes through mapColumnBatch and the subkeys form a group.
+     */
+    public void testFlattenedOwnPathLeafAndGroupCoexist() throws IOException {
+        MapperService ms = flattenedMapper();
+        // Two docs: first has null, second has a subkey. The batch schema has both "flat" (own-path
+        // leaf under root) and "key" (a leaf under non-leaf "flat").
+        SourceSchema schema = schemaOfJson("{\"flat\":null}", "{\"flat\":{\"key\":\"v\"}}");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup(), indexSettings);
+        assertNotNull(resolution);
+
+        // Own-path leaf maps to the FlattenedFieldMapper directly (mapColumnBatch).
+        assertThat(resolution.columnMappers()[schema.findLeaf("flat", 0)], org.hamcrest.Matchers.instanceOf(FlattenedFieldMapper.class));
+        // Subkey leaf is null in columnMappers — owned by the group.
+        assertNull(resolution.columnMappers()[schema.findLeaf("key", schema.findNonLeaf("flat", 0))]);
+        assertEquals(1, resolution.columnGroups().length);
+        assertArrayEquals(new String[] { "key" }, resolution.columnGroups()[0].relativeKeys());
+    }
+
+    /** Two flattened fields in the same batch produce two independent groups. */
+    public void testTwoFlattenedFieldsProduceTwoGroups() throws IOException {
+        MapperService ms = mapper(mapping(b -> {
+            b.startObject("a").field("type", "flattened").endObject();
+            b.startObject("b").field("type", "flattened").endObject();
+        }));
+        SourceSchema schema = schemaOfJson("{\"a\":{\"x\":\"1\"},\"b\":{\"y\":\"2\"}}");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup(), indexSettings);
+        assertNotNull(resolution);
+        assertEquals(2, resolution.columnGroups().length);
+        // Groups are ordered by first-leaf-appearance in the schema.
+        assertEquals("a", resolution.columnGroups()[0].mapper().fullPath());
+        assertEquals("b", resolution.columnGroups()[1].mapper().fullPath());
+    }
+
+    /**
+     * A nested object under the flattened field (e.g. {@code {"flat":{"outer":{"inner":"v"}}}}) produces
+     * a leaf whose full path is {@code flat.outer.inner}. The ancestor walk in {@code findColumnGroup}
+     * skips the "outer" non-leaf and stops at the FlattenedFieldMapper at "flat". The relative key is
+     * "outer.inner" — the full suffix after the owner path and separator dot.
+     */
+    public void testNestedKeyProducesCompoundRelativeKey() throws IOException {
+        MapperService ms = flattenedMapper();
+        // Produces leaf "inner" under non-leaf "outer" under non-leaf "flat" — full path "flat.outer.inner".
+        SourceSchema schema = schemaOfJson("{\"flat\":{\"outer\":{\"inner\":\"v\"}}}");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup(), indexSettings);
+        assertNotNull(resolution);
+        assertEquals(1, resolution.columnGroups().length);
+        assertArrayEquals(new String[] { "outer.inner" }, resolution.columnGroups()[0].relativeKeys());
+    }
+
+    /**
+     * A flattened field configured with {@code "index": true} fails {@code supportsColumnarParse}
+     * (enables the inverted index / terms channel which has no columnar writer), so the whole batch
+     * falls back to the row path.
+     */
+    public void testUnsupportedFlattenedConfigFallsBack() throws IOException {
+        MapperService ms = mapper(mapping(b -> b.startObject("flat").field("type", "flattened").field("index", true).endObject()));
+        SourceSchema schema = schemaOfNested("flat.k");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup(), indexSettings);
+        assertNull(resolution);
+    }
+
+    /**
+     * A non-group FieldMapper (e.g. keyword) at an ancestor path stops the column-group walk and
+     * hands control back to the existing dynamic-mapping logic. Under the default dynamic=true root,
+     * an unmapped leaf under a keyword ancestor forces a fallback.
+     */
+    public void testNonGroupFieldMapperAncestorFallsBack() throws IOException {
+        // "a" is a keyword field; "a.b" is unmapped — the encoder treats the JSON value as subkeys,
+        // but the mapping sees "a" as a leaf field, not a group owner.
+        MapperService ms = mapper(mapping(b -> b.startObject("a").field("type", "keyword").endObject()));
+        SourceSchema schema = schemaOfJson("{\"a\":{\"b\":\"v\"}}");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup(), indexSettings);
+        // "a" is a keyword FieldMapper and resolvesColumnGroup() is false, so the walk stops and "a.b"
+        // falls through to the dynamic=true fallback.
+        assertNull(resolution);
+    }
+
+    /**
+     * An unmapped group-like leaf path under a {@code dynamic=false} parent still follows the existing
+     * "silently ignored" path when no group mapper exists above it. Guards against the group check
+     * accidentally swallowing the dynamic=false branch.
+     */
+    public void testUnmappedLeafUnderDynamicFalseIsStillIgnoredWithNoGroup() throws IOException {
+        // No flattened field — just root dynamic=false with one known keyword.
+        MapperService ms = mapper(topMapping(b -> {
+            b.field("dynamic", "false");
+            b.startObject("properties");
+            b.startObject("known").field("type", "keyword").endObject();
+            b.endObject();
+        }));
+        // "o" has a subkey "u" — but there is no group mapper at "o", so "o.u" is just an unmapped leaf.
+        SourceSchema schema = schemaOfJson("{\"known\":\"k\",\"o\":{\"u\":1}}");
+        BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schema, ms.mappingLookup(), indexSettings);
+        assertNotNull(resolution);
+        // The "o.u" leaf is silently ignored (dynamic=false), not grouped.
+        assertEquals(0, resolution.columnGroups().length);
+        // "known" still resolves normally.
+        assertNotNull(resolution.columnMappers()[schema.findLeaf("known", 0)]);
     }
 }

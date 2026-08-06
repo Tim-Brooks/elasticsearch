@@ -11,7 +11,9 @@ package org.elasticsearch.index.mapper;
 
 import org.elasticsearch.action.bulk.BulkItemRequest;
 import org.elasticsearch.action.bulk.ShardBatchIndexer;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.escf.EscfBatch;
+import org.elasticsearch.escf.EscfColumn;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.engine.EngineBatch;
@@ -22,6 +24,11 @@ import org.elasticsearch.logging.Logger;
 import org.elasticsearch.sourcebatch.SourceBatch;
 import org.elasticsearch.sourcebatch.SourceSchema;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 /**
  * Batch-time mapper resolution and columnar batch mapping for the bulk batch-indexing fast path.
  *
@@ -29,28 +36,54 @@ import org.elasticsearch.sourcebatch.SourceSchema;
  * <ol>
  *     <li>{@link #resolveMappers(SourceSchema, MappingLookup, IndexSettings)} runs once per batch. It walks the
  *     schema leaves and binds each column to a {@link FieldMapper} (or records {@code null} for
- *     columns that are silently ignored under a {@code dynamic=false} parent). Any configuration
- *     outside the v1 support matrix — runtime fields, index-time scripts, dynamic mapping,
- *     unsupported mapper types, etc. — causes the method to return {@code null}, at which point
- *     {@link ShardBatchIndexer} falls back to the sequential path.</li>
+ *     columns that are silently ignored under a {@code dynamic=false} parent or owned by a column
+ *     group). Any configuration outside the v1 support matrix — runtime fields, index-time scripts,
+ *     dynamic mapping, unsupported mapper types, etc. — causes the method to return {@code null}, at
+ *     which point {@link ShardBatchIndexer} falls back to the sequential path.</li>
  *     <li>{@link #mapColumnBatch(BulkItemRequest[], SourceBatch, IndexShard, int, int, BatchMapperResolution, Engine.Operation.Origin)}
  *     runs per chunk. It invokes each mapper once for the whole chunk — attaching one Lucene column per batch-wide value
  *     (id, source, engine-assigned seq-no/version, ...) via {@link BatchMappingContext}, and assembles {@link Engine.Index} operations
- *     plus the resulting {@link EngineBatch}.</li>
+ *     plus the resulting {@link EngineBatch}. Column-group mappers (e.g. {@code flattened}) are invoked once per group after the
+ *     per-leaf pass.</li>
  * </ol>
  */
 public final class ShardBatchMapper {
 
     private static final Logger logger = LogManager.getLogger(ShardBatchMapper.class);
+    private static final ColumnGroupResolution[] NO_COLUMN_GROUPS = new ColumnGroupResolution[0];
 
     private ShardBatchMapper() {}
 
     /**
-     * Result of {@link #resolveMappers(SourceSchema, MappingLookup, IndexSettings)}. Holds one entry per schema
-     * leaf; a {@code null} entry means the column is silently ignored because its nearest
-     * existing parent {@link ObjectMapper} has {@code dynamic=false}.
+     * The {@link FieldMapper#resolvesColumnGroup() group mapper} that owns a schema leaf, that
+     * mapper's own path, and the leaf's path relative to it.
      */
-    public record BatchMapperResolution(FieldMapper[] columnMappers) {}
+    public record ColumnGroupMatch(FieldMapper mapper, String ownerPath, String relativeKey) {}
+
+    /**
+     * A resolved column group: one {@link FieldMapper#resolvesColumnGroup() group mapper} plus the
+     * schema leaves it owns, in schema order. {@code leafIndexes[i]} is the leaf's index into the
+     * batch's column array and {@code relativeKeys[i]} is that leaf's path with
+     * {@code mapper.fullPath()} and the separating dot stripped.
+     *
+     * <p>Leaf indexes are stable across chunk slices ({@link EscfBatch#slice} preserves column
+     * ordering), so this structure is computed once per batch and reused across all chunks.
+     *
+     * <p>See the TODO in {@link #resolveMappers} on {@code depth_limit} and relative-key uniqueness.
+     */
+    public record ColumnGroupResolution(FieldMapper mapper, int[] leafIndexes, String[] relativeKeys) {}
+
+    /**
+     * Result of {@link #resolveMappers(SourceSchema, MappingLookup, IndexSettings)}.
+     *
+     * <p>{@code columnMappers} holds one entry per schema leaf; a {@code null} entry means the
+     * column is not mapped by a leaf mapper — either because it is silently ignored under a
+     * {@code dynamic=false} parent, or because it is owned by an entry in {@code columnGroups}.
+     *
+     * <p>{@code columnGroups} is ordered by the first appearance of each group's leaves in the
+     * schema, so output column order is deterministic.
+     */
+    public record BatchMapperResolution(FieldMapper[] columnMappers, ColumnGroupResolution[] columnGroups) {}
 
     /**
      * Resolve each schema leaf to a {@link FieldMapper}. Returns {@code null} if any scenario
@@ -85,12 +118,52 @@ public final class ShardBatchMapper {
 
         final int leafCount = schema.leafCount();
         final FieldMapper[] columnMappers = new FieldMapper[leafCount];
+        // Lazily allocated: the overwhelming majority of batches have no group mappers. LinkedHashMap
+        // so groups are dispatched in the order their first leaf appears in the schema, making output
+        // column order deterministic.
+        Map<String, ColumnGroupBuilder> groupsByOwner = null;
 
         for (int leaf = 0; leaf < leafCount; leaf++) {
             final String fullPath = schema.getFullPath(leaf);
             final Mapper resolved = lookup.getMapper(fullPath);
 
             if (resolved == null) {
+                // TODO: neither depth_limit nor relativeKeys uniqueness is enforced here. SourceSchema
+                // keeps the real tree, but getFullPath() flattens it to a dotted string, so a literal
+                // key "a.b" and a nested {"a":{"b":..}} under the same owner collapse to the same
+                // relative key and land in the group as separate columns. Nothing bounds how deep below
+                // the owner a leaf may sit either. The fix is to propagate the schema shape (leaf /
+                // non-leaf indices) rather than the dotted path string. Also unhandled: a sibling
+                // mapper declared directly at a group key's path (e.g. a flattened field "flat" plus a
+                // separate mapper at "flat.k") would be resolved as an ordinary leaf here, whereas the
+                // row path folds it into the flattened field. Mirrors the TODO on
+                // FlattenedFieldMapper#mapColumnGroupBatch.
+
+                // MUST check group ownership before the runtime-field-shadow check below: a flattened
+                // subkey has no mapper of its own, but MappingLookup#getFieldType *does* resolve it
+                // (FlattenedFieldType is a DynamicFieldType and FieldTypeLookup#get falls through to
+                // getDynamicField, producing a KeyedFlattenedFieldType). Ordered the other way, every
+                // flattened batch would be classified as a runtime-field shadow and fall back.
+                final ColumnGroupMatch match = findColumnGroup(fullPath, lookup);
+                if (match != null) {
+                    if (match.mapper().supportsColumnarParse(indexSettings) == false) {
+                        logger.debug(
+                            "columnar batch mapping disabled: group mapper at [{}] of type [{}] does not support columnar parsing",
+                            match.ownerPath(),
+                            match.mapper().typeName()
+                        );
+                        return null;
+                    }
+                    if (groupsByOwner == null) {
+                        groupsByOwner = new LinkedHashMap<>();
+                    }
+                    groupsByOwner.computeIfAbsent(match.ownerPath(), p -> new ColumnGroupBuilder(match.mapper()))
+                        .add(leaf, match.relativeKey());
+                    // Owned by the group; the per-leaf loop in mapColumnBatch must skip this entry.
+                    columnMappers[leaf] = null;
+                    continue;
+                }
+
                 // A field type without a mapper indicates a runtime field shadow.
                 if (lookup.getFieldType(fullPath) != null) {
                     logger.debug("batch indexing disabled: runtime-field shadow at [{}]", fullPath);
@@ -123,7 +196,39 @@ public final class ShardBatchMapper {
             columnMappers[leaf] = fieldMapper;
         }
 
-        return new BatchMapperResolution(columnMappers);
+        final ColumnGroupResolution[] columnGroups;
+        if (groupsByOwner == null) {
+            columnGroups = NO_COLUMN_GROUPS;
+        } else {
+            columnGroups = new ColumnGroupResolution[groupsByOwner.size()];
+            int g = 0;
+            for (ColumnGroupBuilder builder : groupsByOwner.values()) {
+                columnGroups[g++] = builder.build();
+            }
+        }
+        return new BatchMapperResolution(columnMappers, columnGroups);
+    }
+
+    /**
+     * Walks up the dotted ancestors of {@code leafPath}. If the nearest ancestor that has a mapper
+     * is a {@link FieldMapper} that {@link FieldMapper#resolvesColumnGroup() resolves a column group},
+     * returns that match; otherwise returns {@code null}. A non-group {@link FieldMapper} ancestor
+     * cannot own descendant leaves, so the walk stops there.
+     */
+    @Nullable
+    public static ColumnGroupMatch findColumnGroup(String leafPath, MappingLookup lookup) {
+        int dot = leafPath.lastIndexOf('.');
+        while (dot > 0) {
+            final String ancestorPath = leafPath.substring(0, dot);
+            final Mapper ancestor = lookup.getMapper(ancestorPath);
+            if (ancestor instanceof FieldMapper fieldMapper) {
+                return fieldMapper.resolvesColumnGroup()
+                    ? new ColumnGroupMatch(fieldMapper, ancestorPath, leafPath.substring(dot + 1))
+                    : null;
+            }
+            dot = leafPath.lastIndexOf('.', dot - 1);
+        }
+        return null;
     }
 
     /**
@@ -195,6 +300,18 @@ public final class ShardBatchMapper {
                         mapper.mapColumnBatch(context, escfChunk.column(c));
                     }
                 }
+                // Group mappers consume all of their leaves at once, so they run after the per-leaf
+                // pass. Column order in MappedColumns is irrelevant (it is an unordered list consumed
+                // by the row cursor). An UnsupportedOperationException from mapColumnGroupBatch (e.g.
+                // ignore_above exceeded) is caught by the outer catch and triggers the row-path fallback.
+                for (ColumnGroupResolution group : resolution.columnGroups()) {
+                    final int[] leafIndexes = group.leafIndexes();
+                    final EscfColumn[] groupColumns = new EscfColumn[leafIndexes.length];
+                    for (int i = 0; i < leafIndexes.length; i++) {
+                        groupColumns[i] = escfChunk.column(leafIndexes[i]);
+                    }
+                    group.mapper().mapColumnGroupBatch(context, groupColumns, group.relativeKeys());
+                }
             } else {
                 throw new IllegalStateException("unexpected batch mapping - only use escf currently");
             }
@@ -207,5 +324,29 @@ public final class ShardBatchMapper {
         }
 
         return new EngineBatch(indexBatch, context.columns());
+    }
+
+    /** Accumulates a group mapper's leaf indexes and relative keys during resolution. */
+    private static final class ColumnGroupBuilder {
+        private final FieldMapper mapper;
+        private final List<Integer> leafIndexes = new ArrayList<>();
+        private final List<String> relativeKeys = new ArrayList<>();
+
+        ColumnGroupBuilder(FieldMapper mapper) {
+            this.mapper = mapper;
+        }
+
+        void add(int leafIndex, String relativeKey) {
+            leafIndexes.add(leafIndex);
+            relativeKeys.add(relativeKey);
+        }
+
+        ColumnGroupResolution build() {
+            final int[] indexes = new int[leafIndexes.size()];
+            for (int i = 0; i < indexes.length; i++) {
+                indexes[i] = leafIndexes.get(i);
+            }
+            return new ColumnGroupResolution(mapper, indexes, relativeKeys.toArray(String[]::new));
+        }
     }
 }
