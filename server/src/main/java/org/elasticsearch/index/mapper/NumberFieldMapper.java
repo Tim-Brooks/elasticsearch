@@ -2870,9 +2870,26 @@ public class NumberFieldMapper extends FieldMapper {
 
     @Override
     public boolean supportsColumnarParse(IndexSettings indexSettings) {
+        // Neither doc_values.multi_value nor ignore_malformed is implemented by mapColumnBatch, but
+        // neither is rejected up front either: both only matter for documents the columnar path
+        // already refuses, and refusing late costs nothing but a row-path fallback for that chunk.
+        //
+        // multi_value=true: a document with two or more values arrives as an ARRAY column and one
+        // with a null as a UNION column, and the kind switch in mapColumnBatch throws for both.
+        // For the single non-null value that does get through, the encoding is identical to the row
+        // path — FieldArrayContext#addToLuceneDocument skips the .offsets sidecar in strict columnar
+        // when a document has one non-null value, which is exactly the case reaching here.
+        //
+        // ignore_malformed=true: an unparseable or out-of-range value throws in
+        // NumberColumnTransform (see validateLongRange / stringToSortableLong) rather than being
+        // recorded as an ignored field. ShardBatchMapper catches it and the row path re-runs the
+        // chunk, applying ignore_malformed properly.
+        //
+        // Both matter because the logsdb index modes default ignore_malformed to true and
+        // doc_values.multi_value defaults to true everywhere, so rejecting them here takes every
+        // numeric field in a logsdb_columnar index off the columnar path.
         return indexSettings.getMode().isStrictColumnar()
             && docValuesParameters.enabled()
-            && docValuesParameters.multiValue() == false
             && indexed == false
             && stored == false
             && indexTerms == false
@@ -2880,7 +2897,6 @@ public class NumberFieldMapper extends FieldMapper {
             && copyTo().copyToFields().isEmpty()
             && multiFields().iterator().hasNext() == false
             && dimension == false
-            && ignoreMalformed.value() == false
             && indexSettings.getIndexVersionCreated().isLegacyIndexVersion() == false;
     }
 

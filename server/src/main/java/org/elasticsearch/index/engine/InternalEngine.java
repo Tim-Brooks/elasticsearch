@@ -1357,8 +1357,9 @@ public class InternalEngine extends Engine {
                 }
                 localCheckpointTracker.markSeqNoAsProcessed(indexResult.getSeqNo());
                 if (indexResult.getTranslogLocation() == null) {
-                    // the op is coming from the translog (and is hence persisted already) or it does not have a sequence number
-                    assert index.origin().isFromTranslog() || indexResult.getSeqNo() == UNASSIGNED_SEQ_NO;
+                    // the op is coming from the translog (and is hence persisted already), the translog is disabled
+                    // (Translog#add returns a null location by design), or it does not have a sequence number
+                    assert Translog.DISABLED || index.origin().isFromTranslog() || indexResult.getSeqNo() == UNASSIGNED_SEQ_NO;
                     localCheckpointTracker.markSeqNoAsPersisted(indexResult.getSeqNo());
                 }
                 indexResult.setTook(relativeTimeInNanosSupplier.getAsLong() - index.startTime());
@@ -1713,8 +1714,9 @@ public class InternalEngine extends Engine {
                 // TODO: Batch Optimize the processed seqNo
                 localCheckpointTracker.markSeqNoAsProcessed(result.getSeqNo());
                 if (result.getTranslogLocation() == null) {
-                    // the op is coming from the translog (and is hence persisted already) or it does not have a sequence number
-                    assert origin.isFromTranslog() || result.getSeqNo() == UNASSIGNED_SEQ_NO;
+                    // the op is coming from the translog (and is hence persisted already), the translog is disabled
+                    // (Translog#add returns a null location by design), or it does not have a sequence number
+                    assert Translog.DISABLED || origin.isFromTranslog() || result.getSeqNo() == UNASSIGNED_SEQ_NO;
                     // TODO: Batch Optimize the persisted seqNo
                     localCheckpointTracker.markSeqNoAsPersisted(result.getSeqNo());
                 }
@@ -2267,8 +2269,9 @@ public class InternalEngine extends Engine {
             }
             localCheckpointTracker.markSeqNoAsProcessed(deleteResult.getSeqNo());
             if (deleteResult.getTranslogLocation() == null) {
-                // the op is coming from the translog (and is hence persisted already) or does not have a sequence number (version conflict)
-                assert delete.origin().isFromTranslog() || deleteResult.getSeqNo() == UNASSIGNED_SEQ_NO;
+                // the op is coming from the translog (and is hence persisted already), the translog is disabled
+                // (Translog#add returns a null location by design), or it does not have a sequence number (version conflict)
+                assert Translog.DISABLED || delete.origin().isFromTranslog() || deleteResult.getSeqNo() == UNASSIGNED_SEQ_NO;
                 localCheckpointTracker.markSeqNoAsPersisted(deleteResult.getSeqNo());
             }
             deleteResult.setTook(System.nanoTime() - delete.startTime());
@@ -2596,8 +2599,9 @@ public class InternalEngine extends Engine {
             }
             localCheckpointTracker.markSeqNoAsProcessed(noOpResult.getSeqNo());
             if (noOpResult.getTranslogLocation() == null) {
-                // the op is coming from the translog (and is hence persisted already) or it does not have a sequence number
-                assert noOp.origin().isFromTranslog() || noOpResult.getSeqNo() == UNASSIGNED_SEQ_NO;
+                // the op is coming from the translog (and is hence persisted already), the translog is disabled
+                // (Translog#add returns a null location by design), or it does not have a sequence number
+                assert Translog.DISABLED || noOp.origin().isFromTranslog() || noOpResult.getSeqNo() == UNASSIGNED_SEQ_NO;
                 localCheckpointTracker.markSeqNoAsPersisted(noOpResult.getSeqNo());
             }
             noOpResult.setTook(System.nanoTime() - noOp.startTime());

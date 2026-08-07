@@ -158,7 +158,14 @@ final class BulkBatchEncoders implements Releasable {
             // empty, and subsequent items skip encoding (see the disabled check above). The
             // encoder's scratch will be reset at the start of the next parseToScratch call, so we
             // don't need to clean up here.
-            logger.debug("EIRF encoding / routing extraction failed; abandoning batch for the rest of this bulk", e);
+            logger.debug("ESCF encoding / routing extraction failed; abandoning batch for the rest of this bulk", e);
+            BatchIndexingFallbackLog.reportFallback(
+                concreteIndex.getName(),
+                "ESCF encoding / routing extraction failed on the coordinating node, abandoning the column batch "
+                    + "for the rest of this bulk: "
+                    + e,
+                e
+            );
             disabled = true;
             return NOT_BATCHABLE;
         }

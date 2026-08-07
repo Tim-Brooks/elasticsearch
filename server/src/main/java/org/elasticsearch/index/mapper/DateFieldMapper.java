@@ -1275,15 +1275,20 @@ public final class DateFieldMapper extends FieldMapper {
 
     @Override
     public boolean supportsColumnarParse(IndexSettings indexSettings) {
-        // Columnar support requires strict-columnar index mode and a plain, single-valued
-        // doc-values-only date field. ignore_malformed is excluded because per-value error
-        // handling (addIgnoredField) is not yet implemented in the columnar path.
+        // Columnar support requires strict-columnar index mode and a plain doc-values-only date
+        // field. doc_values.multi_value and ignore_malformed are not implemented by mapColumnBatch
+        // but are deliberately not rejected here — see the matching comment on
+        // NumberFieldMapper#supportsColumnarParse for why refusing late is equivalent and cheaper.
+        // In short: multi-valued documents arrive as ARRAY columns and null-bearing ones as UNION
+        // columns, both of which the kind switch in mapColumnBatch throws on, and an unparseable
+        // value throws out of fieldType().parse in datesFromStrings. Every one of those cases falls
+        // back to the row path, which handles it correctly. The single non-null value that does get
+        // through is encoded identically either way, because FieldArrayContext#addToLuceneDocument
+        // skips the .offsets sidecar for it in strict columnar.
         return indexSettings.getMode().isStrictColumnar()
             && docValuesParameters.enabled()
-            && docValuesParameters.multiValue() == false
             && indexed == false
             && store == false
-            && ignoreMalformed == false
             && hasScript() == false
             && copyTo().copyToFields().isEmpty()
             && multiFields().iterator().hasNext() == false

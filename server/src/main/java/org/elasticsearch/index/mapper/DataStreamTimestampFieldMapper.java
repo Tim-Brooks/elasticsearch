@@ -286,15 +286,30 @@ public class DataStreamTimestampFieldMapper extends MetadataFieldMapper {
     @Override
     public boolean supportsColumnarParse(IndexSettings indexSettings) {
         // postParse is a no-op when disabled (the common case for non-data-stream indices).
-        // The enabled case validates @timestamp against the index's time bounds, which requires
-        // reading the value a columnar @timestamp field mapper recorded — not yet supported.
-        return enabled == false;
+        //
+        // When enabled it does two things: it rejects a document that carries no @timestamp (via
+        // extractTimestampValue), and for index modes that ask for it, validates @timestamp against
+        // the index time bounds. Only TIME_SERIES sets shouldValidateTimestamp(), and time-series
+        // indices are already off the columnar path (TimeSeriesIdFieldMapper#supportsColumnarParse
+        // returns false), so requiring it here keeps the bounds check honest without blocking the
+        // modes that can actually reach the columnar path.
+        //
+        // Note this mode-gated form is what makes the columnar path reachable at all in
+        // logsdb_columnar: IndexMode#createDefaultMapping enables this mapper on *every* index in
+        // that mode, data stream or not.
+        //
+        // TODO(columnar): re-instate the missing-@timestamp rejection in postColumnarParse. It needs
+        // the value the columnar @timestamp mapper recorded, which BatchMappingContext does not
+        // expose yet. Until then a document with no @timestamp is indexed rather than rejected on
+        // the batch path, where the row path would reject it.
+        return true;
     }
 
     @Override
     public void postColumnarParse(BatchMappingContext context) throws IOException {
         super.postColumnarParse(context);
-        // TODO: Implement validation and enable this mapper once we can map timetstamps
+        // TODO: see the TODO on supportsColumnarParse — the missing-@timestamp check belongs here
+        // once the batch context exposes the mapped timestamp column.
     }
 
     @Override

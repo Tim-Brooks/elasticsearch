@@ -221,6 +221,10 @@ public abstract class TransportWriteAction<
 
     private static boolean assertLocation(Location current, Location next, boolean isBatch) {
         if (next == null) {
+            if (Translog.DISABLED) {
+                // Translog#add returns a null location by design when the translog is disabled.
+                return true;
+            }
             throw new AssertionError("next operation can't be null");
         }
         if (current != null) {

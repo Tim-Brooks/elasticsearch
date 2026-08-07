@@ -12,6 +12,7 @@ package org.elasticsearch.action.bulk;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.core.LogEvent;
 import org.elasticsearch.Build;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.delete.DeleteRequest;
@@ -22,6 +23,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
+import org.elasticsearch.index.mapper.ShardBatchMapper;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.sort.SortOrder;
@@ -38,6 +40,7 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertNoFailures;
@@ -1445,6 +1448,269 @@ public class BatchBulkIT extends ESIntegTestCase {
         Map<String, Object> cpuUsage = (Map<String, Object>) metricsProps.get("cpu_usage");
         assertThat("cpu_usage type", cpuUsage.get("type"), equalTo("double"));
         assertThat("cpu_usage must be gauge metric", cpuUsage.get("time_series_metric"), equalTo("gauge"));
+    }
+
+    /**
+     * Reproduces the "textbench" OTEL-logs rally track: keyword/byte/date_nanos leaves plus three
+     * {@code flattened} attribute bags, sorted on {@code ServiceName} + {@code @timestamp}, with the
+     * track's {@code index.mode: logsdb_columnar}.
+     *
+     * <p>The track as written used to fall back to the row path on every bulk, for three reasons
+     * this test now pins as fixed:
+     * <ol>
+     *   <li>{@link IndexMode#LOGSDB_COLUMNAR} installs a default mapping
+     *   ({@code IndexMode.createDefaultMapping}) that enables {@code _data_stream_timestamp} on
+     *   every index in the mode, data stream or not, and
+     *   {@code DataStreamTimestampFieldMapper.supportsColumnarParse} refused whenever it was
+     *   enabled. It now allows the index modes that do not validate timestamp bounds.</li>
+     *   <li>{@code index.mapping.ignore_malformed} defaults to {@code true} in the logsdb index
+     *   modes, which {@code NumberFieldMapper} and {@code DateFieldMapper} used to reject.</li>
+     *   <li>{@code index.mapping.doc_values.multi_value} defaults to {@code true}, which the same
+     *   two mappers used to reject.</li>
+     * </ol>
+     * (2) and (3) are now refused per document inside {@code mapColumnBatch} instead of per index,
+     * so a clean single-valued document stays columnar and anything the columnar path cannot encode
+     * still falls back — see {@link #testTextBenchOtelLogsFallsBackOnMultiValueAndMalformed}.
+     *
+     * <p>Note: the real track maps {@code Body} as {@code pattern_text}, which lives in x-pack
+     * logsdb and is not reachable from a server integration test; it is mapped as {@code keyword}
+     * here (and the {@code Body.template_id} sort key dropped). Everything else matches the track.
+     */
+    public void testTextBenchOtelLogsLogsdbColumnarStaysColumnar() throws IOException {
+        // The track's settings verbatim: index.mode plus the sort, nothing else.
+        runTextBenchBulk("otel-logs-textbench", IndexMode.LOGSDB_COLUMNAR, Settings.builder());
+    }
+
+    /** The same mapping and data under {@code index.mode: columnar} rather than the logsdb variant. */
+    public void testTextBenchOtelLogsColumnarViaColumnarMode() throws IOException {
+        runTextBenchBulk("otel-logs-textbench-columnar", IndexMode.COLUMNAR, Settings.builder());
+    }
+
+    /**
+     * {@code doc_values.multi_value} and {@code ignore_malformed} are accepted by
+     * {@code NumberFieldMapper}/{@code DateFieldMapper} on the columnar path without being
+     * implemented there, on the basis that any document actually needing them is refused inside
+     * {@code mapColumnBatch} and re-run on the row path. This checks that contract holds: a bulk
+     * carrying a multi-valued numeric and a malformed date must fall back rather than mis-index, and
+     * every document must still land with the right values.
+     */
+    public void testTextBenchOtelLogsFallsBackOnMultiValueAndMalformed() throws IOException {
+        String index = "otel-logs-textbench-dirty";
+        createTextBenchIndex(index, IndexMode.LOGSDB_COLUMNAR, Settings.builder());
+        String coordinatingNode = findCoordinatingNode();
+
+        BulkRequest bulkRequest = new BulkRequest();
+        // A clean document, one with two SeverityNumber values, and one whose @timestamp is garbage.
+        bulkRequest.add(new IndexRequest(index).id("clean").opType(DocWriteRequest.OpType.CREATE).source(buildOtelLogDoc(0)));
+
+        XContentBuilder multiValued = JsonXContent.contentBuilder();
+        multiValued.startObject();
+        multiValued.field("@timestamp", "2025-09-23T02:00:00.000000000Z");
+        multiValued.field("ServiceName", "frontend");
+        multiValued.array("SeverityNumber", 1, 2);
+        multiValued.endObject();
+        bulkRequest.add(new IndexRequest(index).id("multi").opType(DocWriteRequest.OpType.CREATE).source(multiValued));
+
+        XContentBuilder malformed = JsonXContent.contentBuilder();
+        malformed.startObject();
+        malformed.field("@timestamp", "not-a-date");
+        malformed.field("ServiceName", "frontend");
+        malformed.endObject();
+        bulkRequest.add(new IndexRequest(index).id("malformed").opType(DocWriteRequest.OpType.CREATE).source(malformed));
+
+        BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet(TimeValue.timeValueSeconds(30));
+        // index.mapping.ignore_malformed defaults to true in logsdb_columnar, so the malformed
+        // @timestamp is recorded as an ignored field on the row path rather than failing the item.
+        assertNoFailures(bulkResponse);
+
+        refresh(index);
+
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo(3L));
+        });
+
+        var multi = client().get(new org.elasticsearch.action.get.GetRequest(index).id("multi")).actionGet();
+        assertTrue(multi.isExists());
+        assertThat(multi.getSourceAsMap().get("SeverityNumber"), equalTo(List.of(1, 2)));
+    }
+
+    private void createTextBenchIndex(String index, IndexMode mode, Settings.Builder extraSettings) throws IOException {
+        XContentBuilder mapping = JsonXContent.contentBuilder();
+        mapping.startObject();
+        {
+            mapping.startObject("_doc");
+            {
+                mapping.field("dynamic", "strict");
+                mapping.startObject("properties");
+                {
+                    mapping.startObject("@timestamp").field("type", "date_nanos").endObject();
+                    mapping.startObject("TraceId").field("type", "keyword").endObject();
+                    mapping.startObject("SpanId").field("type", "keyword").endObject();
+                    mapping.startObject("TraceFlags").field("type", "byte").endObject();
+                    mapping.startObject("SeverityText").field("type", "keyword").endObject();
+                    mapping.startObject("SeverityNumber").field("type", "byte").endObject();
+                    mapping.startObject("ServiceName").field("type", "keyword").endObject();
+                    // pattern_text in the real track; keyword here (see javadoc).
+                    mapping.startObject("Body").field("type", "keyword").endObject();
+                    mapping.startObject("ResourceSchemaUrl").field("type", "keyword").endObject();
+                    mapping.startObject("ResourceAttributes").field("type", "flattened").endObject();
+                    mapping.startObject("ScopeSchemaUrl").field("type", "keyword").endObject();
+                    mapping.startObject("ScopeName").field("type", "keyword").endObject();
+                    mapping.startObject("ScopeVersion").field("type", "keyword").endObject();
+                    mapping.startObject("ScopeAttributes").field("type", "flattened").endObject();
+                    mapping.startObject("LogAttributes").field("type", "flattened").endObject();
+                }
+                mapping.endObject();
+            }
+            mapping.endObject();
+        }
+        mapping.endObject();
+
+        assertAcked(
+            indicesAdmin().prepareCreate(index)
+                .setSettings(
+                    extraSettings.put("index.number_of_shards", 1)
+                        .put("index.number_of_replicas", 0)
+                        .put(IndexSettings.MODE.getKey(), mode.getName())
+                        .putList("index.sort.field", List.of("ServiceName", "@timestamp"))
+                        .putList("index.sort.order", List.of("asc", "desc"))
+                )
+                .setMapping(mapping)
+        );
+        ensureGreen(index);
+    }
+
+    private void runTextBenchBulk(String index, IndexMode mode, Settings.Builder extraSettings) throws IOException {
+        createTextBenchIndex(index, mode, extraSettings);
+        String coordinatingNode = findCoordinatingNode();
+
+        int numDocs = 25;
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int i = 0; i < numDocs; i++) {
+            bulkRequest.add(new IndexRequest(index).opType(DocWriteRequest.OpType.CREATE).source(buildOtelLogDoc(i)));
+        }
+
+        assertStaysColumnar(() -> {
+            // Bounded wait: an Error (rather than an Exception) escaping the batch write path loses
+            // the listener and hangs the request forever, which would otherwise stall the suite
+            // without ever printing the node logs that explain why.
+            BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet(TimeValue.timeValueSeconds(30));
+            assertNoFailures(bulkResponse);
+            assertThat(bulkResponse.getItems().length, equalTo(numDocs));
+        });
+
+        refresh(index);
+
+        assertResponse(prepareSearch(index).setQuery(QueryBuilders.matchAllQuery()).setSize(0).setTrackTotalHits(true), searchResponse -> {
+            assertNoFailures(searchResponse);
+            assertThat(searchResponse.getHits().getTotalHits().value(), equalTo((long) numDocs));
+        });
+    }
+
+    private XContentBuilder buildOtelLogDoc(int i) throws IOException {
+        XContentBuilder doc = JsonXContent.contentBuilder();
+        doc.startObject();
+        {
+            doc.field("@timestamp", "2025-09-23T02:00:00.000000000Z");
+            doc.field("TraceId", "0ce994d55ca67ef4890f49805d0f379a");
+            doc.field("SpanId", "63cdb589056ff454");
+            doc.field("TraceFlags", 1);
+            doc.field("SeverityText", "error");
+            doc.field("SeverityNumber", 0);
+            doc.field("ServiceName", "frontend");
+            doc.field("Body", "Failed to place order");
+            doc.field("ResourceSchemaUrl", "");
+            doc.startObject("ResourceAttributes");
+            {
+                doc.field("host.arch", "amd64");
+                doc.field("host.name", "frontend-7fd5b7d47b-m94kt");
+                doc.field("k8s.namespace.name", "otel-demo");
+                doc.field("os.type", "linux");
+                doc.field("process.command", "/app/server.js");
+                doc.field("process.pid", "17");
+                doc.field("service.name", "frontend");
+                doc.field("telemetry.sdk.language", "nodejs");
+            }
+            doc.endObject();
+            doc.field("ScopeSchemaUrl", "");
+            doc.field("ScopeName", "node-logger");
+            doc.field("ScopeVersion", "");
+            doc.startObject("ScopeAttributes");
+            doc.endObject();
+            doc.startObject("LogAttributes");
+            {
+                doc.field("email", "mooredeborah" + i + "@example.com");
+                doc.field("error.code", "13");
+                doc.field("error.details", "failed to charge card: could not charge the card");
+                doc.field("span_id", "63cdb589056ff454");
+                doc.field("trace_flags", "01");
+                doc.field("userId", "14c2e806-9747-11f0-a593-1e18b38d367b");
+            }
+            doc.endObject();
+        }
+        doc.endObject();
+        return doc;
+    }
+
+    /**
+     * Runs {@code action} while asserting that the columnar batch path was used on the primary and
+     * that nothing reported a fallback to the row path. {@link BatchIndexingFallbackLog} logs each
+     * distinct reason once per JVM, so the dedup state is reset first; the reason itself is part of
+     * the assertion failure message.
+     */
+    private void assertStaysColumnar(Runnable action) {
+        BatchIndexingFallbackLog.resetForTests();
+        final Logger indexerLogger = LogManager.getLogger(ShardBatchIndexer.class);
+        final Logger mapperLogger = LogManager.getLogger(ShardBatchMapper.class);
+        final Level origIndexerLevel = indexerLogger.getLevel();
+        final Level origMapperLevel = mapperLogger.getLevel();
+        Loggers.setLevel(indexerLogger, Level.TRACE);
+        Loggers.setLevel(mapperLogger, Level.DEBUG);
+        final CollectingExpectation collected = new CollectingExpectation();
+        try (var mockLog = MockLog.capture(ShardBatchIndexer.class, ShardBatchMapper.class, BatchIndexingFallbackLog.class)) {
+            mockLog.addExpectation(collected);
+
+            try {
+                action.run();
+            } catch (RuntimeException e) {
+                // Note: with Translog.DISABLED hard-wired on this branch, a bulk that falls back to
+                // the row path trips an assertion in InternalEngine#index and loses its listener, so
+                // the bulk times out rather than failing cleanly. Attach the captured log either way.
+                throw new AssertionError("bulk failed. Captured batch-indexing log:\n" + String.join("\n", collected.messages), e);
+            }
+
+            mockLog.assertAllExpectationsMatched();
+        } finally {
+            Loggers.setLevel(indexerLogger, origIndexerLevel);
+            Loggers.setLevel(mapperLogger, origMapperLevel);
+        }
+
+        final List<String> messages = collected.messages;
+        final List<String> fallbacks = messages.stream().filter(m -> m.contains("fallback") || m.contains("falling back")).toList();
+        assertTrue("bulk fell back to the row path. Captured batch-indexing log:\n" + String.join("\n", messages), fallbacks.isEmpty());
+        assertTrue(
+            "no primary batch-index happened. Captured batch-indexing log:\n" + String.join("\n", messages),
+            messages.stream().anyMatch(m -> m.contains("batch indexed ") && m.contains(" operations on primary shard "))
+        );
+    }
+
+    /**
+     * Records every event on the batch-indexing loggers so a failure can report exactly which
+     * fallback reason fired, rather than just "an unseen event was seen".
+     */
+    private static final class CollectingExpectation implements MockLog.LoggingExpectation {
+        private final List<String> messages = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void match(LogEvent event) {
+            messages.add(event.getLevel() + " " + event.getLoggerName() + " - " + event.getMessage().getFormattedMessage());
+        }
+
+        @Override
+        public void assertMatched() {
+            // Assertions are made by the caller against the collected messages.
+        }
     }
 
     public void testBatchModeWithDynamicRuntimeFields() throws IOException {

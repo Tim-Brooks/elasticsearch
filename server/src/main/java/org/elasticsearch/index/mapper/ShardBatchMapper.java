@@ -9,6 +9,7 @@
 
 package org.elasticsearch.index.mapper;
 
+import org.elasticsearch.action.bulk.BatchIndexingFallbackLog;
 import org.elasticsearch.action.bulk.BulkItemRequest;
 import org.elasticsearch.action.bulk.ShardBatchIndexer;
 import org.elasticsearch.core.Nullable;
@@ -91,26 +92,27 @@ public final class ShardBatchMapper {
      * sequential path.
      */
     public static BatchMapperResolution resolveMappers(SourceSchema schema, MappingLookup lookup, IndexSettings indexSettings) {
+        final String indexName = indexSettings.getIndex().getName();
         // Runtime fields or index-time scripts anywhere in the mapping would require the normal
         // parsing flow; the batch path does not support them.
         if (lookup.getMapping().getRoot().runtimeFields().isEmpty() == false) {
-            logger.debug("batch indexing disabled: mapping defines runtime fields");
+            BatchIndexingFallbackLog.reportFallback(indexName, "mapping defines runtime fields");
             return null;
         }
         if (lookup.indexTimeScriptMappers().isEmpty() == false) {
-            logger.debug("batch indexing disabled: mapping defines index-time scripts");
+            BatchIndexingFallbackLog.reportFallback(indexName, "mapping defines index-time scripts");
             return null;
         }
         if (lookup.getMapping().getMetadataMapperByName(IdFieldMapper.NAME) instanceof SliceIdFieldMapper) {
-            logger.debug("batch indexing disabled: slice-enabled index");
+            BatchIndexingFallbackLog.reportFallback(indexName, "slice-enabled index");
             return null;
         }
 
         for (MetadataFieldMapper mapper : lookup.getMapping().getSortedMetadataMappers()) {
             if (mapper.supportsColumnarMetadataParse(indexSettings) == false) {
-                logger.debug(
-                    "columnar batch mapping disabled: metadata mapper of type [{}] does not support columnar parsing",
-                    mapper.typeName()
+                BatchIndexingFallbackLog.reportFallback(
+                    indexName,
+                    "metadata mapper of type [" + mapper.typeName() + "] does not support columnar parsing"
                 );
                 return null;
             }
@@ -147,10 +149,13 @@ public final class ShardBatchMapper {
                 final ColumnGroupMatch match = findColumnGroup(fullPath, lookup);
                 if (match != null) {
                     if (match.mapper().supportsColumnarParse(indexSettings) == false) {
-                        logger.debug(
-                            "columnar batch mapping disabled: group mapper at [{}] of type [{}] does not support columnar parsing",
-                            match.ownerPath(),
-                            match.mapper().typeName()
+                        BatchIndexingFallbackLog.reportFallback(
+                            indexName,
+                            "group mapper at ["
+                                + match.ownerPath()
+                                + "] of type ["
+                                + match.mapper().typeName()
+                                + "] does not support columnar parsing"
                         );
                         return null;
                     }
@@ -166,7 +171,7 @@ public final class ShardBatchMapper {
 
                 // A field type without a mapper indicates a runtime field shadow.
                 if (lookup.getFieldType(fullPath) != null) {
-                    logger.debug("batch indexing disabled: runtime-field shadow at [{}]", fullPath);
+                    BatchIndexingFallbackLog.reportFallback(indexName, "runtime-field shadow at [" + fullPath + "]");
                     return null;
                 }
                 final ObjectMapper.Dynamic parentDynamic = findNearestParentDynamic(fullPath, lookup);
@@ -176,20 +181,27 @@ public final class ShardBatchMapper {
                     columnMappers[leaf] = null;
                     continue;
                 }
-                logger.debug("batch indexing disabled: unmapped leaf [{}] under dynamic={} parent", fullPath, parentDynamic);
+                BatchIndexingFallbackLog.reportFallback(
+                    indexName,
+                    "unmapped leaf [" + fullPath + "] under dynamic=" + parentDynamic + " parent"
+                );
                 return null;
             }
 
             if ((resolved instanceof FieldMapper) == false) {
-                logger.debug("batch indexing disabled: non-field mapper at [{}]", fullPath);
+                BatchIndexingFallbackLog.reportFallback(indexName, "non-field mapper at [" + fullPath + "]");
                 return null;
             }
             final FieldMapper fieldMapper = (FieldMapper) resolved;
             if (fieldMapper.supportsColumnarParse(indexSettings) == false) {
-                logger.debug(
-                    "columnar batch mapping disabled: mapper at [{}] of type [{}] does not support columnar parsing",
-                    fullPath,
-                    fieldMapper.typeName()
+                BatchIndexingFallbackLog.reportFallback(
+                    indexName,
+                    "mapper at ["
+                        + fullPath
+                        + "] of type ["
+                        + fieldMapper.typeName()
+                        + "] does not support columnar parsing"
+                        + describeColumnarRejection(fieldMapper, indexSettings)
                 );
                 return null;
             }
@@ -207,6 +219,39 @@ public final class ShardBatchMapper {
             }
         }
         return new BatchMapperResolution(columnMappers, columnGroups);
+    }
+
+    /**
+     * Best-effort explanation of why {@code mapper} rejected columnar parsing, appended to the
+     * fallback log line. {@link FieldMapper#supportsColumnarParse} is a plain boolean, so this
+     * cannot know the real reason — it re-checks the disqualifiers that are visible on the generic
+     * {@link FieldMapper}/{@link IndexSettings} surface and reports them as candidates. A mapper may
+     * also have rejected for a type-specific reason not listed here (e.g. {@code index:true},
+     * {@code store:true}, or being a dimension), in which case no candidate is printed.
+     */
+    private static String describeColumnarRejection(FieldMapper mapper, IndexSettings indexSettings) {
+        final List<String> candidates = new ArrayList<>();
+        if (indexSettings.getMode().isStrictColumnar() == false) {
+            candidates.add("index.mode [" + indexSettings.getMode().getName() + "] is not strict-columnar");
+        }
+        if (mapper.ignoreMalformed()) {
+            candidates.add("ignore_malformed=true (index.mapping.ignore_malformed defaults to true in the logsdb index modes)");
+        }
+        if (FieldMapper.DOC_VALUES_MULTI_VALUE_SETTING.get(indexSettings.getSettings())) {
+            candidates.add(
+                "index.mapping.doc_values.multi_value=true (its default; numeric and date columnar mapping currently require false)"
+            );
+        }
+        if (mapper.copyTo().copyToFields().isEmpty() == false) {
+            candidates.add("copy_to is set");
+        }
+        if (mapper.multiFields().iterator().hasNext()) {
+            candidates.add("multi-fields are set");
+        }
+        if (mapper.hasScript()) {
+            candidates.add("an index-time script is set");
+        }
+        return candidates.isEmpty() ? "" : "; candidate reasons: " + String.join("; ", candidates);
     }
 
     /**
@@ -320,6 +365,10 @@ public final class ShardBatchMapper {
             }
         } catch (Exception e) {
             logger.warn("columnar batch mapping failed on [{}], falling back", origin, e);
+            BatchIndexingFallbackLog.reportFallback(
+                shard.shardId().getIndexName(),
+                "column mapping threw on [" + origin + "]: " + e.getMessage()
+            );
             return null;
         }
 
