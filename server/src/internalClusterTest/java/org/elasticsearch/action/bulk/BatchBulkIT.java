@@ -1511,16 +1511,20 @@ public class BatchBulkIT extends ESIntegTestCase {
         multiValued.endObject();
         bulkRequest.add(new IndexRequest(index).id("multi").opType(DocWriteRequest.OpType.CREATE).source(multiValued));
 
+        // TraceFlags is a byte and inherits the index-level ignore_malformed. (@timestamp cannot be
+        // used here: DataStreamTimestampFieldMapper#doValidate forbids ignore_malformed on the
+        // data-stream timestamp field, so a bad @timestamp fails the document outright.)
         XContentBuilder malformed = JsonXContent.contentBuilder();
         malformed.startObject();
-        malformed.field("@timestamp", "not-a-date");
+        malformed.field("@timestamp", "2025-09-23T02:00:00.000000000Z");
         malformed.field("ServiceName", "frontend");
+        malformed.field("TraceFlags", "not-a-number");
         malformed.endObject();
         bulkRequest.add(new IndexRequest(index).id("malformed").opType(DocWriteRequest.OpType.CREATE).source(malformed));
 
         BulkResponse bulkResponse = client(coordinatingNode).bulk(bulkRequest).actionGet(TimeValue.timeValueSeconds(30));
-        // index.mapping.ignore_malformed defaults to true in logsdb_columnar, so the malformed
-        // @timestamp is recorded as an ignored field on the row path rather than failing the item.
+        // index.mapping.ignore_malformed defaults to true in logsdb_columnar, so once the chunk falls
+        // back the row path records TraceFlags as an ignored field rather than failing the item.
         assertNoFailures(bulkResponse);
 
         refresh(index);
@@ -1533,6 +1537,10 @@ public class BatchBulkIT extends ESIntegTestCase {
         var multi = client().get(new org.elasticsearch.action.get.GetRequest(index).id("multi")).actionGet();
         assertTrue(multi.isExists());
         assertThat(multi.getSourceAsMap().get("SeverityNumber"), equalTo(List.of(1, 2)));
+
+        var malformedDoc = client().get(new org.elasticsearch.action.get.GetRequest(index).id("malformed")).actionGet();
+        assertTrue(malformedDoc.isExists());
+        assertThat(malformedDoc.getSourceAsMap().get("TraceFlags"), equalTo("not-a-number"));
     }
 
     private void createTextBenchIndex(String index, IndexMode mode, Settings.Builder extraSettings) throws IOException {

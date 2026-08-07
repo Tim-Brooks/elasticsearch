@@ -289,14 +289,17 @@ public class DataStreamTimestampFieldMapper extends MetadataFieldMapper {
         //
         // When enabled it does two things: it rejects a document that carries no @timestamp (via
         // extractTimestampValue), and for index modes that ask for it, validates @timestamp against
-        // the index time bounds. Only TIME_SERIES sets shouldValidateTimestamp(), and time-series
-        // indices are already off the columnar path (TimeSeriesIdFieldMapper#supportsColumnarParse
-        // returns false), so requiring it here keeps the bounds check honest without blocking the
-        // modes that can actually reach the columnar path.
+        // the index time bounds. Neither runs on the columnar path, and this returns true anyway —
+        // without that, logsdb_columnar could never use the columnar path at all, because
+        // IndexMode#createDefaultMapping enables this mapper on *every* index in that mode, data
+        // stream or not.
         //
-        // Note this mode-gated form is what makes the columnar path reachable at all in
-        // logsdb_columnar: IndexMode#createDefaultMapping enables this mapper on *every* index in
-        // that mode, data stream or not.
+        // The bounds check is only requested by TIME_SERIES (IndexMode#shouldValidateTimestamp), and
+        // time-series indices cannot reach the columnar path regardless because
+        // TimeSeriesIdFieldMapper#supportsColumnarParse returns false. That second guard is the only
+        // thing keeping bounds validation from being silently skipped, so if _tsid ever gains
+        // columnar support this must become
+        // `enabled == false || indexSettings.getMode().shouldValidateTimestamp() == false`.
         //
         // TODO(columnar): re-instate the missing-@timestamp rejection in postColumnarParse. It needs
         // the value the columnar @timestamp mapper recorded, which BatchMappingContext does not

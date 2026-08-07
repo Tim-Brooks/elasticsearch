@@ -21,6 +21,7 @@ import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.mapper.KeywordFieldMapper;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.MapperServiceTestCase;
+import org.elasticsearch.index.mapper.NumberFieldMapper;
 import org.elasticsearch.index.mapper.ShardBatchMapper;
 import org.elasticsearch.index.mapper.ShardBatchMapper.BatchMapperResolution;
 import org.elasticsearch.index.mapper.ShardBatchMapper.ColumnGroupResolution;
@@ -108,10 +109,19 @@ public class ShardBatchMapperResolveTests extends MapperServiceTestCase {
         assertTrue(resolution.columnMappers()[0] instanceof KeywordFieldMapper);
     }
 
-    public void testNumberIgnoreMalformedIsNotSupported() throws IOException {
+    /**
+     * {@code ignore_malformed} is not implemented on the columnar path, but it no longer takes the
+     * whole batch off it: the logsdb index modes default the setting to {@code true}, so rejecting
+     * here would disable columnar indexing for every numeric field in a logsdb_columnar index.
+     * A value that actually is malformed throws inside {@code NumberColumnTransform} during
+     * {@code mapColumnBatch}, and {@code ShardBatchMapper} falls that chunk back to the row path,
+     * which applies {@code ignore_malformed} properly.
+     */
+    public void testNumberIgnoreMalformedResolvesAndDefersToMapColumnBatch() throws IOException {
         MapperService ms = mapper(mapping(b -> { b.startObject("v").field("type", "long").field("ignore_malformed", true).endObject(); }));
         BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(schemaOf("v"), ms.mappingLookup(), indexSettings);
-        assertNull(resolution);
+        assertNotNull(resolution);
+        assertTrue(resolution.columnMappers()[0] instanceof NumberFieldMapper);
     }
 
     public void testMissingLeafUnderDynamicFalseIsIgnored() throws IOException {
