@@ -882,8 +882,8 @@ public final class EscfColumnBuilder {
         @Override
         public UnionBuilder promote(Recycler<BytesRef> recycler) {
             byte present = kind == EscfColumnKind.LONG ? SourceValueType.LONG : SourceValueType.DOUBLE;
-            byte[] typeVec = new byte[count];
-            int[] offsets = new int[count + 1];
+            byte[] typeVec = new byte[Math.max(count, 1024)];
+            int[] offsets = new int[Math.max(count + 1, 1024)];
             for (int i = 0; i < count; i++) {
                 typeVec[i] = isAbsentAt(i) ? SourceValueType.ABSENT : present;
                 offsets[i] = i * 8;
@@ -897,10 +897,10 @@ public final class EscfColumnBuilder {
 
         @Override
         public ArrayBuilder promoteToArray(Recycler<BytesRef> recycler) {
-            int[] rowOffsets = new int[Math.max(16, count + 1)];
+            int[] rowOffsets = new int[Math.max(1024, count + 1)];
             if (validity == null) {
                 // Dense: positional == element-packed. Adopt the data buffer; null out to prevent double-close via discard().
-                int[] childOffsets = new int[Math.max(16, count + 2)];
+                int[] childOffsets = new int[Math.max(1024, count + 2)];
                 for (int i = 0; i < count; i++) {
                     rowOffsets[i] = i;
                 }
@@ -911,7 +911,7 @@ public final class EscfColumnBuilder {
             // Sparse: compact present slots into a fresh element-packed stream (the [swap]).
             BytesReference positional = data.bytes();
             RecyclerBytesStreamOutput childData = newStream(recycler);
-            int[] childOffsets = new int[Math.max(16, count + 2)];
+            int[] childOffsets = new int[Math.max(1024, count + 2)];
             int elemCount = 0;
             int childDataLen = 0;
             try {
@@ -975,7 +975,7 @@ public final class EscfColumnBuilder {
 
         @Override
         public UnionBuilder promote(Recycler<BytesRef> recycler) {
-            byte[] typeVec = new byte[count];
+            byte[] typeVec = new byte[Math.max(count, 1024)];
             for (int i = 0; i < count; i++) {
                 if (isAbsentAt(i)) {
                     typeVec[i] = SourceValueType.ABSENT;
@@ -983,7 +983,7 @@ public final class EscfColumnBuilder {
                     typeVec[i] = (values != null && values.get(i)) ? SourceValueType.TRUE : SourceValueType.FALSE;
                 }
             }
-            return new UnionBuilder(newStream(recycler), typeVec, new int[count + 1], 0, count, validity);
+            return new UnionBuilder(newStream(recycler), typeVec, new int[Math.max(count + 1, 1024)], 0, count, validity);
         }
 
         @Override
@@ -997,7 +997,7 @@ public final class EscfColumnBuilder {
     private static final class VarBuilder extends BaseBuilder {
         private final byte kind;
         private RecyclerBytesStreamOutput data;
-        private int[] offsets = new int[16];
+        private int[] offsets = new int[1024];
         private int dataLen;
 
         VarBuilder(byte kind, Recycler<BytesRef> recycler) {
@@ -1059,7 +1059,7 @@ public final class EscfColumnBuilder {
             // as-is in both dense and sparse cases; only the per-element offsets and row offsets differ.
             offsets = ensureIntCapacity(offsets, count + 1);
             offsets[count] = dataLen;
-            int[] rowOffsets = new int[Math.max(16, count + 1)];
+            int[] rowOffsets = new int[Math.max(1024, count + 1)];
             // Adopts data; null out to prevent double-close via discard().
             RecyclerBytesStreamOutput adopted = data;
             data = null;
@@ -1070,7 +1070,7 @@ public final class EscfColumnBuilder {
                 }
                 return new ArrayBuilder(kind, adopted, offsets, rowOffsets, count, dataLen, count, null);
             }
-            int[] childOffsets = new int[Math.max(16, count + 2)];
+            int[] childOffsets = new int[Math.max(1024, count + 2)];
             int elemCount = 0;
             for (int r = 0; r < count; r++) {
                 rowOffsets[r] = elemCount;
@@ -1118,8 +1118,8 @@ public final class EscfColumnBuilder {
             this.childKind = childKind;
             this.splitValidity = splitValidity;
             this.childData = newStream(recycler);
-            this.childOffsets = new int[16];
-            this.rowOffsets = new int[16];
+            this.childOffsets = new int[1024];
+            this.rowOffsets = new int[1024];
         }
 
         /** Adoption constructor for {@link TypedBuilder#promoteToArray} (MERGE only); takes ownership of {@code childData}. */
@@ -1288,8 +1288,8 @@ public final class EscfColumnBuilder {
 
         UnionBuilder(Recycler<BytesRef> recycler) {
             this.data = newStream(recycler);
-            this.offsets = new int[16];
-            this.typeVec = new byte[16];
+            this.offsets = new int[1024];
+            this.typeVec = new byte[1024];
         }
 
         UnionBuilder(RecyclerBytesStreamOutput data, byte[] typeVec, int[] offsets, int dataLen, int count, FixedBitSet validity) {
