@@ -102,19 +102,6 @@ public final class EscfEncoder implements SourceBatchEncoder {
      * Returns the pooled {@link SimdJsonXContentParser} positioned before the root token, or
      * {@code null} if the document is ineligible for the SIMD path. When {@code null} is returned,
      * no row state has been staged, so the caller can fall back to Jackson cleanly.
-     *
-     * <p>Ineligibility reasons:
-     * <ul>
-     *   <li>{@code allowSimd} is false (test seam).</li>
-     *   <li>{@link SimdJsonPool#AVAILABLE} is false ({@code jdk.incubator.vector} absent).</li>
-     *   <li>Content type is not JSON (canonical).</li>
-     *   <li>Document length exceeds {@link SimdJsonPool#MAX_DOC_BYTES}.</li>
-     *   <li>{@code sink.passRawText()} — the {@link org.elasticsearch.cluster.routing.RoutingPathExtractor}
-     *       hashes raw source text of dimension values; the SIMD parser reformats numbers
-     *       ({@code 1.50} → {@code 1.5}) which would silently change routing and {@code _tsid}.</li>
-     *   <li>The source contains a JSON feature the SIMD parser does not support (e.g. unicode escapes
-     *       or exotic number formats): {@link SimdJsonXContentParser#reset} throws and we fall back.</li>
-     * </ul>
      */
     private SimdJsonXContentParser trySimdParse(BytesReference source, XContentType xContentType, LeafSink sink) throws IOException {
         if (allowSimd == false
@@ -181,10 +168,10 @@ public final class EscfEncoder implements SourceBatchEncoder {
     }
 
     /**
-     * Scans {@code buf[0..len)} for {@code \u} byte sequences (0x5C 0x75) and returns a string
+     * Scans {@code buf[0..len)} for {@code \\u} byte sequences (0x5C 0x75) and returns a string
      * showing each occurrence with the 6 raw bytes printed as hex. This bypasses
      * {@code utf8ToString()} / {@code UnicodeUtil#UTF8toUTF16}, which replaces malformed UTF-8
-     * with U+FFFD and can hide what bytes are actually following the {@code \u} prefix.
+     * with U+FFFD and can hide what bytes are actually following the {@code \\u} prefix.
      */
     private static String unicodeEscapeHex(byte[] buf, int len) {
         StringBuilder sb = new StringBuilder();

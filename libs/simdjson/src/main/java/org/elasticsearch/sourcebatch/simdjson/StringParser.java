@@ -146,7 +146,7 @@ class StringParser {
 
     private int storeCodePointInStringBuffer(int codePoint, int dst, byte[] stringBuffer) {
         if (codePoint < 0) {
-            // hexToInt returned -1: the four bytes after \u were not all valid hex digits.
+            // hexToInt returned -1: the four bytes after \\u were not all valid hex digits.
             // Output U+FFFD (replacement character) so the parser can continue rather than
             // aborting the document — the caller's fallback path (Jackson) would produce the
             // same replacement behaviour for truly malformed escapes.
