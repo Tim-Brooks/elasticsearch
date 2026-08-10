@@ -1,0 +1,242 @@
+/*
+ * @notice
+ *
+ * Copyright 2021-2024 The simdjson-java contributors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Based on a modification of https://github.com/simdjson/simdjson-java,
+ * licensed under the Apache License 2.0.
+ */
+
+package org.elasticsearch.sourcebatch.simdjson;
+
+import java.util.Arrays;
+
+import static org.elasticsearch.sourcebatch.simdjson.CharacterUtils.isStructuralOrWhitespace;
+import static org.elasticsearch.sourcebatch.simdjson.Tape.END_ARRAY;
+import static org.elasticsearch.sourcebatch.simdjson.Tape.END_OBJECT;
+import static org.elasticsearch.sourcebatch.simdjson.Tape.FALSE_VALUE;
+import static org.elasticsearch.sourcebatch.simdjson.Tape.NULL_VALUE;
+import static org.elasticsearch.sourcebatch.simdjson.Tape.ROOT;
+import static org.elasticsearch.sourcebatch.simdjson.Tape.START_ARRAY;
+import static org.elasticsearch.sourcebatch.simdjson.Tape.START_OBJECT;
+import static org.elasticsearch.sourcebatch.simdjson.Tape.STRING;
+import static org.elasticsearch.sourcebatch.simdjson.Tape.TRUE_VALUE;
+
+class TapeBuilder {
+
+    private static final byte SPACE = 0x20;
+
+    private final Tape tape;
+    private final byte[] stringBuffer;
+    private final OpenContainer[] openContainers;
+    private final int padding;
+    private final NumberParser numberParser;
+    private final StringParser stringParser;
+
+    private int stringBufferIdx;
+
+    TapeBuilder(int capacity, int depth, int padding, byte[] stringBuffer) {
+        this.tape = new Tape(capacity);
+        this.openContainers = new OpenContainer[depth];
+        this.padding = padding;
+        for (int i = 0; i < openContainers.length; i++) {
+            openContainers[i] = new OpenContainer();
+        }
+        this.stringBuffer = stringBuffer;
+        this.numberParser = new NumberParser();
+        this.stringParser = new StringParser();
+    }
+
+    void visitDocumentStart() {
+        startContainer(0);
+    }
+
+    void visitDocumentEnd() {
+        tape.append(0, ROOT);
+        tape.write(0, tape.getCurrentIdx(), ROOT);
+    }
+
+    void visitEmptyObject() {
+        emptyContainer(START_OBJECT, END_OBJECT);
+    }
+
+    void visitEmptyArray() {
+        emptyContainer(START_ARRAY, END_ARRAY);
+    }
+
+    void visitRootPrimitive(byte[] buffer, int idx, int len) {
+        switch (buffer[idx]) {
+            case '"' -> visitString(buffer, idx);
+            case 't' -> visitRootTrueAtom(buffer, idx, len);
+            case 'f' -> visitRootFalseAtom(buffer, idx, len);
+            case 'n' -> visitRootNullAtom(buffer, idx, len);
+            case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' -> visitRootNumber(buffer, idx, len);
+            default -> throw new JsonParsingException("Unrecognized primitive. Expected: string, number, 'true', 'false' or 'null'.");
+        }
+    }
+
+    void visitPrimitive(byte[] buffer, int idx) {
+        switch (buffer[idx]) {
+            case '"' -> visitString(buffer, idx);
+            case 't' -> visitTrueAtom(buffer, idx);
+            case 'f' -> visitFalseAtom(buffer, idx);
+            case 'n' -> visitNullAtom(buffer, idx);
+            case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' -> visitNumber(buffer, idx);
+            default -> throw new JsonParsingException("Unrecognized primitive. Expected: string, number, 'true', 'false' or 'null'.");
+        }
+    }
+
+    void visitObjectStart(int depth) {
+        startContainer(depth);
+    }
+
+    void incrementCount(int depth) {
+        openContainers[depth].count++;
+    }
+
+    void visitObjectEnd(int depth) {
+        endContainer(START_OBJECT, END_OBJECT, depth);
+    }
+
+    void visitArrayStart(int depth) {
+        startContainer(depth);
+    }
+
+    void visitArrayEnd(int depth) {
+        endContainer(START_ARRAY, END_ARRAY, depth);
+    }
+
+    private void visitTrueAtom(byte[] buffer, int idx) {
+        boolean valid = isTrue(buffer, idx) && isStructuralOrWhitespace(buffer[idx + 4]);
+        if (!valid) {
+            throw new JsonParsingException("Invalid value starting at " + idx + ". Expected 'true'.");
+        }
+        tape.append(0, TRUE_VALUE);
+    }
+
+    private void visitRootTrueAtom(byte[] buffer, int idx, int len) {
+        boolean valid = idx + 4 <= len && isTrue(buffer, idx) && (idx + 4 == len || isStructuralOrWhitespace(buffer[idx + 4]));
+        if (!valid) {
+            throw new JsonParsingException("Invalid value starting at " + idx + ". Expected 'true'.");
+        }
+        tape.append(0, TRUE_VALUE);
+    }
+
+    private boolean isTrue(byte[] buffer, int idx) {
+        return buffer[idx] == 't' && buffer[idx + 1] == 'r' && buffer[idx + 2] == 'u' && buffer[idx + 3] == 'e';
+    }
+
+    private void visitFalseAtom(byte[] buffer, int idx) {
+        boolean valid = isFalse(buffer, idx) && isStructuralOrWhitespace(buffer[idx + 5]);
+        if (!valid) {
+            throw new JsonParsingException("Invalid value starting at " + idx + ". Expected 'false'.");
+        }
+        tape.append(0, FALSE_VALUE);
+    }
+
+    private void visitRootFalseAtom(byte[] buffer, int idx, int len) {
+        boolean valid = idx + 5 <= len && isFalse(buffer, idx) && (idx + 5 == len || isStructuralOrWhitespace(buffer[idx + 5]));
+        if (!valid) {
+            throw new JsonParsingException("Invalid value starting at " + idx + ". Expected 'false'.");
+        }
+        tape.append(0, FALSE_VALUE);
+    }
+
+    private boolean isFalse(byte[] buffer, int idx) {
+        return buffer[idx] == 'f' && buffer[idx + 1] == 'a' && buffer[idx + 2] == 'l' && buffer[idx + 3] == 's' && buffer[idx + 4] == 'e';
+    }
+
+    private void visitNullAtom(byte[] buffer, int idx) {
+        boolean valid = isNull(buffer, idx) && isStructuralOrWhitespace(buffer[idx + 4]);
+        if (!valid) {
+            throw new JsonParsingException("Invalid value starting at " + idx + ". Expected 'null'.");
+        }
+        tape.append(0, NULL_VALUE);
+    }
+
+    private void visitRootNullAtom(byte[] buffer, int idx, int len) {
+        boolean valid = idx + 4 <= len && isNull(buffer, idx) && (idx + 4 == len || isStructuralOrWhitespace(buffer[idx + 4]));
+        if (!valid) {
+            throw new JsonParsingException("Invalid value starting at " + idx + ". Expected 'null'.");
+        }
+        tape.append(0, NULL_VALUE);
+    }
+
+    private boolean isNull(byte[] buffer, int idx) {
+        return buffer[idx] == 'n' && buffer[idx + 1] == 'u' && buffer[idx + 2] == 'l' && buffer[idx + 3] == 'l';
+    }
+
+    void visitKey(byte[] buffer, int idx) {
+        visitString(buffer, idx);
+    }
+
+    private void visitString(byte[] buffer, int idx) {
+        tape.append(stringBufferIdx, STRING);
+        stringBufferIdx = stringParser.parseString(buffer, idx, stringBuffer, stringBufferIdx);
+    }
+
+    private void visitNumber(byte[] buffer, int idx) {
+        numberParser.parseNumber(buffer, idx, tape);
+    }
+
+    private void visitRootNumber(byte[] buffer, int idx, int len) {
+        int remainingLen = len - idx;
+        byte[] copy = new byte[remainingLen + padding];
+        System.arraycopy(buffer, idx, copy, 0, remainingLen);
+        Arrays.fill(copy, remainingLen, remainingLen + padding, SPACE);
+        numberParser.parseNumber(copy, 0, tape);
+    }
+
+    private void startContainer(int depth) {
+        openContainers[depth].tapeIndex = tape.getCurrentIdx();
+        openContainers[depth].count = 0;
+        tape.skip();
+    }
+
+    private void endContainer(char start, char end, int depth) {
+        int startTapeIndex = openContainers[depth].tapeIndex;
+        tape.append(startTapeIndex, end);
+        int count = openContainers[depth].count;
+        count = Math.min(count, 0xFFFFFF);
+        tape.write(startTapeIndex, tape.getCurrentIdx() | ((long) count << 32), start);
+    }
+
+    private void emptyContainer(char start, char end) {
+        tape.append(tape.getCurrentIdx() + 2, start);
+        tape.append(tape.getCurrentIdx(), end);
+    }
+
+    void reset() {
+        tape.reset();
+        stringBufferIdx = 0;
+    }
+
+    JsonValue createJsonValue(byte[] buffer) {
+        return new JsonValue(tape, 1, stringBuffer, buffer);
+    }
+
+    Tape tape() {
+        return tape;
+    }
+
+    byte[] stringBuffer() {
+        return stringBuffer;
+    }
+
+    private static class OpenContainer {
+        int tapeIndex;
+        int count;
+    }
+}
