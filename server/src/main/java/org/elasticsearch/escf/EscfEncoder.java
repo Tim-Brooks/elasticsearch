@@ -10,6 +10,7 @@
 package org.elasticsearch.escf;
 
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.BytesRefIterator;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.common.xcontent.XContentHelper;
@@ -17,6 +18,7 @@ import org.elasticsearch.sourcebatch.LeafSink;
 import org.elasticsearch.sourcebatch.SourceBatchEncodeHelper;
 import org.elasticsearch.sourcebatch.SourceBatchEncoder;
 import org.elasticsearch.sourcebatch.SourceValueType;
+import org.elasticsearch.sourcebatch.simdjson.SimdJsonXContentParser;
 import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
@@ -37,28 +39,131 @@ import java.util.List;
  * {@link EscfRowBuffer}, and delegates all column-building to the shared {@link EscfBatchBuilder}
  * backend. Implements {@link SourceBatchEncoder}. Single-partition convenience:
  * {@link #encode(List, XContentType)}.
+ *
+ * <p><strong>Parser dispatch:</strong>
+ * <ol>
+ *   <li>JSON and ≤ {@link SimdJsonPool#MAX_DOC_BYTES}: pooled {@link SimdJsonXContentParser} (SIMD
+ *       two-stage algorithm). The source bytes are passed directly if they start at offset 0,
+ *       otherwise copied to a thread-local scratch buffer first.</li>
+ *   <li>JSON and contiguous ({@link BytesReference#hasArray()}): Jackson byte-array parser
+ *       ({@code ESUTF8StreamJsonParser}), zero-copy via {@code optimizedText()}.</li>
+ *   <li>Otherwise: Jackson stream parser.</li>
+ * </ol>
  */
 public final class EscfEncoder implements SourceBatchEncoder {
 
     private final EscfBatchBuilder backend;
+    private final boolean allowSimd;
 
     public EscfEncoder() {
         this(BytesRefRecycler.NON_RECYCLING_INSTANCE);
     }
 
     public EscfEncoder(Recycler<BytesRef> recycler) {
+        this(recycler, true);
+    }
+
+    /**
+     * Package-private constructor used by tests to disable the SIMD path and obtain a Jackson
+     * baseline for differential comparison.
+     */
+    EscfEncoder(Recycler<BytesRef> recycler, boolean allowSimd) {
         this.backend = new EscfBatchBuilder(recycler);
+        this.allowSimd = allowSimd;
     }
 
     @Override
     public void parseToScratch(BytesReference source, XContentType xContentType, LeafSink sink) throws IOException {
-        EscfRowBuffer row = backend.beginRow();
+        SimdJsonXContentParser simd = trySimdParse(source, xContentType, sink);
+        if (simd != null) {
+            flattenDocument(simd, sink);
+            // do not close: simd is a pooled thread-local; closing just flips a flag that the
+            // next reset() clears anyway
+            return;
+        }
         try (XContentParser parser = XContentHelper.createParserNotCompressed(XContentParserConfiguration.EMPTY, source, xContentType)) {
             parser.allowDuplicateKeys(true);
-            parser.nextToken(); // START_OBJECT
-            flattenObject(row, parser, parser.nextToken(), sink);
+            flattenDocument(parser, sink);
         }
+    }
+
+    private void flattenDocument(XContentParser parser, LeafSink sink) throws IOException {
+        EscfRowBuffer row = backend.beginRow();
+        parser.nextToken(); // START_OBJECT
+        flattenObject(row, parser, parser.nextToken(), sink);
         row.finishRow();
+    }
+
+    /**
+     * Returns the pooled {@link SimdJsonXContentParser} positioned before the root token, or
+     * {@code null} if the document is ineligible for the SIMD path. When {@code null} is returned,
+     * no row state has been staged, so the caller can fall back to Jackson cleanly.
+     *
+     * <p>Ineligibility reasons:
+     * <ul>
+     *   <li>{@code allowSimd} is false (test seam).</li>
+     *   <li>{@link SimdJsonPool#AVAILABLE} is false ({@code jdk.incubator.vector} absent).</li>
+     *   <li>Content type is not JSON (canonical).</li>
+     *   <li>Document length exceeds {@link SimdJsonPool#MAX_DOC_BYTES}.</li>
+     *   <li>{@code sink.passRawText()} — the {@link org.elasticsearch.cluster.routing.RoutingPathExtractor}
+     *       hashes raw source text of dimension values; the SIMD parser reformats numbers
+     *       ({@code 1.50} → {@code 1.5}) which would silently change routing and {@code _tsid}.</li>
+     *   <li>The source contains a JSON feature the SIMD parser does not support (e.g. unicode escapes
+     *       or exotic number formats): {@link SimdJsonXContentParser#reset} throws and we fall back.</li>
+     * </ul>
+     */
+    private SimdJsonXContentParser trySimdParse(BytesReference source, XContentType xContentType, LeafSink sink) throws IOException {
+        if (allowSimd == false
+            || SimdJsonPool.AVAILABLE == false
+            || xContentType.canonical() != XContentType.JSON
+            || source.length() > SimdJsonPool.MAX_DOC_BYTES
+            || sink.passRawText()) {
+            return null;
+        }
+        SimdJsonXContentParser parser = SimdJsonPool.parser();
+        try {
+            parser.reset(simdInput(source), source.length());
+        } catch (RuntimeException e) {
+            // Unicode escapes, unusual number formats, and over-deep nesting are known gaps in the
+            // SIMD parser. reset() runs both stages before we touch any row state, so nothing has
+            // been staged: fall through to Jackson, which either handles the document or surfaces
+            // the canonical parse error.
+            return null;
+        }
+        return parser;
+    }
+
+    /**
+     * Returns a byte array containing the source bytes starting at offset 0, suitable for passing
+     * directly to {@link SimdJsonXContentParser#reset}.
+     *
+     * <ul>
+     *   <li>Zero-copy: if the source is already array-backed with {@code arrayOffset() == 0}.</li>
+     *   <li>Single {@code arraycopy}: if array-backed with a non-zero offset (common for bulk slices).</li>
+     *   <li>Page-walk copy: if composite / non-contiguous (e.g. {@code CompositeBytesReference}).</li>
+     * </ul>
+     *
+     * <p>The returned array may be the caller's own bytes or the thread-local scratch; it must not
+     * be retained past the next call on this thread.
+     */
+    private static byte[] simdInput(BytesReference source) throws IOException {
+        int len = source.length();
+        if (source.hasArray() && source.arrayOffset() == 0) {
+            return source.array();
+        }
+        byte[] scratch = SimdJsonPool.scratch();
+        if (source.hasArray()) {
+            System.arraycopy(source.array(), source.arrayOffset(), scratch, 0, len);
+        } else {
+            int pos = 0;
+            BytesRefIterator it = source.iterator();
+            for (BytesRef page = it.next(); page != null; page = it.next()) {
+                System.arraycopy(page.bytes, page.offset, scratch, pos, page.length);
+                pos += page.length;
+            }
+            assert pos == len : pos + " != " + len;
+        }
+        return scratch;
     }
 
     @Override
