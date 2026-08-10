@@ -14,6 +14,8 @@ import org.apache.lucene.util.BytesRefIterator;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.recycler.Recycler;
 import org.elasticsearch.common.xcontent.XContentHelper;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.sourcebatch.LeafSink;
 import org.elasticsearch.sourcebatch.SourceBatchEncodeHelper;
 import org.elasticsearch.sourcebatch.SourceBatchEncoder;
@@ -51,6 +53,8 @@ import java.util.List;
  * </ol>
  */
 public final class EscfEncoder implements SourceBatchEncoder {
+
+    private static final Logger logger = LogManager.getLogger(EscfEncoder.class);
 
     private final EscfBatchBuilder backend;
     private final boolean allowSimd;
@@ -128,6 +132,14 @@ public final class EscfEncoder implements SourceBatchEncoder {
             // SIMD parser. reset() runs both stages before we touch any row state, so nothing has
             // been staged: fall through to Jackson, which either handles the document or surfaces
             // the canonical parse error.
+            logger.info(
+                "SIMD JSON fallback [{}]: {}\nsource ({} bytes): {}",
+                e.getClass().getSimpleName(),
+                e.getMessage(),
+                source.length(),
+                source.utf8ToString(),
+                e
+            );
             return null;
         }
         return parser;
