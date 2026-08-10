@@ -285,27 +285,14 @@ public class DataStreamTimestampFieldMapper extends MetadataFieldMapper {
 
     @Override
     public boolean supportsColumnarParse(IndexSettings indexSettings) {
-        // postParse is a no-op when disabled (the common case for non-data-stream indices).
+        // postParse rejects a document with no @timestamp and, only for TIME_SERIES, validates it
+        // against the index time bounds. Neither runs columnar, but refusing whenever enabled is too
+        // blunt: IndexMode#createDefaultMapping enables this mapper on every logsdb_columnar index,
+        // data stream or not. Gating on the mode keeps the bounds check enforced where it applies.
         //
-        // When enabled it does two things: it rejects a document that carries no @timestamp (via
-        // extractTimestampValue), and for index modes that ask for it, validates @timestamp against
-        // the index time bounds. Neither runs on the columnar path, and this returns true anyway —
-        // without that, logsdb_columnar could never use the columnar path at all, because
-        // IndexMode#createDefaultMapping enables this mapper on *every* index in that mode, data
-        // stream or not.
-        //
-        // The bounds check is only requested by TIME_SERIES (IndexMode#shouldValidateTimestamp), and
-        // time-series indices cannot reach the columnar path regardless because
-        // TimeSeriesIdFieldMapper#supportsColumnarParse returns false. That second guard is the only
-        // thing keeping bounds validation from being silently skipped, so if _tsid ever gains
-        // columnar support this must become
-        // `enabled == false || indexSettings.getMode().shouldValidateTimestamp() == false`.
-        //
-        // TODO(columnar): re-instate the missing-@timestamp rejection in postColumnarParse. It needs
-        // the value the columnar @timestamp mapper recorded, which BatchMappingContext does not
-        // expose yet. Until then a document with no @timestamp is indexed rather than rejected on
-        // the batch path, where the row path would reject it.
-        return true;
+        // TODO(columnar): re-instate the missing-@timestamp rejection in postColumnarParse, once
+        // BatchMappingContext exposes the mapped timestamp column.
+        return enabled == false || indexSettings.getMode().shouldValidateTimestamp() == false;
     }
 
     @Override

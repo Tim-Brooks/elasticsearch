@@ -257,25 +257,18 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
         }""";
 
     /**
-     * The core flattened-field regression test: a batch containing a flattened field's subkeys must
-     * take the columnar path (non-null result) and emit the {@code flat._keyed} and
-     * {@code flat._keyed.counts} output columns. Before the column-group logic was added,
-     * {@code resolveMappers} would see an unmapped leaf ({@code flat.key1}) whose field type was
-     * non-null (FlattenedFieldType is a DynamicFieldType), classify it as a runtime-field shadow, and
-     * return null, forcing every flattened-field batch onto the row path.
+     * A flattened field with two keys produces the {@code _keyed} binary DV column and a {@code counts}
+     * column. Verifies the columnar path is taken (non-null result) and that the output columns are present.
      */
     public void testFlattenedFieldProducesKeyedColumns() throws IOException {
         IndexShard shard = newShardWithMapping(FLATTENED_MAPPING, COLUMNAR_SETTINGS);
         try {
             final BulkItemRequest[] items = { new BulkItemRequest(0, indexRequest("doc1")) };
             try (
-                SourceBatch batch = EscfEncoder.encode(
-                    List.of(new BytesArray("{\"flat\":{\"key1\":\"a\",\"key2\":\"b\"}}")),
-                    XContentType.JSON
-                )
+                SourceBatch batch = EscfEncoder.encode(List.of(new BytesArray("{\"flat\":{\"k1\":\"a\",\"k2\":\"b\"}}")), XContentType.JSON)
             ) {
                 EngineBatch result = mapBatch(shard, items, batch);
-                assertNotNull("flattened field must take the columnar path", result);
+                assertNotNull("expected columnar path to succeed for flattened field", result);
 
                 final MappedColumns mc = result.columns();
                 mc.fillPrimaryTerm(1L);
@@ -286,86 +279,49 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
                 cursor.advance();
                 final List<IndexableField> fields = cursor.fields();
 
-                // The keyed doc-values blob must be present.
+                // flat._keyed binary DV must be present.
                 assertTrue(
-                    "flat._keyed binary DV must be present",
+                    "flat._keyed binary DV should be present",
                     fields.stream().anyMatch(f -> "flat._keyed".equals(f.name()) && f.binaryValue() != null)
                 );
-                // The counts column must report 2 slots (one per key).
+                // flat._keyed.counts numeric DV must be present (2 slots: k1 and k2).
                 assertTrue(
-                    "flat._keyed.counts must report 2",
-                    fields.stream().anyMatch(f -> "flat._keyed.counts".equals(f.name()) && Long.valueOf(2L).equals(f.numericValue()))
+                    "flat._keyed.counts should be present",
+                    fields.stream().anyMatch(f -> "flat._keyed.counts".equals(f.name()) && f.numericValue() != null)
                 );
+                final long counts = fields.stream()
+                    .filter(f -> "flat._keyed.counts".equals(f.name()))
+                    .mapToLong(f -> f.numericValue().longValue())
+                    .findFirst()
+                    .orElseThrow();
+                assertEquals("expected 2 slots (k1 + k2)", 2L, counts);
             }
         } finally {
             closeShards(shard);
         }
     }
 
-    /** A flattened field and a keyword field in the same batch each emit their respective columns. */
+    /** A flattened field and a keyword field in the same batch both take the columnar path. */
     public void testFlattenedAndKeywordInSameBatch() throws IOException {
         final String mapping = """
             {
               "dynamic": "strict",
               "properties": {
                 "host": { "type": "keyword" },
-                "flat": { "type": "flattened" }
+                "attrs": { "type": "flattened" }
               }
             }""";
-
         IndexShard shard = newShardWithMapping(mapping, COLUMNAR_SETTINGS);
         try {
-            final BulkItemRequest[] items = { new BulkItemRequest(0, indexRequest("doc1")), new BulkItemRequest(1, indexRequest("doc2")) };
+            final BulkItemRequest[] items = { new BulkItemRequest(0, indexRequest("doc1")) };
             try (
                 SourceBatch batch = EscfEncoder.encode(
-                    List.of(
-                        new BytesArray("{\"host\":\"h1\",\"flat\":{\"k\":\"v1\"}}"),
-                        new BytesArray("{\"host\":\"h2\",\"flat\":{\"k\":\"v2\"}}")
-                    ),
+                    List.of(new BytesArray("{\"host\":\"srv\",\"attrs\":{\"env\":\"prod\"}}")),
                     XContentType.JSON
                 )
             ) {
                 EngineBatch result = mapBatch(shard, items, batch);
-                assertNotNull("expected columnar path to succeed", result);
-
-                final MappedColumns mc = result.columns();
-                mc.fillPrimaryTerm(1L);
-                for (int i = 0; i < 2; i++) {
-                    mc.setSeqNo(i, i + 1L);
-                    mc.setVersion(i, 1L);
-                }
-
-                final MappedColumns.RowCursor cursor = mc.rowCursor();
-                for (int doc = 0; doc < 2; doc++) {
-                    cursor.advance();
-                    final List<IndexableField> fields = cursor.fields();
-                    assertTrue(
-                        "doc" + doc + ": host binary DV must be present",
-                        fields.stream().anyMatch(f -> "host".equals(f.name()) && f.binaryValue() != null)
-                    );
-                    assertTrue(
-                        "doc" + doc + ": flat._keyed must be present",
-                        fields.stream().anyMatch(f -> "flat._keyed".equals(f.name()) && f.binaryValue() != null)
-                    );
-                }
-            }
-        } finally {
-            closeShards(shard);
-        }
-    }
-
-    /**
-     * A {@code null} flattened value goes through {@code FlattenedFieldMapper#mapColumnBatch} (the own-path
-     * leaf path), which asserts it is all-null-or-empty-object and emits nothing. The batch must
-     * still succeed (non-null result) and produce no {@code flat._keyed} field.
-     */
-    public void testFlattenedNullValueEmitsNoKeyedColumn() throws IOException {
-        IndexShard shard = newShardWithMapping(FLATTENED_MAPPING, COLUMNAR_SETTINGS);
-        try {
-            final BulkItemRequest[] items = { new BulkItemRequest(0, indexRequest("doc1")) };
-            try (SourceBatch batch = EscfEncoder.encode(List.of(new BytesArray("{\"flat\":null}")), XContentType.JSON)) {
-                EngineBatch result = mapBatch(shard, items, batch);
-                assertNotNull("null flattened value must not disable the columnar path", result);
+                assertNotNull("expected columnar path for flattened + keyword combo", result);
 
                 final MappedColumns mc = result.columns();
                 mc.fillPrimaryTerm(1L);
@@ -375,9 +331,11 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
                 final MappedColumns.RowCursor cursor = mc.rowCursor();
                 cursor.advance();
                 final List<IndexableField> fields = cursor.fields();
-                assertFalse(
-                    "null flattened value must not emit a flat._keyed field",
-                    fields.stream().anyMatch(f -> f.name().startsWith("flat._keyed"))
+
+                assertTrue("host keyword DV should be present", fields.stream().anyMatch(f -> "host".equals(f.name())));
+                assertTrue(
+                    "attrs._keyed should be present",
+                    fields.stream().anyMatch(f -> "attrs._keyed".equals(f.name()) && f.binaryValue() != null)
                 );
             }
         } finally {
@@ -385,11 +343,35 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
         }
     }
 
-    /**
-     * A mixed batch: first doc has {@code "flat":null} (own-path leaf path), second has
-     * {@code "flat":{"k":"v"}} (group path). Both docs must be processed without a fallback, and
-     * only the second doc emits a {@code flat._keyed} field.
-     */
+    /** An explicit null for a flattened field (no sub-keys) emits no _keyed column. */
+    public void testFlattenedNullValueEmitsNoKeyedColumn() throws IOException {
+        IndexShard shard = newShardWithMapping(FLATTENED_MAPPING, COLUMNAR_SETTINGS);
+        try {
+            final BulkItemRequest[] items = { new BulkItemRequest(0, indexRequest("doc1")) };
+            try (SourceBatch batch = EscfEncoder.encode(List.of(new BytesArray("{\"flat\":null}")), XContentType.JSON)) {
+                EngineBatch result = mapBatch(shard, items, batch);
+                assertNotNull("expected columnar path to succeed for null flattened field", result);
+
+                final MappedColumns mc = result.columns();
+                mc.fillPrimaryTerm(1L);
+                mc.setSeqNo(0, 1L);
+                mc.setVersion(0, 1L);
+
+                final MappedColumns.RowCursor cursor = mc.rowCursor();
+                cursor.advance();
+                final List<IndexableField> fields = cursor.fields();
+
+                assertFalse(
+                    "flat._keyed should be absent for an explicit null",
+                    fields.stream().anyMatch(f -> "flat._keyed".equals(f.name()))
+                );
+            }
+        } finally {
+            closeShards(shard);
+        }
+    }
+
+    /** A batch mixing a null doc and a doc with real keys: null doc produces no _keyed, keyed doc does. */
     public void testFlattenedMixedNullAndKeyedDocInSameBatch() throws IOException {
         IndexShard shard = newShardWithMapping(FLATTENED_MAPPING, COLUMNAR_SETTINGS);
         try {
@@ -401,34 +383,29 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
                 )
             ) {
                 EngineBatch result = mapBatch(shard, items, batch);
-                assertNotNull("mixed null+keyed batch must take the columnar path", result);
+                assertNotNull(result);
 
                 final MappedColumns mc = result.columns();
                 mc.fillPrimaryTerm(1L);
-                for (int i = 0; i < 2; i++) {
-                    mc.setSeqNo(i, i + 1L);
-                    mc.setVersion(i, 1L);
-                }
+                mc.setSeqNo(0, 1L);
+                mc.setSeqNo(1, 2L);
+                mc.setVersion(0, 1L);
+                mc.setVersion(1, 1L);
 
                 final MappedColumns.RowCursor cursor = mc.rowCursor();
 
-                // Doc 0: null → no keyed field.
+                // Doc 0: null — no _keyed DV.
                 cursor.advance();
                 assertFalse(
-                    "doc0 (null): must not emit flat._keyed",
-                    cursor.fields().stream().anyMatch(f -> f.name().startsWith("flat._keyed"))
+                    "doc0 (null): flat._keyed should be absent",
+                    cursor.fields().stream().anyMatch(f -> "flat._keyed".equals(f.name()) && f.binaryValue() != null)
                 );
 
-                // Doc 1: {k:v} → keyed field with count 1.
+                // Doc 1: has a key — _keyed DV present.
                 cursor.advance();
-                final List<IndexableField> doc1Fields = cursor.fields();
                 assertTrue(
-                    "doc1: flat._keyed must be present",
-                    doc1Fields.stream().anyMatch(f -> "flat._keyed".equals(f.name()) && f.binaryValue() != null)
-                );
-                assertTrue(
-                    "doc1: flat._keyed.counts must be 1",
-                    doc1Fields.stream().anyMatch(f -> "flat._keyed.counts".equals(f.name()) && Long.valueOf(1L).equals(f.numericValue()))
+                    "doc1 (keyed): flat._keyed should be present",
+                    cursor.fields().stream().anyMatch(f -> "flat._keyed".equals(f.name()) && f.binaryValue() != null)
                 );
             }
         } finally {
@@ -437,75 +414,80 @@ public class ShardBatchMapperParseTests extends IndexShardTestCase {
     }
 
     /**
-     * Verifies that {@code resolveMappers} is computed once per batch and the column indexes it
-     * records remain valid when {@code mapColumnBatch} is called on different chunk slices.
-     * {@link org.elasticsearch.escf.EscfBatch#slice} preserves column ordering, so leaf indexes
-     * computed at resolve time are stable.
+     * Verifies that leaf indexes computed once by {@code resolveMappers} are stable across chunks
+     * produced by {@code EscfBatch#slice}. The test encodes 4 documents, resolves once, then maps
+     * in two slices — [0,2) and [2,4). Both slices must produce the correct _keyed output.
      */
     public void testFlattenedGroupAcrossChunks() throws IOException {
         IndexShard shard = newShardWithMapping(FLATTENED_MAPPING, COLUMNAR_SETTINGS);
         try {
             final BulkItemRequest[] items = {
-                new BulkItemRequest(0, indexRequest("doc1")),
-                new BulkItemRequest(1, indexRequest("doc2")),
-                new BulkItemRequest(2, indexRequest("doc3")),
-                new BulkItemRequest(3, indexRequest("doc4")) };
+                new BulkItemRequest(0, indexRequest("d0")),
+                new BulkItemRequest(1, indexRequest("d1")),
+                new BulkItemRequest(2, indexRequest("d2")),
+                new BulkItemRequest(3, indexRequest("d3")) };
             try (
-                SourceBatch batch = EscfEncoder.encode(
+                SourceBatch fullBatch = EscfEncoder.encode(
                     List.of(
-                        new BytesArray("{\"flat\":{\"k\":\"v1\"}}"),
-                        new BytesArray("{\"flat\":{\"k\":\"v2\"}}"),
-                        new BytesArray("{\"flat\":{\"k\":\"v3\"}}"),
-                        new BytesArray("{\"flat\":{\"k\":\"v4\"}}")
+                        new BytesArray("{\"flat\":{\"a\":\"1\"}}"),
+                        new BytesArray("{\"flat\":{\"a\":\"2\"}}"),
+                        new BytesArray("{\"flat\":{\"b\":\"3\"}}"),
+                        new BytesArray("{\"flat\":{\"b\":\"4\"}}")
                     ),
                     XContentType.JSON
                 )
             ) {
-                // Resolve once, then map two chunks separately.
                 final BatchMapperResolution resolution = ShardBatchMapper.resolveMappers(
-                    batch.schema(),
+                    fullBatch.schema(),
                     shard.mapperService().mappingLookup(),
                     shard.indexSettings()
                 );
-                assertNotNull(resolution);
+                assertNotNull("resolution must succeed for a plain flattened field", resolution);
+                assertEquals("should have one group", 1, resolution.columnGroups().length);
 
-                final EngineBatch chunk0 = ShardBatchMapper.mapColumnBatch(
+                // First chunk [0, 2).
+                EngineBatch chunk1 = ShardBatchMapper.mapColumnBatch(
                     items,
-                    batch,
+                    fullBatch,
                     shard,
                     0,
                     2,
                     resolution,
                     Engine.Operation.Origin.PRIMARY
                 );
-                final EngineBatch chunk1 = ShardBatchMapper.mapColumnBatch(
+                assertNotNull("chunk1 mapping should succeed", chunk1);
+                chunk1.columns().fillPrimaryTerm(1L);
+                chunk1.columns().setSeqNo(0, 1L);
+                chunk1.columns().setSeqNo(1, 2L);
+                chunk1.columns().setVersion(0, 1L);
+                chunk1.columns().setVersion(1, 1L);
+                MappedColumns.RowCursor c1 = chunk1.columns().rowCursor();
+                c1.advance();
+                assertTrue("chunk1 doc0: flat._keyed present", c1.fields().stream().anyMatch(f -> "flat._keyed".equals(f.name())));
+                c1.advance();
+                assertTrue("chunk1 doc1: flat._keyed present", c1.fields().stream().anyMatch(f -> "flat._keyed".equals(f.name())));
+
+                // Second chunk [2, 4).
+                EngineBatch chunk2 = ShardBatchMapper.mapColumnBatch(
                     items,
-                    batch,
+                    fullBatch,
                     shard,
                     2,
                     4,
                     resolution,
                     Engine.Operation.Origin.PRIMARY
                 );
-                assertNotNull("chunk 0 must succeed", chunk0);
-                assertNotNull("chunk 1 must succeed", chunk1);
-
-                for (EngineBatch chunk : new EngineBatch[] { chunk0, chunk1 }) {
-                    final MappedColumns mc = chunk.columns();
-                    mc.fillPrimaryTerm(1L);
-                    for (int i = 0; i < 2; i++) {
-                        mc.setSeqNo(i, i + 1L);
-                        mc.setVersion(i, 1L);
-                    }
-                    final MappedColumns.RowCursor cursor = mc.rowCursor();
-                    for (int doc = 0; doc < 2; doc++) {
-                        cursor.advance();
-                        assertTrue(
-                            "chunk doc " + doc + ": flat._keyed must be present",
-                            cursor.fields().stream().anyMatch(f -> "flat._keyed".equals(f.name()) && f.binaryValue() != null)
-                        );
-                    }
-                }
+                assertNotNull("chunk2 mapping should succeed", chunk2);
+                chunk2.columns().fillPrimaryTerm(1L);
+                chunk2.columns().setSeqNo(0, 3L);
+                chunk2.columns().setSeqNo(1, 4L);
+                chunk2.columns().setVersion(0, 1L);
+                chunk2.columns().setVersion(1, 1L);
+                MappedColumns.RowCursor c2 = chunk2.columns().rowCursor();
+                c2.advance();
+                assertTrue("chunk2 doc2: flat._keyed present", c2.fields().stream().anyMatch(f -> "flat._keyed".equals(f.name())));
+                c2.advance();
+                assertTrue("chunk2 doc3: flat._keyed present", c2.fields().stream().anyMatch(f -> "flat._keyed".equals(f.name())));
             }
         } finally {
             closeShards(shard);

@@ -1575,9 +1575,7 @@ public final class KeywordFieldMapper extends FieldMapper {
         // strings. This is possible as an eventual user option.
 
         if (fieldType().usesArrayOrderBinaryDocValues()) {
-            // retainValues=false: mapColumnBatchArrayOrder appends each value to the document blob before the
-            // cursor advances, so no value has to outlive the nextDoc() that moves past it.
-            mapColumnBatchArrayOrder(ctx, EscfColumnTransforms.utf8Cursor(source, false), emitTerms, emitDvs, emitFallback);
+            mapColumnBatchArrayOrder(ctx, source, emitTerms, emitDvs, emitFallback);
         } else {
             mapColumnBatchSingleValue(ctx, source, emitTerms, emitDvs, emitFallback);
         }
@@ -1585,13 +1583,16 @@ public final class KeywordFieldMapper extends FieldMapper {
 
     private void mapColumnBatchArrayOrder(
         BatchMappingContext ctx,
-        ObjectTupleCursor<BytesRef> cursor,
+        EscfColumn source,
         boolean emitTerms,
         boolean emitDvs,
         boolean emitFallback
     ) {
         final int docCount = ctx.docCount();
 
+        // retainValues=false: each value is appended to the document blob before the cursor advances, so no
+        // value has to outlive the nextDoc() that moves past it.
+        final ObjectTupleCursor<BytesRef> cursor = EscfColumnTransforms.utf8Cursor(source, false);
         // TODO: make the batch return these column builders to wire up recycling
         final EscfColumnBuilder terms = emitTerms ? mergeStringColumn() : null;
         final EscfColumnBuilder binaryDvs = emitDvs ? mergeStringColumn() : null;
@@ -1602,18 +1603,13 @@ public final class KeywordFieldMapper extends FieldMapper {
 
         int currentDoc = -1;
         boolean ignoredThisDoc = false;
-        // Batch-scoped blob buffer; null when the blob is not emitted. Each document's slots are appended as they
-        // are read and the finished blob is handed to binaryDvs.setString, which copies it out immediately — so the
-        // buffer is free to be rewritten from position 0 for the next document.
+        // Buffer null when not emitted. Each document's slots are appended as they are read and
+        // the finished blob is handed to binaryDvs.setString, which copies it out immediately, so the
+        // buffer is free to be rewritten.
         final BytesRefBuilder docBlob = emitDvs ? new BytesRefBuilder() : null;
-        // Reusable view handed to setString. Needed instead of docBlob.get() because the single-slot case emits a
-        // sub-range at a non-zero offset.
-        final BytesRef blobView = emitDvs ? new BytesRef() : null;
         int pos = 0;
         int docSlotCount = 0;
-        // A lone non-null slot is stored raw, so remember where the first slot's value bytes landed.
-        int firstValueStart = 0;
-        int firstValueLength = 0;
+        int lastValueLength = 0;
         // True when the current doc has at least one non-null slot; gates binary dv blob emission.
         boolean hasNonNull = false;
 
@@ -1625,13 +1621,10 @@ public final class KeywordFieldMapper extends FieldMapper {
                 if (binaryDvs != null && docSlotCount > 0) {
                     dvCounts.setLong(currentDoc, docSlotCount);
                     if (hasNonNull) {
-                        // TODO: append slots straight into the column builder's stream. The blob buffer removes the
-                        // per-document allocation, but the bytes are still copied once on setString.
-                        blobView.bytes = docBlob.bytes();
-                        // A single non-null slot is stored raw, so skip the length prefix appendSlot wrote for it.
-                        blobView.offset = docSlotCount == 1 ? firstValueStart : 0;
-                        blobView.length = docSlotCount == 1 ? firstValueLength : pos;
-                        binaryDvs.setString(currentDoc, blobView);
+                        // TODO: considering appending slots straight into the column builder's stream.
+                        // A single non-null slot is stored raw, so drop its length prefix; both cases end at pos.
+                        final int length = docSlotCount == 1 ? lastValueLength : pos;
+                        binaryDvs.setString(currentDoc, docBlob.bytes(), pos - length, length);
                     }
                     pos = 0;
                     docSlotCount = 0;
@@ -1694,13 +1687,8 @@ public final class KeywordFieldMapper extends FieldMapper {
                 terms.setString(currentDoc, binaryValue);
             }
             if (binaryDvs != null) {
-                final boolean firstSlot = docSlotCount == 0;
                 pos = MultiValuedBinaryDocValuesField.ArrayOrderInlineNull.appendSlot(docBlob, pos, binaryValue);
-                if (firstSlot) {
-                    // appendSlot wrote [len+1][value], so the value bytes end at pos.
-                    firstValueLength = binaryValue.length;
-                    firstValueStart = pos - firstValueLength;
-                }
+                lastValueLength = binaryValue.length;
                 docSlotCount++;
                 hasNonNull = true;
             }

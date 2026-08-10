@@ -79,7 +79,6 @@ import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.text.NumberFormat;
 import java.time.DateTimeException;
 import java.time.Instant;
@@ -523,13 +522,13 @@ public final class DateFieldMapper extends FieldMapper {
         }
     }
 
-    public static final TypeParser MILLIS_PARSER = createTypeParserWithLegacySupport(
-        (n, c) -> new Builder(n, Resolution.MILLISECONDS, c.getDateFormatter(), c.scriptCompiler(), c.getIndexSettings())
-    );
+    public static final TypeParser MILLIS_PARSER = createTypeParserWithLegacySupport((n, c) -> {
+        return new Builder(n, Resolution.MILLISECONDS, c.getDateFormatter(), c.scriptCompiler(), c.getIndexSettings());
+    });
 
-    public static final TypeParser NANOS_PARSER = createTypeParserWithLegacySupport(
-        (n, c) -> new Builder(n, Resolution.NANOSECONDS, c.getDateFormatter(), c.scriptCompiler(), c.getIndexSettings())
-    );
+    public static final TypeParser NANOS_PARSER = createTypeParserWithLegacySupport((n, c) -> {
+        return new Builder(n, Resolution.NANOSECONDS, c.getDateFormatter(), c.scriptCompiler(), c.getIndexSettings());
+    });
 
     public static final class DateFieldType extends MappedFieldType {
         final DateFormatter dateTimeFormatter;
@@ -929,7 +928,7 @@ public final class DateFieldMapper extends FieldMapper {
                 long minValue = Long.MAX_VALUE;
                 long maxValue = Long.MIN_VALUE;
                 List<LeafReaderContext> leaves = reader.leaves();
-                if (leaves.isEmpty()) {
+                if (leaves.size() == 0) {
                     // no data, so nothing matches
                     return Relation.DISJOINT;
                 }
@@ -1277,14 +1276,7 @@ public final class DateFieldMapper extends FieldMapper {
     public boolean supportsColumnarParse(IndexSettings indexSettings) {
         // Columnar support requires strict-columnar index mode and a plain doc-values-only date
         // field. doc_values.multi_value and ignore_malformed are not implemented by mapColumnBatch
-        // but are deliberately not rejected here — see the matching comment on
-        // NumberFieldMapper#supportsColumnarParse for why refusing late is equivalent and cheaper.
-        // In short: multi-valued documents arrive as ARRAY columns and null-bearing ones as UNION
-        // columns, both of which the kind switch in mapColumnBatch throws on, and an unparseable
-        // value throws out of fieldType().parse in datesFromStrings. Every one of those cases falls
-        // back to the row path, which handles it correctly. The single non-null value that does get
-        // through is encoded identically either way, because FieldArrayContext#addToLuceneDocument
-        // skips the .offsets sidecar for it in strict columnar.
+        // but are deliberately not rejected here instead rejected at parse time.
         return indexSettings.getMode().isStrictColumnar()
             && docValuesParameters.enabled()
             && indexed == false
@@ -1327,7 +1319,7 @@ public final class DateFieldMapper extends FieldMapper {
                 }
                 // else leave absent — no slot written, validity bit stays clear
             } else {
-                builder.setLong(doc, fieldType().parse(new String(value.bytes, value.offset, value.length, StandardCharsets.UTF_8)));
+                builder.setLong(doc, fieldType().parse(value.utf8ToString()));
             }
         }
         return builder.finish(source.docCount());
