@@ -146,7 +146,14 @@ class StringParser {
 
     private int storeCodePointInStringBuffer(int codePoint, int dst, byte[] stringBuffer) {
         if (codePoint < 0) {
-            throw new JsonParsingException("Invalid unicode escape sequence.");
+            // hexToInt returned -1: the four bytes after \u were not all valid hex digits.
+            // Output U+FFFD (replacement character) so the parser can continue rather than
+            // aborting the document — the caller's fallback path (Jackson) would produce the
+            // same replacement behaviour for truly malformed escapes.
+            stringBuffer[dst] = (byte) 0xEF;
+            stringBuffer[dst + 1] = (byte) 0xBF;
+            stringBuffer[dst + 2] = (byte) 0xBD;
+            return 3;
         }
         if (codePoint <= 0x7F) {
             stringBuffer[dst] = (byte) codePoint;

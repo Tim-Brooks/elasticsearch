@@ -132,12 +132,14 @@ public final class EscfEncoder implements SourceBatchEncoder {
             // SIMD parser. reset() runs both stages before we touch any row state, so nothing has
             // been staged: fall through to Jackson, which either handles the document or surfaces
             // the canonical parse error.
+            byte[] raw = simdInput(source);
             logger.info(
-                "SIMD JSON fallback [{}]: {}\nsource ({} bytes): {}",
+                "SIMD JSON fallback [{}]: {}\nsource ({} bytes, utf8 view): {}\nunicode escapes (raw hex): {}",
                 e.getClass().getSimpleName(),
                 e.getMessage(),
                 source.length(),
                 source.utf8ToString(),
+                unicodeEscapeHex(raw, source.length()),
                 e
             );
             return null;
@@ -176,6 +178,31 @@ public final class EscfEncoder implements SourceBatchEncoder {
             assert pos == len : pos + " != " + len;
         }
         return scratch;
+    }
+
+    /**
+     * Scans {@code buf[0..len)} for {@code \u} byte sequences (0x5C 0x75) and returns a string
+     * showing each occurrence with the 6 raw bytes printed as hex. This bypasses
+     * {@code utf8ToString()} / {@code UnicodeUtil#UTF8toUTF16}, which replaces malformed UTF-8
+     * with U+FFFD and can hide what bytes are actually following the {@code \u} prefix.
+     */
+    private static String unicodeEscapeHex(byte[] buf, int len) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < len - 1; i++) {
+            if ((buf[i] & 0xFF) == 0x5C && (buf[i + 1] & 0xFF) == 0x75) {
+                if (sb.length() > 0) {
+                    sb.append(", ");
+                }
+                sb.append('[');
+                int end = Math.min(i + 6, len);
+                for (int j = i; j < end; j++) {
+                    if (j > i) sb.append(' ');
+                    sb.append(String.format("%02x", buf[j] & 0xFF));
+                }
+                sb.append(']');
+            }
+        }
+        return sb.isEmpty() ? "(none)" : sb.toString();
     }
 
     @Override
