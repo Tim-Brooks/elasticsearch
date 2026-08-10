@@ -155,6 +155,55 @@ public class EscfEncoderSimdJsonTests extends ESTestCase {
             {"keep":true}""");
     }
 
+    /**
+     * Same leaf name at the same traversal position but under different parent objects — the
+     * positional prediction must check both name identity AND parent index, so "x" nested inside
+     * "a" and "x" at the root are treated as distinct columns.
+     */
+    public void testSameNameDifferentParent() throws IOException {
+        assertSameOutput("""
+            {"a":{"x":1},"y":2}""", """
+            {"x":10,"y":20}""", """
+            {"a":{"x":3},"y":4}""");
+    }
+
+    /**
+     * Field order permuted between documents — the positional prediction repairs on every
+     * permuted row and must remain correct rather than assigning the wrong column index.
+     */
+    public void testFieldOrderPermuted() throws IOException {
+        assertSameOutput("""
+            {"a":1,"b":2,"c":3}""", """
+            {"c":30,"a":10,"b":20}""", """
+            {"b":200,"c":300,"a":100}""");
+    }
+
+    /**
+     * A field absent in one document but present in the next — the prediction array grows
+     * on the longer document and shrinks gracefully on the shorter one (fieldPos stops early).
+     */
+    public void testAbsentFieldBetweenDocs() throws IOException {
+        assertSameOutput("""
+            {"a":1,"b":2,"c":3}""", """
+            {"a":10}""", """
+            {"a":100,"b":200,"c":300}""");
+    }
+
+    /**
+     * Rotating field sets across many rows — exercises repeated prediction repair and confirms
+     * the prediction degrades gracefully (correct output on every permutation, not just the
+     * first two documents).
+     */
+    public void testRotatingFieldSets() throws IOException {
+        assertSameOutput("""
+            {"x":1,"y":2}""", """
+            {"y":20,"z":30}""", """
+            {"z":300,"x":100}""", """
+            {"x":1000,"y":2000}""", """
+            {"y":20000,"z":30000}""", """
+            {"z":300000,"x":100000}""");
+    }
+
     /** Zero-offset contiguous source — direct array pass-through, no copy needed. */
     public void testZeroOffsetArrayBackedSource() throws IOException {
         byte[] json = "{\"k\":\"v\",\"n\":123}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -234,11 +283,11 @@ public class EscfEncoderSimdJsonTests extends ESTestCase {
     }
 
     /**
-     * Document containing a JSON unicode escape sequence: the SIMD parser rejects it and falls
-     * back to Jackson. The final output should still be correct.
+     * Document containing a valid JSON unicode escape sequence: SIMD handles {@code \\uXXXX}
+     * where all four hex digits are valid, producing the same output as Jackson.
      */
-    public void testUnicodeEscapeFallsBackToJackson() throws IOException {
-        // A is 'A' in JSON unicode-escape syntax. SIMD rejects this; Jackson handles it.
+    public void testValidUnicodeEscape() throws IOException {
+        // A = 'A'; all four hex digits are valid, so SIMD processes this directly.
         assertSameOutput("""
             {"name":"\\u0041lice","age":30}""");
     }

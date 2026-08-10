@@ -168,12 +168,21 @@ public class SimdJsonXContentParserTests extends ESTestCase {
         assertMatchesJackson(json, parser);
     }
 
-    /** Verifies that the simdjson StringParser fails on JSON unicode escape sequences (known pre-existing limitation). */
+    /**
+     * Verifies that the simdjson StringParser correctly decodes JSON unicode escape sequences with
+     * valid hex digits via the shared {@code walkToTape}/{@link StringParser} path.
+     *
+     * <p>{@code \\u0041} has four valid hex digits (0, 0, 4, 1), so {@code hexToInt} returns
+     * 65 — the code point for {@code 'A'}. The parser writes byte 65 to its string buffer and
+     * the resulting value is {@code "A"}.
+     */
     public void testSimdJsonParseApiOnUnicodeEscapes() {
-        // Confirm the bug is in the shared walkToTape/StringParser path, not our cursor adapter.
         SimdJsonParser direct = new SimdJsonParser(4096, 32);
         byte[] bytes = "{\"k\":\"\\u0041\"}".getBytes(StandardCharsets.UTF_8);
-        expectThrows(JsonParsingException.class, () -> direct.parse(bytes, bytes.length));
+        JsonValue root = direct.parse(bytes, bytes.length);
+        JsonValue kVal = root.get("k");
+        assertNotNull(kVal);
+        assertEquals("A", kVal.asString());
     }
 
     public void testOptimizedTextBytesDoNotOverrun() throws IOException {

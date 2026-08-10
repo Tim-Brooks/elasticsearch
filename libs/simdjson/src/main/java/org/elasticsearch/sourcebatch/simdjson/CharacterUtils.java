@@ -1393,8 +1393,12 @@ class CharacterUtils {
     // https://lemire.me/blog/2019/04/17/parsing-short-hexadecimal-strings-efficiently/ with additional optimizations
     // proposed in this comment: https://lemire.me/blog/2019/04/17/parsing-short-hexadecimal-strings-efficiently/#comment-402686.
     static int hexToInt(byte[] buff, int offset) {
-        int v1 = HEX_DIGIT_TO_INT[630 + getUnsignedByte(buff, offset)];
-        int v2 = HEX_DIGIT_TO_INT[420 + getUnsignedByte(buff, offset + 1)];
+        // Sub-table offsets: the table uses non-uniform spacing because the hex digit ASCII
+        // range (48-102) is narrower than 210. The actual offsets derived from the table are
+        // 0, 210, 396, 600 (not the uniform 0, 210, 420, 630 the blog post's generic formula
+        // suggests). Each sub-table is non-overlapping with its neighbours.
+        int v1 = HEX_DIGIT_TO_INT[600 + getUnsignedByte(buff, offset)];
+        int v2 = HEX_DIGIT_TO_INT[396 + getUnsignedByte(buff, offset + 1)];
         int v3 = HEX_DIGIT_TO_INT[210 + getUnsignedByte(buff, offset + 2)];
         int v4 = HEX_DIGIT_TO_INT[getUnsignedByte(buff, offset + 3)];
         return v1 | v2 | v3 | v4;

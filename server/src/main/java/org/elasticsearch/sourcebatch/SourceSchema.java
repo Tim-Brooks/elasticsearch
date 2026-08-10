@@ -9,9 +9,6 @@
 
 package org.elasticsearch.sourcebatch;
 
-import com.carrotsearch.hppc.ObjectIntHashMap;
-import com.carrotsearch.hppc.ObjectIntMap;
-
 import org.apache.lucene.util.UnicodeUtil;
 
 import java.util.ArrayList;
@@ -171,30 +168,58 @@ public final class SourceSchema {
         return chain;
     }
 
-    private record FieldKey(int parentIdx, String name) {}
-
     /**
-     * Holds a parallel name list, parent array, and lookup map for one level of schema fields.
+     * Holds a parallel name list, parent array, and a flat open-addressed lookup table for one
+     * level of schema fields.
+     *
+     * <p>The lookup table uses four parallel arrays (hashes, parents, names, values) with linear
+     * probing. Capacity is always a power of two; empty slots are identified by {@code hashes[i] == 0}
+     * (keys that hash to zero are stored as 1 to preserve the sentinel). Load factor is kept below
+     * 75% to bound probe lengths. No entry is ever deleted (schema is append-only), so linear
+     * probing terminates correctly without tombstones.
+     *
+     * <p>The probe condition {@code hashes[i] == h && parents[i] == parent && (names[i] == name ||
+     * names[i].equals(name))} tries identity first to exploit the fact that both the SIMD parser
+     * and Jackson canonicalize field-name {@link String} instances — the same field in the same JVM
+     * returns the same reference, so {@code ==} succeeds without calling {@code equals}.
      */
     private static final class FieldLevel {
         public static final int MISSING = -1;
         private final List<String> names;
         private int[] parents;
-        private final ObjectIntMap<FieldKey> lookup;
+
+        private int[] tableHashes;
+        private int[] tableParents;
+        private String[] tableNames;
+        private int[] tableValues;
+        private int tableSize;
+        private int tableMask;
 
         FieldLevel(int initialCapacity) {
             this.names = new ArrayList<>();
             this.parents = new int[initialCapacity];
-            this.lookup = new ObjectIntHashMap<>(initialCapacity);
+            int cap = tableCap(initialCapacity);
+            tableHashes = new int[cap];
+            tableParents = new int[cap];
+            tableNames = new String[cap];
+            tableValues = new int[cap];
+            tableMask = cap - 1;
         }
 
         FieldLevel(List<String> names, int[] parents) {
             this.names = new ArrayList<>(names);
             this.parents = Arrays.copyOf(parents, names.size());
-            this.lookup = new ObjectIntHashMap<>(names.size());
-            for (int i = 0; i < names.size(); i++) {
-                lookup.put(new FieldKey(parents[i], names.get(i)), i);
+            int n = names.size();
+            int cap = tableCap(n);
+            tableHashes = new int[cap];
+            tableParents = new int[cap];
+            tableNames = new String[cap];
+            tableValues = new int[cap];
+            tableMask = cap - 1;
+            for (int i = 0; i < n; i++) {
+                rawInsert(hash(parents[i], names.get(i)), parents[i], names.get(i), i);
             }
+            tableSize = n;
         }
 
         int count() {
@@ -210,15 +235,32 @@ public final class SourceSchema {
         }
 
         int find(String name, int parentIdx) {
-            return lookup.getOrDefault(new FieldKey(parentIdx, name), MISSING);
+            int h = hash(parentIdx, name);
+            int i = h & tableMask;
+            while (true) {
+                int sh = tableHashes[i];
+                if (sh == 0) {
+                    return MISSING;
+                }
+                if (sh == h && tableParents[i] == parentIdx && (tableNames[i] == name || tableNames[i].equals(name))) {
+                    return tableValues[i];
+                }
+                i = (i + 1) & tableMask;
+            }
         }
 
         int append(String name, int parentIdx) {
-            // Use a transient key for the lookup so it never escapes this method and stays eligible for scalar
-            // replacement on the common hit path.
-            int existing = lookup.getOrDefault(new FieldKey(parentIdx, name), MISSING);
-            if (existing != MISSING) {
-                return existing;
+            int h = hash(parentIdx, name);
+            int i = h & tableMask;
+            while (true) {
+                int sh = tableHashes[i];
+                if (sh == 0) {
+                    break;
+                }
+                if (sh == h && tableParents[i] == parentIdx && (tableNames[i] == name || tableNames[i].equals(name))) {
+                    return tableValues[i];
+                }
+                i = (i + 1) & tableMask;
             }
             int index = names.size();
             if (index >= MAX_FIELDS) {
@@ -232,8 +274,53 @@ public final class SourceSchema {
                 parents = Arrays.copyOf(parents, parents.length << 1);
             }
             parents[index] = parentIdx;
-            lookup.put(new FieldKey(parentIdx, name), index);
+            tableSize++;
+            if (tableSize * 4 > tableHashes.length * 3) {
+                // Rehash doubles the table and re-inserts all entries (including the new one).
+                rehash();
+            } else {
+                tableHashes[i] = h;
+                tableParents[i] = parentIdx;
+                tableNames[i] = name;
+                tableValues[i] = index;
+            }
             return index;
+        }
+
+        private void rawInsert(int h, int parent, String name, int value) {
+            int i = h & tableMask;
+            while (tableHashes[i] != 0) {
+                i = (i + 1) & tableMask;
+            }
+            tableHashes[i] = h;
+            tableParents[i] = parent;
+            tableNames[i] = name;
+            tableValues[i] = value;
+        }
+
+        private void rehash() {
+            int newCap = tableHashes.length * 2;
+            tableHashes = new int[newCap];
+            tableParents = new int[newCap];
+            tableNames = new String[newCap];
+            tableValues = new int[newCap];
+            tableMask = newCap - 1;
+            int n = names.size();
+            for (int idx = 0; idx < n; idx++) {
+                rawInsert(hash(parents[idx], names.get(idx)), parents[idx], names.get(idx), idx);
+            }
+        }
+
+        private static int hash(int parent, String name) {
+            int h = (parent * 0x9e3779b9) ^ name.hashCode();
+            h ^= h >>> 16;
+            return h == 0 ? 1 : h;
+        }
+
+        /** Returns a power-of-two table capacity that keeps load below 75% for {@code n} entries. */
+        private static int tableCap(int n) {
+            int min = Math.max(n * 4 / 3 + 2, 16);
+            return Integer.highestOneBit(min - 1) << 1;
         }
     }
 }

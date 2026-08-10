@@ -18,6 +18,9 @@ import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.support.AbstractXContentParser;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -66,13 +69,46 @@ import static org.elasticsearch.sourcebatch.simdjson.Tape.TRUE_VALUE;
 public final class SimdJsonXContentParser extends AbstractXContentParser {
 
     // ------------------------------------------------------------------
-    // Name cache — open-addressed, byte[] content keyed, survives reset()
+    // Name cache — open-addressed, quad-keyed, survives reset()
+    //
+    // For names up to MAX_INLINE_BYTES (16 bytes), the key bytes are
+    // packed into up to MAX_INLINE_QUADS (4) int slots stored inline in
+    // cacheQuads[], compared as ints — no Arrays.equals call, no byte[]
+    // indirection. Longer names keep a byte[] copy in cacheKeys[] and
+    // use the old Arrays.equals path.
+    //
+    // The stored hash (cacheHashes[]) acts as a cheap prefilter: only
+    // when the 32-bit hash matches do we compare lengths and then quads.
+    // Empty slots have cacheHashes[i] == 0 AND cacheNames[i] == null;
+    // a key that hashes to 0 is treated as having hash 1 (one-off in
+    // hashName()) to keep the slot-empty sentinel unambiguous.
+    //
+    // Hash: native-order 64-bit VarHandle reads, 4-bytes at a time, with
+    // individually loaded tail bytes (never reads past off+len, so the
+    // SIMD string-buffer overshoot cannot contaminate the key).
     // ------------------------------------------------------------------
 
     private static final int CACHE_CAPACITY = 2048; // must be power of two
     private static final int CACHE_MAX_COUNT = CACHE_CAPACITY * 3 / 4; // 75% load factor
+    /** Field names longer than this fall back to a byte[] copy + Arrays.equals. */
+    private static final int MAX_INLINE_BYTES = 16;
+    /** Number of int quads needed per cache slot for inline keys. */
+    private static final int MAX_INLINE_QUADS = MAX_INLINE_BYTES / Integer.BYTES; // 4
+
+    /** VarHandle for reading 4 bytes from a byte[] as a native-order int. */
+    private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.nativeOrder());
 
     private final String[] cacheNames = new String[CACHE_CAPACITY];
+    /** Stored hash per slot; 0 means empty. Keys that hash to 0 are stored as 1. */
+    private final int[] cacheHashes = new int[CACHE_CAPACITY];
+    /** Stored byte length per slot. */
+    private final int[] cacheLens = new int[CACHE_CAPACITY];
+    /**
+     * Inline int quads: {@code cacheQuads[i * MAX_INLINE_QUADS + q]} holds the q-th quad of
+     * the name at slot i. Only populated when {@code cacheLens[i] <= MAX_INLINE_BYTES}.
+     */
+    private final int[] cacheQuads = new int[CACHE_CAPACITY * MAX_INLINE_QUADS];
+    /** Byte-array copies for names longer than {@link #MAX_INLINE_BYTES}. Null otherwise. */
     private final byte[][] cacheKeys = new byte[CACHE_CAPACITY][];
     private int cacheCount;
 
@@ -499,35 +535,135 @@ public final class SimdJsonXContentParser extends AbstractXContentParser {
      * return zero allocation; misses decode UTF-8 and store the result. Once the cache reaches
      * its capacity limit, decodes fall through without caching so unbounded distinct-key input
      * cannot exhaust heap.
+     *
+     * <p>For names up to {@value #MAX_INLINE_BYTES} bytes, key comparison is done via up to
+     * {@value #MAX_INLINE_QUADS} int-equality checks (no {@code Arrays.equals} call). Longer names
+     * compare against a stored {@code byte[]} copy.
+     *
+     * <p>No byte is read beyond {@code stringBuffer[off + len - 1]}: the SIMD string-buffer copy
+     * loop overshoots the logical string end by up to one vector width, so those bytes are
+     * in-bounds but may contain stale data. Tail bytes (remainder after the last full int) are
+     * loaded individually rather than as a masked aligned int.
      */
     private String lookupName(int off, int len) {
-        int h = fnvHash(stringBuffer, off, len) & (CACHE_CAPACITY - 1);
-        for (int i = h;; i = (i + 1) & (CACHE_CAPACITY - 1)) {
-            byte[] key = cacheKeys[i];
-            if (key == null) {
-                // cache miss — decode and insert if there is room
+        int h = hashName(stringBuffer, off, len);
+        int slot = h & (CACHE_CAPACITY - 1);
+        for (int i = slot;; i = (i + 1) & (CACHE_CAPACITY - 1)) {
+            int sh = cacheHashes[i];
+            if (sh == 0) {
+                // empty slot — cache miss
                 String s = new String(stringBuffer, off, len, StandardCharsets.UTF_8);
                 if (cacheCount < CACHE_MAX_COUNT) {
-                    byte[] copy = Arrays.copyOfRange(stringBuffer, off, off + len);
-                    cacheKeys[i] = copy;
+                    cacheHashes[i] = h;
+                    cacheLens[i] = len;
                     cacheNames[i] = s;
+                    if (len <= MAX_INLINE_BYTES) {
+                        storeInlineQuads(i, stringBuffer, off, len);
+                    } else {
+                        cacheKeys[i] = Arrays.copyOfRange(stringBuffer, off, off + len);
+                    }
                     cacheCount++;
                 }
                 return s;
             }
-            if (Arrays.equals(key, 0, key.length, stringBuffer, off, off + len)) {
+            if (sh == h && cacheLens[i] == len && keysMatch(i, stringBuffer, off, len)) {
                 return cacheNames[i]; // cache hit — zero allocation
             }
-            // collision — linear probe
+            // hash or length mismatch — linear probe
         }
     }
 
-    private static int fnvHash(byte[] b, int off, int len) {
-        int h = 0x811c9dc5;
-        for (int i = off, end = off + len; i < end; i++) {
-            h ^= b[i] & 0xFF;
-            h *= 0x01000193;
+    /**
+     * Compares the key at cache slot {@code i} against {@code buf[off, off+len)}.
+     * For short keys (≤ {@value #MAX_INLINE_BYTES}), compares stored int quads;
+     * for long keys, delegates to {@code Arrays.equals}.
+     */
+    private boolean keysMatch(int i, byte[] buf, int off, int len) {
+        if (len <= MAX_INLINE_BYTES) {
+            int base = i * MAX_INLINE_QUADS;
+            int fullQuads = len >>> 2;         // number of complete 4-byte groups
+            int tail = len & 3;                // remaining bytes after the last full group
+            // Compare complete 4-byte groups as ints
+            for (int q = 0; q < fullQuads; q++) {
+                if (cacheQuads[base + q] != (int) INT_HANDLE.get(buf, off + q * Integer.BYTES)) {
+                    return false;
+                }
+            }
+            // Compare tail bytes individually (never reads past off+len)
+            int tailOff = off + fullQuads * Integer.BYTES;
+            int storedTail = cacheQuads[base + fullQuads]; // pre-assembled tail int from insert
+            return switch (tail) {
+                case 0 -> true;
+                case 1 -> (storedTail & 0xFF) == (buf[tailOff] & 0xFF);
+                case 2 -> (storedTail & 0xFFFF) == ((buf[tailOff] & 0xFF) | ((buf[tailOff + 1] & 0xFF) << 8));
+                case 3 -> storedTail == ((buf[tailOff] & 0xFF) | ((buf[tailOff + 1] & 0xFF) << 8) | ((buf[tailOff + 2] & 0xFF) << 16));
+                default -> throw new AssertionError("impossible tail: " + tail);
+            };
         }
-        return h;
+        byte[] key = cacheKeys[i];
+        return Arrays.equals(key, 0, key.length, buf, off, off + len);
+    }
+
+    /**
+     * Packs the name bytes at {@code buf[off, off+len)} into the inline quad slots for cache
+     * slot {@code i}. Called only when {@code len <= MAX_INLINE_BYTES}. Tail bytes (the partial
+     * last group, if any) are stored in a single int without reading past {@code off+len}.
+     */
+    private void storeInlineQuads(int i, byte[] buf, int off, int len) {
+        int base = i * MAX_INLINE_QUADS;
+        int fullQuads = len >>> 2;
+        int tail = len & 3;
+        for (int q = 0; q < fullQuads; q++) {
+            cacheQuads[base + q] = (int) INT_HANDLE.get(buf, off + q * Integer.BYTES);
+        }
+        if (tail > 0) {
+            int tailOff = off + fullQuads * Integer.BYTES;
+            int t = buf[tailOff] & 0xFF;
+            if (tail >= 2) t |= (buf[tailOff + 1] & 0xFF) << 8;
+            if (tail == 3) t |= (buf[tailOff + 2] & 0xFF) << 16;
+            cacheQuads[base + fullQuads] = t;
+        }
+    }
+
+    /**
+     * Computes a 32-bit hash of {@code buf[off, off+len)} suitable for indexing the name cache.
+     * Reads 4 bytes at a time via a native-order {@link VarHandle}; never reads beyond
+     * {@code off + len}. Returns 1 instead of 0 so that the value 0 can serve as the
+     * empty-slot sentinel in {@link #cacheHashes}.
+     */
+    private static int hashName(byte[] buf, int off, int len) {
+        // Murmur3-style: 32-bit multiply-xor with a final avalanche.
+        int h = 0x9747b28c ^ len;
+        int pos = off;
+        int rem = len;
+        while (rem >= 4) {
+            int k = (int) INT_HANDLE.get(buf, pos);
+            k *= 0xcc9e2d51;
+            k = Integer.rotateLeft(k, 15);
+            k *= 0x1b873593;
+            h ^= k;
+            h = Integer.rotateLeft(h, 13);
+            h = h * 5 + 0xe6546b64;
+            pos += 4;
+            rem -= 4;
+        }
+        // Tail: 1–3 bytes, loaded individually (never past off+len)
+        if (rem > 0) {
+            int k = buf[pos] & 0xFF;
+            if (rem >= 2) k |= (buf[pos + 1] & 0xFF) << 8;
+            if (rem == 3) k |= (buf[pos + 2] & 0xFF) << 16;
+            k *= 0xcc9e2d51;
+            k = Integer.rotateLeft(k, 15);
+            k *= 0x1b873593;
+            h ^= k;
+        }
+        // Avalanche
+        h ^= h >>> 16;
+        h *= 0x85ebca6b;
+        h ^= h >>> 13;
+        h *= 0xc2b2ae35;
+        h ^= h >>> 16;
+        // Map 0 to 1 so 0 stays the empty-slot sentinel
+        return h == 0 ? 1 : h;
     }
 }

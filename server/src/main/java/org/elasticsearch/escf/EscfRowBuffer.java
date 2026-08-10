@@ -44,6 +44,24 @@ public final class EscfRowBuffer {
     private int parentDepth;
 
     /**
+     * Positional column prediction: the Nth call to {@link #addLeaf} within a document is
+     * predicted to produce the same column as the Nth call in the previous document. All three
+     * arrays are parallel and grow together. Survive across {@link #beginRow()} — their value is
+     * in persisting from one document to the next.
+     *
+     * <p>The prediction is a cache, never a source of truth. A miss (name or parent mismatch)
+     * falls through to the authoritative {@link SourceSchema#appendLeaf} and repairs the slot.
+     * Two guards are required: name identity alone is unsound because {@code {"a":{"x":1}}} and
+     * {@code {"x":1}} place a leaf named {@code "x"} at the same traversal position under
+     * different parent indices (genuinely different columns).
+     */
+    private String[] predictedName = new String[INITIAL_CAPACITY];
+    private int[] predictedParent = new int[INITIAL_CAPACITY];
+    private int[] predictedCol = new int[INITIAL_CAPACITY];
+    /** Traversal position within the current document; reset to 0 in {@link #beginRow()}. */
+    private int fieldPos;
+
+    /**
      * Whether {@link #finishRow()} has been called but {@link EscfBatchBuilder#commit} has not.
      * Package-private so {@link EscfBatchBuilder#commit} can reset it after draining.
      */
@@ -66,6 +84,7 @@ public final class EscfRowBuffer {
         Arrays.fill(scratchVar, 0, Math.min(columnCountBefore, scratchVar.length), null);
         columnsSet.clear();
         parentDepth = 0;
+        fieldPos = 0;
         rowStarted = false;
     }
 
@@ -172,7 +191,23 @@ public final class EscfRowBuffer {
     }
 
     private int addLeaf(String name) {
-        int colIdx = schema.appendLeaf(name, parentStack[parentDepth]);
+        int pos = fieldPos++;
+        int parent = parentStack[parentDepth];
+        int colIdx;
+        if (pos < predictedName.length && predictedName[pos] == name && predictedParent[pos] == parent) {
+            colIdx = predictedCol[pos];
+        } else {
+            colIdx = schema.appendLeaf(name, parent);
+            if (pos >= predictedName.length) {
+                int newCap = ArrayUtil.oversize(pos + 1, Integer.BYTES);
+                predictedName = Arrays.copyOf(predictedName, newCap);
+                predictedParent = Arrays.copyOf(predictedParent, newCap);
+                predictedCol = Arrays.copyOf(predictedCol, newCap);
+            }
+            predictedName[pos] = name;
+            predictedParent[pos] = parent;
+            predictedCol[pos] = colIdx;
+        }
         ensureScratchCapacity(colIdx + 1);
         if (columnsSet.getAndSet(colIdx)) {
             throw new IllegalArgumentException("Duplicate field [" + name + "]");

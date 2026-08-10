@@ -120,7 +120,7 @@ public final class EscfEncoder implements SourceBatchEncoder {
             // been staged: fall through to Jackson, which either handles the document or surfaces
             // the canonical parse error.
             byte[] raw = simdInput(source);
-            logger.info(
+            logger.debug(
                 "SIMD JSON fallback [{}]: {}\nsource ({} bytes, utf8 view): {}\nunicode escapes (raw hex): {}",
                 e.getClass().getSimpleName(),
                 e.getMessage(),
