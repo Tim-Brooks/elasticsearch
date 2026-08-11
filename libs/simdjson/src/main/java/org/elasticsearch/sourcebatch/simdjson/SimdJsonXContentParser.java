@@ -217,10 +217,6 @@ public final class SimdJsonXContentParser extends AbstractXContentParser {
         this.closed = false;
     }
 
-    // ------------------------------------------------------------------
-    // Token navigation
-    // ------------------------------------------------------------------
-
     @Override
     public Token nextToken() {
         if (closed || tape == null) {
@@ -419,10 +415,6 @@ public final class SimdJsonXContentParser extends AbstractXContentParser {
         return 0;
     }
 
-    // ------------------------------------------------------------------
-    // Numbers
-    // ------------------------------------------------------------------
-
     @Override
     public Number numberValue() {
         return tape.getType(valueIdx) == INT64 ? tape.getInt64Value(valueIdx) : tape.getDouble(valueIdx);
@@ -469,9 +461,7 @@ public final class SimdJsonXContentParser extends AbstractXContentParser {
         return (float) doDoubleValue();
     }
 
-    // ------------------------------------------------------------------
     // Stubs — not needed for benchmark / batch encoding
-    // ------------------------------------------------------------------
 
     @Override
     public byte[] binaryValue() {
@@ -510,9 +500,7 @@ public final class SimdJsonXContentParser extends AbstractXContentParser {
         closed = true;
     }
 
-    // ------------------------------------------------------------------
     // Depth stack helpers
-    // ------------------------------------------------------------------
 
     private void push(boolean isObjectScope) {
         nameIdxStack[depth] = nameIdx;
@@ -525,9 +513,7 @@ public final class SimdJsonXContentParser extends AbstractXContentParser {
         nameIdx = nameIdxStack[depth];
     }
 
-    // ------------------------------------------------------------------
     // Field-name cache
-    // ------------------------------------------------------------------
 
     /**
      * Returns the canonical {@link String} for the field name at {@code stringBuffer[off, off+len)},
