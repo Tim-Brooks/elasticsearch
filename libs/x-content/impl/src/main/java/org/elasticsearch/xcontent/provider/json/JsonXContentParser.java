@@ -116,6 +116,12 @@ public class JsonXContentParser extends AbstractXContentParser {
         return currentToken;
     }
 
+    // Called by JsonXContentGenerator after it bypasses this parser to copy directly at the Jackson level.
+    // Without this sync, currentToken becomes stale and callers (e.g. ObjectParser) see the wrong token.
+    void syncCurrentToken() {
+        this.currentToken = convertToken(parser.getCurrentToken());
+    }
+
     @Override
     public NumberType numberType() throws IOException {
         return convertNumberType(parser.getNumberType());

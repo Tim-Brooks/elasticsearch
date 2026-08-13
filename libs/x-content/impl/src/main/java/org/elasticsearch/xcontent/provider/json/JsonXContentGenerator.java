@@ -547,8 +547,9 @@ public class JsonXContentGenerator implements XContentGenerator {
         if (parser.currentToken() == null) {
             parser.nextToken();
         }
-        if (parser instanceof JsonXContentParser) {
-            generator.copyCurrentStructure(((JsonXContentParser) parser).parser);
+        if (parser instanceof JsonXContentParser jsonParser) {
+            generator.copyCurrentStructure(jsonParser.parser);
+            jsonParser.syncCurrentToken();
         } else {
             copyCurrentStructure(this, parser);
         }
