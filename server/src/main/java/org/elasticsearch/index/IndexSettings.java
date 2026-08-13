@@ -117,7 +117,7 @@ public final class IndexSettings {
     public static final Setting<Translog.Durability> INDEX_TRANSLOG_DURABILITY_SETTING = Setting.enumSetting(
         Translog.Durability.class,
         "index.translog.durability",
-        Translog.Durability.ASYNC,
+        Translog.Durability.REQUEST,
         Property.Dynamic,
         Property.IndexScope
     );
