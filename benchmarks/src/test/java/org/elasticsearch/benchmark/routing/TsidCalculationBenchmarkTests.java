@@ -64,6 +64,33 @@ public class TsidCalculationBenchmarkTests extends ESTestCase {
         }
     }
 
+    /**
+     * The two end-to-end arms must agree on every shard id. For array dimensions that also confirms
+     * the extractor's per-document fallback is equivalent to the columnar pass, since the extractor
+     * cannot handle arrays at a routing column.
+     */
+    public void testRoutingArmsAgree() throws Exception {
+        TsidCalculationBenchmark bench = new TsidCalculationBenchmark();
+        bench.docCount = docCount;
+        bench.dimensionCount = dimensionCount;
+        bench.shape = shape;
+        bench.setup();
+        try {
+            int[] columnar = bench.encodeThenColumnarRouting();
+            int[] extracted = bench.extractDuringEncodeRouting();
+
+            assertEquals("one shard id per document", docCount, columnar.length);
+            assertArrayEquals("columnar vs extract-during-encode shard ids", columnar, extracted);
+
+            // Guards measurement validity: the fallback must fire for arrays and only for arrays,
+            // otherwise that arm is timing a different code path than the one it claims to time.
+            boolean arrayDimensions = shape == TsidCalculationBenchmark.Shape.ARRAY_STRING;
+            assertEquals("fallback expected only for array dimensions, shape=" + shape, arrayDimensions, bench.usedFallback);
+        } finally {
+            bench.tearDown();
+        }
+    }
+
     /** Repeated invocations must be stable, since JMH calls each arm many times per trial. */
     public void testRepeatedInvocationIsStable() throws Exception {
         TsidCalculationBenchmark bench = new TsidCalculationBenchmark();
