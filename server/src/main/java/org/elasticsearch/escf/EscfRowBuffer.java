@@ -67,6 +67,7 @@ public final class EscfRowBuffer {
         columnsSet.clear();
         parentDepth = 0;
         rowStarted = false;
+        schema.beginRow();
     }
 
     /**

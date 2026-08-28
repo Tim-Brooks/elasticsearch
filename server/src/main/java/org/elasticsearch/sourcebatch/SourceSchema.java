@@ -12,6 +12,7 @@ package org.elasticsearch.sourcebatch;
 import com.carrotsearch.hppc.ObjectIntHashMap;
 import com.carrotsearch.hppc.ObjectIntMap;
 
+import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.UnicodeUtil;
 
 import java.util.ArrayList;
@@ -39,6 +40,13 @@ public final class SourceSchema {
     private static final int INITIAL_CAPACITY = 8;
     /** Maximum number of fields per level, constrained by u16 encoding in the batch header. */
     static final int MAX_FIELDS = 65535;
+
+    /**
+     * Temporary A/B scaffolding for benchmarking the sequence-order cache.
+     * Set to {@code false} before a JMH fork to measure the baseline without the cache.
+     * <b>Remove this field (and all references to it) before shipping.</b>
+     */
+    public static volatile boolean ORDER_CACHE_ENABLED = true;
 
     private final FieldLevel nonLeaves;
     private final FieldLevel leaves;
@@ -118,6 +126,16 @@ public final class SourceSchema {
     }
 
     /**
+     * Resets the sequence-order cursor on both field levels so the next row's appends are
+     * verified against the positions recorded during previous rows. Must be called at the start
+     * of every row (i.e. from {@link org.elasticsearch.escf.EscfRowBuffer#beginRow()}).
+     */
+    public void beginRow() {
+        nonLeaves.resetCursor();
+        leaves.resetCursor();
+    }
+
+    /**
      * Reconstructs the full dot-separated path for a leaf field by walking parent pointers.
      * For a leaf "name" under non-leaf "user" under root, returns "user.name".
      * For a leaf "status" directly under root, returns "status".
@@ -176,17 +194,52 @@ public final class SourceSchema {
 
     /**
      * Holds a parallel name list, parent array, and lookup map for one level of schema fields.
+     *
+     * <p>Includes a sequence-order identity cache: after the first row has been appended, subsequent
+     * rows are checked against the recorded append sequence using reference equality on the field
+     * name String. Because field names coming from the simdjson path are canonicalized by
+     * the field-name lookup table (which returns the same String instance for a given name across
+     * documents), {@code ==} is a reliable fast check. A hit costs one array load and two integer
+     * compares — no hashing.
+     *
+     * <p>A small forward probe ({@link #PROBE_AHEAD} slots) handles the common case where a
+     * document omits an optional field and shifts the cursor by a position or two. After
+     * {@link #MISS_BUDGET} real divergences the cache is disabled permanently for the lifetime of
+     * this schema (i.e. the bulk request), so heterogeneous batches pay only one predictable branch.
      */
     private static final class FieldLevel {
         public static final int MISSING = -1;
+
+        /** Slots probed past the cursor on a shape-deviation (omitted optional field etc.). */
+        private static final int PROBE_AHEAD = 2;
+        /** Divergences seen before the sequence cache is disabled for this schema's lifetime. */
+        private static final int MISS_BUDGET = 5;
+
         private final List<String> names;
         private int[] parents;
         private final ObjectIntMap<FieldKey> lookup;
+
+        // ---- Sequence-order cache (benchmarking prototype) ----
+        private String[] seqName;
+        private int[] seqParent;
+        private int[] seqIndex;
+        /** High-water mark: number of recorded entries from completed rows. */
+        private int seqLen;
+        /** Current position within the row being appended; reset by {@link #resetCursor()}. */
+        private int cursor;
+        /** Divergences seen so far; once >= MISS_BUDGET, seqEnabled is turned off permanently. */
+        private int misses;
+        /** Whether the sequence cache is still active for this FieldLevel. */
+        private boolean seqEnabled;
 
         FieldLevel(int initialCapacity) {
             this.names = new ArrayList<>();
             this.parents = new int[initialCapacity];
             this.lookup = new ObjectIntHashMap<>(initialCapacity);
+            this.seqName = new String[initialCapacity];
+            this.seqParent = new int[initialCapacity];
+            this.seqIndex = new int[initialCapacity];
+            this.seqEnabled = ORDER_CACHE_ENABLED;
         }
 
         FieldLevel(List<String> names, int[] parents) {
@@ -196,6 +249,16 @@ public final class SourceSchema {
             for (int i = 0; i < names.size(); i++) {
                 lookup.put(new FieldKey(parents[i], names.get(i)), i);
             }
+            // Decoded schemas are read-only; sequence cache is not needed.
+            this.seqName = new String[0];
+            this.seqParent = new int[0];
+            this.seqIndex = new int[0];
+            this.seqEnabled = false;
+        }
+
+        /** Resets the row cursor so the next row's appends are verified from position 0. */
+        void resetCursor() {
+            cursor = 0;
         }
 
         int count() {
@@ -215,12 +278,76 @@ public final class SourceSchema {
         }
 
         int append(String name, int parentIdx) {
+            if (seqEnabled) {
+                int hit = probeSequence(name, parentIdx);
+                if (hit != MISSING) {
+                    return hit;
+                }
+            }
+
             // Use a transient key for the lookup so it never escapes this method and stays eligible for scalar
             // replacement on the common hit path.
             int existing = lookup.getOrDefault(new FieldKey(parentIdx, name), MISSING);
             if (existing != MISSING) {
+                if (seqEnabled) {
+                    recordSequence(name, parentIdx, existing);
+                }
                 return existing;
             }
+
+            int index = insertNew(name, parentIdx);
+            if (seqEnabled) {
+                recordSequence(name, parentIdx, index);
+            }
+            return index;
+        }
+
+        /**
+         * Probes the recorded sequence around {@link #cursor} using identity equality on the name.
+         * Returns the cached schema index on a hit, {@link #MISSING} on a miss.
+         */
+        private int probeSequence(String name, int parentIdx) {
+            int end = Math.min(cursor + 1 + PROBE_AHEAD, seqLen);
+            for (int p = cursor; p < end; p++) {
+                if (seqName[p] == name && seqParent[p] == parentIdx) {
+                    assert seqIndex[p] == lookup.getOrDefault(new FieldKey(parentIdx, name), MISSING)
+                        : "sequence cache returned wrong index for (" + name + ", parent=" + parentIdx + ")";
+                    cursor = p + 1;
+                    return seqIndex[p];
+                }
+            }
+            // Only count a miss when there was something recorded to compare against; appends past
+            // seqLen are still learning the shape during the first row.
+            if (cursor < seqLen && ++misses >= MISS_BUDGET) {
+                seqEnabled = false;
+            }
+            return MISSING;
+        }
+
+        /** Records the (name, parentIdx, index) triple at the current cursor position and advances. */
+        private void recordSequence(String name, int parentIdx, int index) {
+            ensureSeqCapacity(cursor + 1);
+            seqName[cursor] = name;
+            seqParent[cursor] = parentIdx;
+            seqIndex[cursor] = index;
+            cursor++;
+            if (cursor > seqLen) {
+                seqLen = cursor;
+            }
+        }
+
+        private void ensureSeqCapacity(int minCapacity) {
+            if (minCapacity <= seqName.length) {
+                return;
+            }
+            int newCap = ArrayUtil.oversize(minCapacity, Integer.BYTES);
+            seqName = Arrays.copyOf(seqName, newCap);
+            seqParent = Arrays.copyOf(seqParent, newCap);
+            seqIndex = Arrays.copyOf(seqIndex, newCap);
+        }
+
+        /** Inserts a brand-new (name, parentIdx) pair into the backing structures and returns its index. */
+        private int insertNew(String name, int parentIdx) {
             int index = names.size();
             if (index >= MAX_FIELDS) {
                 throw new IllegalStateException("Schema field count exceeds maximum of " + MAX_FIELDS);

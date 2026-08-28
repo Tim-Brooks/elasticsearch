@@ -15,6 +15,7 @@ import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.escf.EscfBatch;
 import org.elasticsearch.escf.EscfEncoder;
 import org.elasticsearch.sourcebatch.LeafSink;
+import org.elasticsearch.sourcebatch.SourceSchema;
 import org.elasticsearch.transport.BytesRefRecycler;
 import org.elasticsearch.xcontent.XContentType;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -82,10 +83,19 @@ public class SimdJsonParserBenchmark {
     @Param({ "clickbench_flat", "otel_nested", "small_sparse" })
     private String shape;
 
+    /**
+     * Temporary A/B toggle for the sequence-order identity cache in {@link SourceSchema}.
+     * {@code true} = cache enabled (new behaviour), {@code false} = cache disabled (baseline).
+     * <b>Remove this param (and {@link SourceSchema#ORDER_CACHE_ENABLED}) before shipping.</b>
+     */
+    @Param({ "true", "false" })
+    private boolean orderCache;
+
     private BytesReference[] docs;
 
     @Setup
     public void setUp() {
+        SourceSchema.ORDER_CACHE_ENABLED = orderCache;
         Utils.configureBenchmarkLogging();
         long threadSeed = seed + Thread.currentThread().threadId();
         Random random = new Random(threadSeed);
