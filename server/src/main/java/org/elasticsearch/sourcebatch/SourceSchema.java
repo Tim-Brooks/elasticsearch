@@ -202,17 +202,22 @@ public final class SourceSchema {
      * documents), {@code ==} is a reliable fast check. A hit costs one array load and two integer
      * compares — no hashing.
      *
-     * <p>A small forward probe ({@link #PROBE_AHEAD} slots) handles the common case where a
-     * document omits an optional field and shifts the cursor by a position or two. After
-     * {@link #MISS_BUDGET} real divergences the cache is disabled permanently for the lifetime of
-     * this schema (i.e. the bulk request), so heterogeneous batches pay only one predictable branch.
+     * <p>A forward probe window ({@link #PROBE_AHEAD} slots) handles the common case where a
+     * document omits an optional field. On a full-window miss the cursor jumps past the checked
+     * window (by {@code PROBE_AHEAD + 1}) to allow re-alignment on the next call. The miss budget
+     * is per-document: each new row resets both the cursor and the miss counter so that
+     * heterogeneous batches never permanently disable the cache, and every document starts
+     * with the optimistic fast path.
      */
     private static final class FieldLevel {
         public static final int MISSING = -1;
 
         /** Slots probed past the cursor on a shape-deviation (omitted optional field etc.). */
         private static final int PROBE_AHEAD = 2;
-        /** Divergences seen before the sequence cache is disabled for this schema's lifetime. */
+        /**
+         * Divergences within a single document before the cache is disabled for that document.
+         * Resets to zero at {@link #resetCursor()} so the next document tries again.
+         */
         private static final int MISS_BUDGET = 5;
 
         private final List<String> names;
@@ -227,9 +232,9 @@ public final class SourceSchema {
         private int seqLen;
         /** Current position within the row being appended; reset by {@link #resetCursor()}. */
         private int cursor;
-        /** Divergences seen so far; once >= MISS_BUDGET, seqEnabled is turned off permanently. */
+        /** Divergences seen in the current document; reset per row. */
         private int misses;
-        /** Whether the sequence cache is still active for this FieldLevel. */
+        /** Whether the sequence cache is still active for the current document. Reset per row. */
         private boolean seqEnabled;
 
         FieldLevel(int initialCapacity) {
@@ -256,9 +261,14 @@ public final class SourceSchema {
             this.seqEnabled = false;
         }
 
-        /** Resets the row cursor so the next row's appends are verified from position 0. */
+        /**
+         * Resets per-document state: cursor back to 0, miss counter cleared, cache re-enabled.
+         * Called at the start of every row so each document gets a fresh optimistic attempt.
+         */
         void resetCursor() {
             cursor = 0;
+            misses = 0;
+            seqEnabled = ORDER_CACHE_ENABLED;
         }
 
         int count() {
@@ -279,32 +289,42 @@ public final class SourceSchema {
 
         int append(String name, int parentIdx) {
             if (seqEnabled) {
-                int hit = probeSequence(name, parentIdx);
-                if (hit != MISSING) {
-                    return hit;
+                if (cursor < seqLen) {
+                    // Verification phase: probe the window for this field using identity equality.
+                    int hit = probeSequence(name, parentIdx);
+                    if (hit != MISSING) {
+                        return hit;
+                    }
+                    // Full-window miss: advance past the checked window to allow re-alignment,
+                    // then count toward the per-document budget. Never overwrite the recorded
+                    // sequence — just skip forward so the next probe starts from a fresh position.
+                    cursor = Math.min(cursor + PROBE_AHEAD + 1, seqLen);
+                    if (++misses >= MISS_BUDGET) {
+                        seqEnabled = false;
+                    }
                 }
+                // cursor >= seqLen: learning phase — fall through to the map, then record below.
             }
 
             // Use a transient key for the lookup so it never escapes this method and stays eligible for scalar
             // replacement on the common hit path.
             int existing = lookup.getOrDefault(new FieldKey(parentIdx, name), MISSING);
-            if (existing != MISSING) {
-                if (seqEnabled) {
-                    recordSequence(name, parentIdx, existing);
-                }
-                return existing;
-            }
+            int index = (existing != MISSING) ? existing : insertNew(name, parentIdx);
 
-            int index = insertNew(name, parentIdx);
-            if (seqEnabled) {
-                recordSequence(name, parentIdx, index);
+            // Learning phase only: extend the sequence for fields not yet recorded. Never
+            // overwrite an existing entry — only append at seqLen. Skip fields that are already
+            // in the schema (existing != MISSING) and were just skipped by cursor advancement;
+            // they are already recorded at their correct position earlier in the sequence.
+            if (seqEnabled && cursor >= seqLen && existing == MISSING) {
+                recordLearning(name, parentIdx, index);
             }
             return index;
         }
 
         /**
-         * Probes the recorded sequence around {@link #cursor} using identity equality on the name.
-         * Returns the cached schema index on a hit, {@link #MISSING} on a miss.
+         * Probes {@code [cursor, cursor + PROBE_AHEAD]} for a match using identity equality.
+         * On a hit, advances {@code cursor} to {@code p + 1} and returns the cached schema index.
+         * On a miss returns {@link #MISSING} without modifying {@code cursor}.
          */
         private int probeSequence(String name, int parentIdx) {
             int end = Math.min(cursor + 1 + PROBE_AHEAD, seqLen);
@@ -316,24 +336,20 @@ public final class SourceSchema {
                     return seqIndex[p];
                 }
             }
-            // Only count a miss when there was something recorded to compare against; appends past
-            // seqLen are still learning the shape during the first row.
-            if (cursor < seqLen && ++misses >= MISS_BUDGET) {
-//                seqEnabled = false;
-            }
             return MISSING;
         }
 
-        /** Records the (name, parentIdx, index) triple at the current cursor position and advances. */
-        private void recordSequence(String name, int parentIdx, int index) {
-            ensureSeqCapacity(cursor + 1);
-            seqName[cursor] = name;
-            seqParent[cursor] = parentIdx;
-            seqIndex[cursor] = index;
-            cursor++;
-            if (cursor > seqLen) {
-                seqLen = cursor;
-            }
+        /**
+         * Appends a new entry at {@code seqLen} and advances both {@code seqLen} and {@code cursor}.
+         * Only called in the learning phase ({@code cursor >= seqLen}).
+         */
+        private void recordLearning(String name, int parentIdx, int index) {
+            ensureSeqCapacity(seqLen + 1);
+            seqName[seqLen] = name;
+            seqParent[seqLen] = parentIdx;
+            seqIndex[seqLen] = index;
+            seqLen++;
+            cursor = seqLen; // cursor tracks the frontier during learning
         }
 
         private void ensureSeqCapacity(int minCapacity) {
