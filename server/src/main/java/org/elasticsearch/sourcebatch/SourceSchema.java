@@ -319,7 +319,7 @@ public final class SourceSchema {
             // Only count a miss when there was something recorded to compare against; appends past
             // seqLen are still learning the shape during the first row.
             if (cursor < seqLen && ++misses >= MISS_BUDGET) {
-                seqEnabled = false;
+//                seqEnabled = false;
             }
             return MISSING;
         }
