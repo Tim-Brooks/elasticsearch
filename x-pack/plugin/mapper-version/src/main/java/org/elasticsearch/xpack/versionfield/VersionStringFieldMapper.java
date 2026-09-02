@@ -417,7 +417,9 @@ public class VersionStringFieldMapper extends FieldMapper {
     public boolean supportsColumnarParse(IndexSettings indexSettings) {
         // version fields have no store/script/null_value/ignore_malformed/dimension parameters
         // and are always both indexed and doc-valued, so only copy_to and multi-fields need gating.
-        return indexSettings.getMode().isStrictColumnar()
+        // TSDB also allowed: scope.version is mapped as version under metrics-otel@mappings and
+        // version has no dimension side-channel write, so it is safe in time_series mode.
+        return (indexSettings.getMode().isStrictColumnar() || indexSettings.getMode().isTsdb())
             && hasScript() == false
             && copyTo().copyToFields().isEmpty()
             && multiFields().iterator().hasNext() == false;

@@ -1038,6 +1038,18 @@ public class BatchBulkIT extends ESIntegTestCase {
         }
     }
 
+    /**
+     * Verifies that TSDB documents with strict mappings index correctly when submitted as a batch.
+     *
+     * <p><b>Note:</b> This test sets {@code index.routing_path}, which resolves to
+     * {@link org.elasticsearch.cluster.routing.IndexRouting.ExtractFromSource.ForRoutingPath}. That
+     * routing variant causes {@link org.elasticsearch.index.mapper.TimeSeriesIdFieldMapper} to refuse
+     * columnar parsing, so the test exercises the <em>sequential row path</em>, not the columnar
+     * batch path. It is a TSDB correctness test, not a batch-mode coverage test.
+     *
+     * <p>Columnar batch-mode coverage for TSDB (using {@code index.dimensions} / ForIndexDimensions)
+     * lives in {@code modules/data-streams/.../BatchBulkTSDBIT}.
+     */
     public void testTimeSeriesIndexViaBatchMode() throws IOException {
         String index = "test-batch-tsdb";
 

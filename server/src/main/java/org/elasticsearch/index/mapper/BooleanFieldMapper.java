@@ -773,7 +773,10 @@ public class BooleanFieldMapper extends FieldMapper {
             && hasScript() == false
             && copyTo().copyToFields().isEmpty()
             && multiFields().iterator().hasNext() == false
-            && fieldType().isDimension() == false
+            // Use writeDimensionRouting rather than isDimension(): under ForIndexDimensions the
+            // coordinating node computes the tsid and writeDimensionRouting is false, so no
+            // dimension side-channel write occurs and columnar is safe.
+            && (fieldType().isDimension() == false || writeDimensionRouting == false)
             && indexSettings.getIndexVersionCreated().isLegacyIndexVersion() == false;
     }
 

@@ -1626,31 +1626,44 @@ public final class KeywordFieldMapper extends FieldMapper {
 
     @Override
     public boolean supportsColumnarParse(IndexSettings indexSettings) {
-        return indexSettings.getMode().isStrictColumnar()
+        return (indexSettings.getMode().isStrictColumnar() || indexSettings.getMode().isTsdb())
             && supportsColumnarDocValues()
             && hasScript() == false
             && copyTo().copyToFields().isEmpty()
             && multiFields().iterator().hasNext() == false
             && normalizerName == null
-            && fieldType().isDimension() == false;
+            // Dimension fields write their value to the routing-fields side-channel in the row path;
+            // the columnar path omits that write. Under ForIndexDimensions the coordinating node
+            // computes the tsid, so writeDimensionRouting is false and no dimension side-channel is
+            // expected. Under ForRoutingPath it is true and the field must fall back to the row path.
+            && (fieldType().isDimension() == false || writeDimensionRouting == false);
     }
 
     /**
      * Returns true when this keyword field's doc-values encoding is supported on the columnar batch
-     * path. Accepts both the array-order (multi_value=true, offsetsFieldName set) and single-valued
-     * binary (multi_value=false) encoding. Other combinations fall back to the row path.
+     * path. Accepts:
+     * <ul>
+     *   <li>array-order binary (multi_value=true, offsetsFieldName set) — strict-columnar mode only</li>
+     *   <li>single-valued binary (multi_value=false)</li>
+     *   <li>SORTED_SET — offsetsFieldName must be null (see {@link #mapColumnBatchSortedSet})</li>
+     * </ul>
+     * Other combinations fall back to the row path.
      */
     private boolean supportsColumnarDocValues() {
-        if (fieldType().usesBinaryDocValues() == false) {
-            return false;
+        if (fieldType().usesBinaryDocValues()) {
+            if (fieldType().storesArrayOrderInline()) {
+                return true;
+            }
+            // Only support single valued when not ArrayOrderBinaryDocValues
+            return docValuesParameters().multiValue() == false;
         }
 
-        if (fieldType().storesArrayOrderInline()) {
-            return true;
-        }
-
-        // Only support single valued when not ArrayOrderBinaryDocValues
-        return docValuesParameters().multiValue() == false;
+        // Accept SORTED_SET (non-strict-columnar default for keyword) when there is no offsets sidecar.
+        // In TSDB the SYNTHETIC_SOURCE_KEEP_INDEX_SETTING defaults to NONE, so offsetsFieldName is null
+        // for all keyword fields except those in an index with synthetic_source_keep=ARRAYS (only
+        // traces-otel@mappings sets that, not metrics). We gate on offsetsFieldName explicitly so that
+        // any future index that does set ARRAYS for a TSDB keyword still falls back to the row path.
+        return fieldType().diskFormat() == KeywordFieldType.DocValuesDiskFormat.SORTED_SET && offsetsFieldName == null;
     }
 
     // TODO: make the batch supply a recycler to wire up recycling instead of NON_RECYCLING_INSTANCE.
@@ -1685,10 +1698,11 @@ public final class KeywordFieldMapper extends FieldMapper {
         // In order to support the original string representations we would need to keep the columns as
         // strings. This is possible as an eventual user option.
 
-        if (fieldType().storesArrayOrderInline()) {
-            mapColumnBatchArrayOrder(ctx, source, emitTerms, emitDvs, emitFallback);
-        } else {
-            mapColumnBatchSingleValue(ctx, source, emitTerms, emitDvs, emitFallback);
+        switch (fieldType().diskFormat()) {
+            case BINARY_ARRAY_ORDER_INLINE_NULL -> mapColumnBatchArrayOrder(ctx, source, emitTerms, emitDvs, emitFallback);
+            case SORTED_SET -> mapColumnBatchSortedSet(ctx, source, emitTerms, emitDvs, emitFallback);
+            case BINARY_SEPARATE_COUNT -> mapColumnBatchSingleValue(ctx, source, emitTerms, emitDvs, emitFallback);
+            case NONE -> throw new AssertionError("unreachable: mapColumnBatch called with doc_values disabled — blocked by gate");
         }
     }
 
@@ -1907,6 +1921,92 @@ public final class KeywordFieldMapper extends FieldMapper {
         }
         // Synthetic-source fallback for ignore_above values: single BinaryDocValuesField (no counts),
         // mirroring the row-path's addBinaryFieldLegacyEncodingAware isSingleValued() branch.
+        if (fallback != null && fallback.isEmpty() == false) {
+            ctx.addColumn(
+                LuceneBinaryColumn.of(fallback.finish(docCount), fieldType().syntheticSourceFallbackFieldName(), BinaryDocValuesField.TYPE)
+            );
+        }
+    }
+
+    /**
+     * Columnar batch emission for SORTED_SET doc-values keywords (low cardinality / non-strict-columnar
+     * default). Handles multi-valued documents natively — Lucene's SORTED_SET storage sorts and
+     * deduplicates values, so insertion order does not need normalising.
+     *
+     * <p>The frozen {@code fieldType} for SORTED_SET keywords carries both the correct
+     * {@code docValuesType=SORTED_SET} and the correct {@link org.apache.lucene.index.DocValuesSkipIndexType}
+     * (e.g. {@code RANGE} when the doc-values-skipper feature is active for TSDB dimension fields).
+     * Both the {@code emitTerms} and {@code !emitTerms && emitDvs} branches use the frozen
+     * {@code fieldType} directly so that the column always carries the same skip index type as the
+     * row path. Mixing different skip index types within the same {@code IndexWriter} session causes an
+     * {@link IllegalArgumentException}. The {@code emitTerms && !emitDvs} combination is unreachable:
+     * doc_values=false keywords have {@link KeywordFieldType.DocValuesDiskFormat#NONE} and are blocked
+     * by the gate.
+     *
+     * <p>Per-value handling mirrors {@link #mapColumnBatchSingleValue}: null → null_value substitution,
+     * {@code ignore_above} → {@link BatchMappingContext#addIgnoredFieldColumnar} + synthetic-source
+     * fallback, {@code MAX_TERM_LENGTH} preflight.
+     */
+    private void mapColumnBatchSortedSet(
+        BatchMappingContext ctx,
+        EscfColumn source,
+        boolean emitTerms,
+        boolean emitDvs,
+        boolean emitFallback
+    ) {
+        final int docCount = ctx.docCount();
+
+        // retainValues=false: every value is consumed within one loop iteration, before the cursor advances.
+        final ObjectTupleCursor<BytesRef> cursor = EscfColumnTransforms.utf8Cursor(source, false);
+        // CollisionPolicy.MERGE: repeated setString on the same doc promotes the row to an ARRAY cell,
+        // producing one tuple per element. This matches the row path, which adds one SortedSetDocValuesField
+        // per array element. Lucene deduplicates and sorts at write time.
+        final EscfColumnBuilder values = mergeStringColumn();
+        final EscfColumnBuilder fallback = emitFallback ? mergeStringColumn() : null;
+        final BytesRef nullValueBytes = fieldType().nullUtf8Value;
+
+        int doc;
+        while ((doc = cursor.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+            BytesRef binaryValue = cursor.value();
+            if (binaryValue == null) {
+                if (nullValueBytes != null) {
+                    binaryValue = nullValueBytes;  // substitute, fall through to normal processing
+                } else {
+                    continue;  // null without null_value -> absent (row-path parity)
+                }
+            }
+
+            if (fieldType().ignoreAbove().isIgnored(binaryValue)) {
+                ctx.addIgnoredFieldColumnar(doc, fullPath());
+                if (fallback != null) {
+                    fallback.setString(doc, binaryValue);
+                }
+                continue;
+            }
+            if (binaryValue.length > MAX_TERM_LENGTH) {
+                throw largeTermException(binaryValue);
+            }
+
+            values.setString(doc, binaryValue);
+        }
+
+        if (values.isEmpty() == false) {
+            // The frozen fieldType for SORTED_SET keywords (cardinality==LOW, resolveFieldType:610) has
+            // docValuesType=SORTED_SET AND the index options / DocValuesSkipIndexType resolved at build
+            // time (e.g. RANGE when the doc-values-skipper feature is active for TSDB dimensions, NONE
+            // otherwise). Use it for both branches so that the column always carries the same skip index
+            // type as the row path — mixing RANGE (row) and NONE (columnar) into the same IndexWriter
+            // session causes an IllegalArgumentException. When !emitTerms the guard above guarantees that
+            // fieldType.indexOptions() == NONE, so no inverted-index work is triggered.
+            final EscfColumnData data = values.finish(docCount);
+            if (emitTerms) {
+                ctx.addColumn(LuceneBinaryColumn.of(data, fieldType().name(), fieldType));
+            } else if (emitDvs) {
+                ctx.addColumn(LuceneBinaryColumn.of(data, fieldType().name(), fieldType));
+            }
+        }
+        // Synthetic-source fallback for ignore_above values: single BinaryDocValuesField (no counts),
+        // mirroring mapColumnBatchSingleValue.
         if (fallback != null && fallback.isEmpty() == false) {
             ctx.addColumn(
                 LuceneBinaryColumn.of(fallback.finish(docCount), fieldType().syntheticSourceFallbackFieldName(), BinaryDocValuesField.TYPE)

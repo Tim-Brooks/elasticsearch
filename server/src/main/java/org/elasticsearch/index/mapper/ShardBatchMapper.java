@@ -35,6 +35,23 @@ import java.util.List;
 /**
  * Batch-time mapper resolution and columnar batch mapping for the bulk batch-indexing fast path.
  *
+ * <h2>Known remaining gaps (as of the OTel/TSDB keyword batch-mode work)</h2>
+ * <ol>
+ *   <li><b>{@code ip} in TSDB</b> — {@link IpFieldMapper} still requires {@code isStrictColumnar()}
+ *       and {@code hasPoints() == false}. The {@code ecs_ip} dynamic template produces
+ *       <em>indexed</em> ip dimensions (e.g. {@code resource.attributes.host.ip}), which needs
+ *       binary-point columnar emission (16-byte {@code InetAddressPoint}). Long points already work
+ *       via {@code SeqNoFieldMapper}; check whether the binary column path can carry points before
+ *       implementing.</li>
+ *   <li><b>{@code aggregate_metric_double}</b> — no {@code supportsColumnarParse} implementation.
+ *       Needed only for summary metrics, not the OTel hostmetrics scenario.</li>
+ *   <li><b>{@code flattened} in TSDB</b> — {@code FlattenedFieldMapper.supportsColumnarParse}
+ *       requires {@code isStrictColumnar()}. Needed for the {@code complex_attributes} dynamic
+ *       template when attributes have object values.</li>
+ *   <li><b>Dead code</b> — the metadata-mapper support loop in {@link #resolveMappers} is duplicated
+ *       verbatim; the second copy is unreachable. Remove in a follow-up cleanup.</li>
+ * </ol>
+ *
  * <p>Workflow:
  * <ol>
  *     <li>{@link #resolveMappers(SourceSchema, MappingLookup, IndexSettings)} runs once per batch. It walks the
@@ -100,16 +117,9 @@ public final class ShardBatchMapper {
             return null;
         }
 
-        for (MetadataFieldMapper mapper : lookup.getMapping().getSortedMetadataMappers()) {
-            if (mapper.supportsColumnarMetadataParse(indexSettings) == false) {
-                logger.debug(
-                    "columnar batch mapping disabled: metadata mapper of type [{}] does not support columnar parsing",
-                    mapper.typeName()
-                );
-                return null;
-            }
-        }
-
+        // TODO (dead code): the loop below is duplicated — the second copy here is unreachable
+        // because the first copy has already returned null for any unsupported metadata mapper.
+        // Remove the second loop in a follow-up cleanup.
         for (MetadataFieldMapper mapper : lookup.getMapping().getSortedMetadataMappers()) {
             if (mapper.supportsColumnarMetadataParse(indexSettings) == false) {
                 logger.debug(
