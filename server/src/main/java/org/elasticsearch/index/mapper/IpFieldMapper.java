@@ -11,9 +11,11 @@ package org.elasticsearch.index.mapper;
 
 import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.InetAddressPoint;
+import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.column.ObjectTupleCursor;
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
@@ -36,6 +38,7 @@ import org.elasticsearch.core.Tuple;
 import org.elasticsearch.escf.EscfColumn;
 import org.elasticsearch.escf.EscfColumnBuilder;
 import org.elasticsearch.escf.EscfColumnBuilder.CollisionPolicy;
+import org.elasticsearch.escf.EscfColumnData;
 import org.elasticsearch.escf.EscfColumnKind;
 import org.elasticsearch.escf.EscfColumnTransforms;
 import org.elasticsearch.escf.LuceneBinaryColumn;
@@ -823,10 +826,10 @@ public class IpFieldMapper extends FieldMapper {
 
     @Override
     public boolean supportsColumnarParse(IndexSettings indexSettings) {
-        // Columnar support requires strict-columnar mode, binary doc values only (no SortedSet ordinals).
-        return indexSettings.getMode().isStrictColumnar()
+        // Columnar support requires strict-columnar or TSDB mode. Both binary-dv (BINARY/ArrayOrder) and
+        // SORTED_SET (TSDB default) encodings are supported; see supportsColumnarDocValues().
+        return (indexSettings.getMode().isStrictColumnar() || indexSettings.getMode().isTsdb())
             && supportsColumnarDocValues()
-            && fieldType().indexType.hasPoints() == false
             && stored == false
             && hasScript() == false
             && copyTo().copyToFields().isEmpty()
@@ -840,21 +843,64 @@ public class IpFieldMapper extends FieldMapper {
 
     /**
      * Returns true when this ip field's doc-values encoding is supported on the columnar batch path.
-     * Accepts both the array-order (multi_value=true, ArrayOrderInlineNull blob + .counts sidecar)
-     * and single-valued binary (multi_value=false) encoding. Other combinations fall back to the row path.
+     * <p>Accepts:
+     * <ul>
+     *   <li>Binary doc-values — array-order (multi_value=true, ArrayOrderInlineNull blob + .counts sidecar)
+     *       or single-valued (multi_value=false) encoding.</li>
+     *   <li>SORTED_SET doc-values — the TSDB default, optionally with a RANGE skip index.</li>
+     * </ul>
+     * <p>Rejects:
+     * <ul>
+     *   <li>{@code doc_values: false} — the row path would also emit a point (and a {@code _field_names}
+     *       entry for {@code index: true}) that the columnar path cannot replicate without doc values.</li>
+     *   <li>{@code offsetsFieldName != null} — the source-keep {@code arrays} path writes an offsets
+     *       sidecar that the columnar path does not yet support.</li>
+     * </ul>
      */
     private boolean supportsColumnarDocValues() {
-        if (fieldType().usesBinaryDocValues() == false) {
+        // doc_values=false: on the row path, indexValue still emits a point and a _field_names entry when
+        // index=true. The columnar path cannot replicate that without doc values to anchor it.
+        if (fieldType().hasDocValues() == false) {
             return false;
         }
 
-        if (fieldType().usesArrayOrderBinaryDocValues()) {
-            return true;
+        // source_keep_mode=arrays produces an offsets sidecar (see FieldArrayContext.getOffsetsFieldName).
+        // Silently omitting it would corrupt synthetic source.
+        if (offsetsFieldName != null) {
+            return false;
         }
 
-        // Only support single valued when not ArrayOrderBinaryDocValues
-        return docValuesParameters.multiValue() == false;
+        if (fieldType().usesBinaryDocValues()) {
+            if (fieldType().usesArrayOrderBinaryDocValues()) {
+                return true;
+            }
+            // Only support single valued when not ArrayOrderBinaryDocValues
+            return docValuesParameters.multiValue() == false;
+        }
+
+        // SORTED_SET (low-cardinality / TSDB default): supported unconditionally — the DV type and
+        // DocValuesSkipIndexType are resolved at emission time via hasDocValuesSkipper().
+        return true;
     }
+
+    // Field-type constants for columnar batch emission.
+    //
+    // These must be the *exact same objects* that the row path puts in the document; Lucene's IndexWriter
+    // latches (docValuesType, DocValuesSkipIndexType) per field name for the writer's lifetime, and mixing
+    // different types for one field throws IllegalArgumentException.
+    //
+    // SORTED_SET_DV_FIELD_TYPE — SortedSetDocValuesField.TYPE (skip index = NONE).
+    // SORTED_SET_DV_INDEXED_TYPE — the private INDEXED_TYPE (skip index = RANGE), obtained via a sentinel
+    // call because SortedSetDocValuesField.INDEXED_TYPE is private.
+    // IP_POINT_FIELD_TYPE — ESInetAddressPoint.TYPE (1 dim × 16 bytes; no doc values, no index options).
+    //
+    // Do NOT hand-roll these constants — that is precisely the mistake that caused the keyword skip-index bug.
+    private static final IndexableFieldType SORTED_SET_DV_FIELD_TYPE = SortedSetDocValuesField.TYPE;
+    private static final IndexableFieldType SORTED_SET_DV_INDEXED_FIELD_TYPE = SortedSetDocValuesField.indexedField(
+        "_sentinel",
+        new BytesRef()
+    ).fieldType();
+    private static final IndexableFieldType IP_POINT_FIELD_TYPE = ESInetAddressPoint.TYPE;
 
     private static EscfColumnBuilder mergeStringColumn(BatchMappingContext ctx) {
         // TODO: Need to wire the data up to be released when the BatchMappingContext is released. This work is in progress.
@@ -885,14 +931,18 @@ public class IpFieldMapper extends FieldMapper {
 
     @Override
     public void mapColumnBatch(BatchMappingContext ctx, EscfColumn source) {
-        if (fieldType().hasDocValues() == false) {
-            return;
-        }
+        // The gate (supportsColumnarParse) blocks doc_values=false fields, so this is always true here.
+        // Keeping it as an assert rather than a silent return prevents silent _field_names and points omissions.
+        assert fieldType().hasDocValues() : "mapColumnBatch called with doc_values disabled — blocked by the gate";
 
-        if (fieldType().usesArrayOrderBinaryDocValues()) {
-            mapColumnBatchArrayOrder(ctx, source);
+        if (fieldType().usesBinaryDocValues()) {
+            if (fieldType().usesArrayOrderBinaryDocValues()) {
+                mapColumnBatchArrayOrder(ctx, source);
+            } else {
+                mapColumnBatchSingleValue(ctx, source);
+            }
         } else {
-            mapColumnBatchSingleValue(ctx, source);
+            mapColumnBatchSortedSet(ctx, source);
         }
     }
 
@@ -904,6 +954,12 @@ public class IpFieldMapper extends FieldMapper {
         // TODO: make the batch return these column builders to wire up recycling
         final EscfColumnBuilder binaryDvs = mergeStringColumn(ctx);
         final EscfColumnBuilder dvCounts = mergeLongColumn(ctx);
+        // Points need a separate builder: the DV blob is length-prefix-packed (not 16-byte-fixed),
+        // so the binaryDvs data cannot double as a points source. CollisionPolicy.MERGE preserves
+        // duplicates (multiple setString on the same doc → ARRAY cell), matching the row path where
+        // doc.add(address) is called once per value in document order without deduplication.
+        final boolean emitPoints = fieldType().indexType.hasPoints();
+        final EscfColumnBuilder pointsBuilder = emitPoints ? mergeStringColumn(ctx) : null;
         // The 16-byte null-value substitute, or null when no null_value is configured.
         final BytesRef nullValueEncoded = nullValue != null ? new BytesRef(CIDRUtils.encode(nullValue.getAddress())) : null;
 
@@ -949,10 +1005,16 @@ public class IpFieldMapper extends FieldMapper {
                     pos = MultiValuedBinaryDocValuesField.ArrayOrderInlineNull.appendSlot(docBlob, pos, nullValueEncoded);
                     docSlotCount++;
                     hasNonNull = true;
+                    // null_value also emits a point on the row path (indexValue is called with the
+                    // null-value ESInetAddressPoint), so mirror that here.
+                    if (pointsBuilder != null) {
+                        pointsBuilder.setString(currentDoc, nullValueEncoded);
+                    }
                 } else {
                     pos = MultiValuedBinaryDocValuesField.ArrayOrderInlineNull.appendSlot(docBlob, pos, null);
                     docSlotCount++;
-                    // hasNonNull stays false: null slots do not produce a binary dv blob.
+                    // hasNonNull stays false: null slots do not produce a binary dv blob or a point.
+                    // No point is emitted (row-path parity: indexValue is not called for null without null_value).
                 }
                 continue;
             }
@@ -963,6 +1025,11 @@ public class IpFieldMapper extends FieldMapper {
             pos = MultiValuedBinaryDocValuesField.ArrayOrderInlineNull.appendSlot(docBlob, pos, encoded);
             docSlotCount++;
             hasNonNull = true;
+            if (pointsBuilder != null) {
+                // One point per value in document order; no deduplication (row-path parity: doc.add(address)
+                // is called for every non-null value without sorting or dedup).
+                pointsBuilder.setString(currentDoc, encoded);
+            }
             // TODO: Implement ignore malformed.
         }
 
@@ -973,6 +1040,12 @@ public class IpFieldMapper extends FieldMapper {
         }
         if (dvCounts.isEmpty() == false) {
             ctx.addColumn(LuceneLongColumn.counts(dvCounts.finish(docCount), fieldType().name()));
+        }
+        // Points are emitted as a separate column (FEATURE_POINTS only, no doc-values bit).
+        // Two columns for one field name are legal: IndexingChain.processBatch only rejects overlapping
+        // featureMask bits; FEATURE_DOCVALUES and FEATURE_POINTS are disjoint.
+        if (pointsBuilder != null && pointsBuilder.isEmpty() == false) {
+            ctx.addColumn(LuceneBinaryColumn.of(pointsBuilder.finish(docCount), fieldType().name(), IP_POINT_FIELD_TYPE));
         }
     }
 
@@ -1024,8 +1097,82 @@ public class IpFieldMapper extends FieldMapper {
 
         // Emit a single plain BinaryDocValuesField column (no .counts sidecar), matching
         // DocValuesFieldFactory.addBinaryField's isSingleValued() branch.
+        // The same EscfColumnData is reused for the points column when indexed: the finished data is
+        // already 16-byte-fixed (one per doc, absent docs skipped), which is exactly what InetAddressPoint
+        // needs. Two LuceneBinaryColumn instances sharing one EscfColumnData are safe — each builds its
+        // own cursor internally. Release the buffer once, not once per column.
+        // TODO: Need to wire the data up to be released when the BatchMappingContext is released.
         if (values.isEmpty() == false) {
-            ctx.addColumn(LuceneBinaryColumn.of(values.finish(docCount), fieldType().name(), BinaryDocValuesField.TYPE));
+            final EscfColumnData data = values.finish(docCount);
+            ctx.addColumn(LuceneBinaryColumn.of(data, fieldType().name(), BinaryDocValuesField.TYPE));
+            if (fieldType().indexType.hasPoints()) {
+                ctx.addColumn(LuceneBinaryColumn.of(data, fieldType().name(), IP_POINT_FIELD_TYPE));
+            }
+        }
+    }
+
+    /**
+     * Columnar batch emission for SORTED_SET doc-values ip fields (low cardinality / TSDB default).
+     *
+     * <p>In TSDB every ip field resolves to {@link IndexType#skippers()} — SORTED_SET with a RANGE skip
+     * index — regardless of whether {@code index: true} is set, because
+     * {@link FieldMapper.Parameter#useTimeSeriesDocValuesSkippers} is checked before {@code indexed}
+     * in {@link IpFieldMapper.Builder#indexType()}. Points are therefore unreachable in TSDB; note
+     * that the {@code emitPoints} branch below is exercised only when the skipper is explicitly disabled
+     * ({@code index.mapping.use_doc_values_skipper: false}) so that {@code indexed} drives the decision.
+     *
+     * <p>The frozen field type is derived from Lucene via a sentinel
+     * ({@link SortedSetDocValuesField#indexedField}) rather than hand-rolled so that the
+     * {@code DocValuesSkipIndexType} is always byte-for-byte identical to what the row path writes.
+     * Mixing RANGE (row) and NONE (columnar) within one {@code IndexWriter} session throws
+     * {@link IllegalArgumentException}; the compat harness also compares the frozen type by value.
+     *
+     * <p>Per-value handling: {@code null} → {@code null_value} substitution if configured, else absent
+     * (row-path parity). Malformed input causes {@code encodeIp} to throw
+     * {@link UnsupportedOperationException}, triggering a whole-batch row-path fallback; per-field
+     * {@code ignore_malformed} is not yet handled on the columnar path.
+     */
+    private void mapColumnBatchSortedSet(BatchMappingContext ctx, EscfColumn source) {
+        final int docCount = ctx.docCount();
+        // retainValues=false: every value is consumed within one loop iteration, before the cursor advances.
+        final ObjectTupleCursor<BytesRef> cursor = EscfColumnTransforms.utf8Cursor(source, false);
+        // CollisionPolicy.MERGE: repeated setString on the same doc promotes the cell to an ARRAY,
+        // producing one tuple per element. Lucene deduplicates and sorts at write time, matching the
+        // row path which calls doc.add(new SortedSetDocValuesField(name, value)) once per element.
+        final EscfColumnBuilder values = mergeStringColumn(ctx);
+        final BytesRef nullValueEncoded = nullValue != null ? new BytesRef(CIDRUtils.encode(nullValue.getAddress())) : null;
+
+        int doc;
+        while ((doc = cursor.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+            BytesRef utf8Value = cursor.value();
+            if (utf8Value == null) {
+                if (nullValueEncoded != null) {
+                    values.setString(doc, nullValueEncoded);  // substitute, fall through
+                } else {
+                    continue;  // null without null_value -> absent (row-path parity)
+                }
+            } else {
+                // encodeIp throws UnsupportedOperationException on malformed input → whole-batch fallback.
+                values.setString(doc, encodeIp(utf8Value));
+                // TODO: Implement ignore malformed.
+            }
+        }
+
+        if (values.isEmpty() == false) {
+            // Select the DV field type that matches the row path: SORTED_SET + RANGE when the skip-index
+            // feature is active, plain SORTED_SET otherwise. DocValuesFieldFactory.addSortedField (the row
+            // path) branches on the same hasSkipper predicate.
+            final IndexableFieldType dvType = fieldType().indexType.hasDocValuesSkipper()
+                ? SORTED_SET_DV_INDEXED_FIELD_TYPE
+                : SORTED_SET_DV_FIELD_TYPE;
+            // Note: points and skippers never co-occur for ip. IndexType.skippers() has hasPoints()==false;
+            // IndexType.points() has hasDocValuesSkipper()==false. So IP_POINT_FIELD_TYPE is only emitted
+            // alongside SORTED_SET_DV_FIELD_TYPE (no skipper), never alongside SORTED_SET_DV_INDEXED_FIELD_TYPE.
+            final EscfColumnData data = values.finish(docCount);
+            ctx.addColumn(LuceneBinaryColumn.of(data, fieldType().name(), dvType));
+            if (fieldType().indexType.hasPoints()) {
+                ctx.addColumn(LuceneBinaryColumn.of(data, fieldType().name(), IP_POINT_FIELD_TYPE));
+            }
         }
     }
 

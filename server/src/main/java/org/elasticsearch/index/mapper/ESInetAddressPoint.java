@@ -27,7 +27,13 @@ import java.net.InetAddress;
  * Otherwise, it behaves just like the {@link InetAddressPoint} field.
  */
 class ESInetAddressPoint extends Field {
-    private static final FieldType TYPE;
+    /**
+     * The frozen {@link FieldType} for ip points: one dimension of {@link InetAddressPoint#BYTES} (16)
+     * bytes. Package-private so that {@link IpFieldMapper} can use it as the Lucene field type for
+     * the points column emitted on the columnar batch path without duplicating the dimension configuration.
+     * Do not modify; the field type is frozen.
+     */
+    static final FieldType TYPE;
 
     static {
         TYPE = new FieldType();

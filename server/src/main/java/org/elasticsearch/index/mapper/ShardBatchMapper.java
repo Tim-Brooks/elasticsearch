@@ -35,14 +35,8 @@ import java.util.List;
 /**
  * Batch-time mapper resolution and columnar batch mapping for the bulk batch-indexing fast path.
  *
- * <h2>Known remaining gaps (as of the OTel/TSDB keyword batch-mode work)</h2>
+ * <h2>Known remaining gaps (as of the OTel/TSDB ip batch-mode work)</h2>
  * <ol>
- *   <li><b>{@code ip} in TSDB</b> — {@link IpFieldMapper} still requires {@code isStrictColumnar()}
- *       and {@code hasPoints() == false}. The {@code ecs_ip} dynamic template produces
- *       <em>indexed</em> ip dimensions (e.g. {@code resource.attributes.host.ip}), which needs
- *       binary-point columnar emission (16-byte {@code InetAddressPoint}). Long points already work
- *       via {@code SeqNoFieldMapper}; check whether the binary column path can carry points before
- *       implementing.</li>
  *   <li><b>{@code aggregate_metric_double}</b> — no {@code supportsColumnarParse} implementation.
  *       Needed only for summary metrics, not the OTel hostmetrics scenario.</li>
  *   <li><b>{@code flattened} in TSDB</b> — {@code FlattenedFieldMapper.supportsColumnarParse}

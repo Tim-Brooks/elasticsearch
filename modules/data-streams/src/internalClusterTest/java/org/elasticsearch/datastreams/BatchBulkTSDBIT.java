@@ -215,9 +215,10 @@ public class BatchBulkTSDBIT extends ESIntegTestCase {
      *   <li>Per-document dynamic templates for metric fields (counter/gauge long/double).</li>
      * </ul>
      *
-     * <p>Note: {@code resource.attributes.host.ip} is deliberately absent. The {@code ip} mapper
-     * still requires {@code isStrictColumnar()} and binary-point columnar emission support; it falls
-     * back to the row path until those gaps are closed.
+     * <p>Note: {@code resource.attributes.host.ip} is an ip dimension exercising the SORTED_SET +
+     * RANGE-skip-index columnar path (TSDB default). Points are unreachable in TSDB because
+     * {@code useTimeSeriesDocValuesSkippers} is checked before {@code indexed}; adding
+     * {@code "index": true} to the template would be a silently-vacuous test.
      */
     private void createOtelShapedTsdbTemplate(String dataStreamName) throws IOException {
         String mapping = """
@@ -254,6 +255,11 @@ public class BatchBulkTSDBIT extends ESIntegTestCase {
                     }
                 },
                 "dynamic_templates": [
+                    { "ecs_ip": {
+                        "match_mapping_type": "string",
+                        "path_match": ["ip", "*.ip", "*_ip"],
+                        "mapping": { "type": "ip" }
+                    }},
                     { "all_strings_to_keywords": {
                         "match_mapping_type": "string",
                         "mapping": { "type": "keyword", "ignore_above": 1024 }
@@ -300,7 +306,7 @@ public class BatchBulkTSDBIT extends ESIntegTestCase {
             "temporality",
             "cumulative",
             "resource",
-            Map.of("attributes", Map.of("host.name", "host-0", "os.type", "linux")),
+            Map.of("attributes", Map.of("host.name", "host-0", "os.type", "linux", "host.ip", "10.0.0.1")),
             "scope",
             Map.of("name", "otel-receiver"),
             "attributes",
