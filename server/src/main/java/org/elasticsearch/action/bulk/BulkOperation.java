@@ -310,8 +310,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     ) {
         ProjectMetadata project = projectResolver.getProjectMetadata(clusterState);
         final ConcreteIndices concreteIndices = new ConcreteIndices(project, indexNameExpressionResolver);
-        // Group the requests by ShardId -> Operations mapping
-        Map<ShardId, List<BulkItemRequest>> requestsByShard = new HashMap<>();
+        // When batch routing is active the router owns the grouping; otherwise we build it here.
+        Map<ShardId, List<BulkItemRequest>> requestsByShard = batchRouter != null ? null : new HashMap<>();
 
         while (it.hasNext()) {
             BulkItemRequest bulkItemRequest = it.next();
@@ -345,19 +345,15 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                     continue;
                 }
                 IndexRouting indexRouting = concreteIndices.routing(concreteIndex);
-                int shardId;
-                if (batchRouter == null) {
-                    docWriteRequest.preRoutingProcess(indexRouting);
-                    shardId = docWriteRequest.route(indexRouting);
-                    docWriteRequest.postRoutingProcess(indexRouting);
+                if (batchRouter != null) {
+                    batchRouter.route(bulkItemRequest, docWriteRequest, ia, concreteIndex, indexRouting, project);
                 } else {
-                    shardId = batchRouter.route(docWriteRequest, ia, concreteIndex, indexRouting, project);
+                    docWriteRequest.preRoutingProcess(indexRouting);
+                    int shardId = docWriteRequest.route(indexRouting);
+                    docWriteRequest.postRoutingProcess(indexRouting);
+                    requestsByShard.computeIfAbsent(new ShardId(concreteIndex, shardId), shard -> new ArrayList<>())
+                        .add(bulkItemRequest);
                 }
-                List<BulkItemRequest> shardRequests = requestsByShard.computeIfAbsent(
-                    new ShardId(concreteIndex, shardId),
-                    shard -> new ArrayList<>()
-                );
-                shardRequests.add(bulkItemRequest);
             } catch (DataStream.TimestampError timestampError) {
                 IndexDocFailureStoreStatus failureStoreStatus = processFailure(bulkItemRequest, project, timestampError);
                 if (IndexDocFailureStoreStatus.USED.equals(failureStoreStatus) == false) {
@@ -372,7 +368,25 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
                 addFailureAndDiscardRequest(docWriteRequest, bulkItemRequest.id(), name, e, failureStoreStatus);
             }
         }
-        return requestsByShard;
+        return batchRouter != null ? batchRouter.buildGrouping(this::onBatchRoutingFailure) : requestsByShard;
+    }
+
+    /**
+     * Per-item failure callback forwarded from {@link BatchModeRouter#buildGrouping} when the
+     * columnar routing pass for an x-content bulk falls back to per-item routing and that routing
+     * also fails. Mirrors the {@code ElasticsearchParseException | IllegalArgumentException |
+     * RoutingMissingException | ResourceNotFoundException} catch block in the main grouping loop,
+     * preserving the same per-item isolation as the non-batch path.
+     */
+    private void onBatchRoutingFailure(BulkItemRequest bulkItemRequest, Exception e) {
+        DocWriteRequest<?> docWriteRequest = bulkItemRequest.request();
+        String name = docWriteRequest != null ? docWriteRequest.index() : "<unknown>";
+        var failureStoreStatus = docWriteRequest != null && isFailureStoreRequest(docWriteRequest)
+            ? IndexDocFailureStoreStatus.FAILED
+            : IndexDocFailureStoreStatus.NOT_APPLICABLE_OR_UNKNOWN;
+        if (docWriteRequest != null) {
+            addFailureAndDiscardRequest(docWriteRequest, bulkItemRequest.id(), name, e, failureStoreStatus);
+        }
     }
 
     /**
@@ -415,8 +429,8 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
             return;
         }
 
-        // Build per-shard source batches. For the inline-encoder path, batches are finalized here
-        // (rows were accumulated during routing). For provided-batch mode the source is scattered here.
+        // Retrieve per-shard batches built during groupRequestsByShards() -> buildGrouping().
+        // Both modes resolve shard assignments and scatter there; shardBatches() returns the result.
         Map<ShardId, SourceBatch> shardBatches = router != null ? router.shardBatches() : Collections.emptyMap();
 
         BatchModeRouter.validateBatchAlignment(requestsByShard, shardBatches);

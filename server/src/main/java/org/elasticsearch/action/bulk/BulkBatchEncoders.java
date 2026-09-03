@@ -11,193 +11,374 @@ package org.elasticsearch.action.bulk;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.elasticsearch.action.DocWriteRequest;
+import org.apache.lucene.util.ArrayUtil;
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.cluster.metadata.ProjectMetadata;
 import org.elasticsearch.cluster.routing.IndexRouting;
 import org.elasticsearch.cluster.routing.RoutingExtractor;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasable;
+import org.elasticsearch.core.Releasables;
+import org.elasticsearch.escf.EscfBatch;
+import org.elasticsearch.escf.EscfBatchScatterer;
 import org.elasticsearch.escf.EscfEncoder;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.sourcebatch.LeafSink;
 import org.elasticsearch.sourcebatch.SourceBatch;
 import org.elasticsearch.sourcebatch.SourceBatchEncoder;
-import org.elasticsearch.xcontent.XContentType;
+import org.elasticsearch.transport.BytesRefRecycler;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
 
 /**
- * Per-bulk helper that performs single-pass {@code XContent → ESCF} encoding while shard routing is
- * being computed, accumulating one row per item directly into the destination shard's row partition
- * inside an {@link EscfEncoder}. There is one encoder per concrete write index encountered in the
- * bulk; each encoder fans rows out to many partitions (one per destination shard).
+ * Per-bulk helper that performs single-pass {@code XContent → ESCF} encoding into a single
+ * index-level partition (partition 0) per concrete write index. Shard routing is deferred to
+ * {@link #finishRouting}, which runs after all items have been encoded.
  *
- * <p>Lifecycle: created at the start of a {@link BulkOperation#doRun() bulk run} only when
- * {@link #isBulkBatchEligible} returns true (i.e. every item in the bulk is structurally eligible
- * for batch encoding), used inside the initial-pass shard grouping, finalized via
- * {@link #finalizeBatches} just before per-shard {@code BulkShardRequest}s are constructed, and
- * {@link #close closed} when the bulk operation tears down.
+ * <p>For indices whose routing strategy {@link IndexRouting#supportsBatchRouting() supports the
+ * batch-routing contract} (currently {@code index.dimensions} / TSDB), the columnar trio
+ * ({@code preProcess} / {@link IndexRouting#indexShard(IndexRequest[], SourceBatch)} /
+ * {@code postProcess}) is invoked once per index in {@link #finishRouting}, computing tsids via
+ * {@link org.elasticsearch.cluster.routing.ColumnarTsidCalculator} without any source parsing
+ * during the encode phase.
  *
- * <p>Routing parity with the source-parser-based path is preserved by feeding the routing strategy's
- * {@link RoutingExtractor} (when one is available) data sourced from the encoder's parse pass.
- * Routing strategies without an extractor (Unpartitioned / Partitioned / IdAndRoutingOnly) fall
- * through to {@link IndexRouting#indexShard(IndexRequest)} since they don't need source parsing.
- * If the extractor throws (e.g. an array at a matched routing column), the helper catches it,
- * disables itself for the remainder of the bulk, and every item routes through the inline-source
- * path.
+ * <p>For indices that require a per-parse {@link RoutingExtractor} (currently {@code routing_path}
+ * / LogsDB), the extractor is fed during the encode pass, its shard id recorded, and then routing
+ * pre/post-processing is applied per item — the same single-pass flow as before, with rows
+ * committing to partition 0 instead of the destination shard's partition.
  *
- * <p>Bulk-wide all-or-nothing: the decision to use batch encoding is made once for the whole bulk by
- * the pre-scan in {@link BulkOperation#doRun()}. If a runtime encoder failure happens mid-grouping
- * — typically because the source bytes that already passed {@code BulkRequestParser} validation
- * fail the encoder's full parse — {@link #tryEncodeAndRoute} signals that via {@link #disabled()}
- * and the rest of the bulk goes through the inline-source path. {@link #finalizeBatches} returns an
- * empty map when disabled, so previously-committed rows are simply discarded and items keep their
- * inline source.
+ * <p>Bulk-wide all-or-nothing: if a runtime encoder failure happens mid-grouping, {@link #disabled}
+ * is set and subsequent items are routed inline by the caller. Items encoded before the failure
+ * are handled in {@link #finishRouting} via per-item fallback (columnar path) or their
+ * pre-computed shard ids (extractor path).
  */
 final class BulkBatchEncoders implements Releasable {
 
     private static final Logger logger = LogManager.getLogger(BulkBatchEncoders.class);
 
-    /** Sentinel returned from {@link #tryEncodeAndRoute} when the item cannot be batch-encoded. */
+    /** Sentinel returned from {@link #tryEncode} when the item cannot be batch-encoded. */
     static final int NOT_BATCHABLE = -1;
 
-    private static final class IndexState {
-        final SourceBatchEncoder encoder;
-        final RoutingExtractor extractor;
-        final Map<ShardId, List<PendingAttachment>> pendingByShard = new HashMap<>();
+    /** All rows for a concrete index go into a single index-level partition before scatter. */
+    private static final int INDEX_PARTITION = 0;
 
-        IndexState(SourceBatchEncoder encoder, RoutingExtractor extractor) {
-            this.encoder = encoder;
-            this.extractor = extractor;
+    private static final class IndexState {
+        final SourceBatchEncoder encoder = new EscfEncoder();
+        final IndexRouting routing;
+        final Index concreteIndex;
+        final int shardCount;
+        /**
+         * Non-null only for strategies that cannot use the columnar-routing trio
+         * ({@code routing_path} indices where {@link IndexRouting#supportsBatchRouting()}
+         * returns {@code false}). When null the columnar trio runs in {@link #finishRouting}.
+         */
+        @Nullable
+        final RoutingExtractor extractor;
+        /** Items in row-commit order; {@code items.get(i)} is at row {@code i} in the encoder. */
+        final List<BulkItemRequest> items = new ArrayList<>();
+        /**
+         * Per-row destination shard id. For the extractor path, populated in {@link #tryEncode};
+         * for the columnar path, populated by the columnar trio in {@link #finishRouting}.
+         */
+        int[] shardIds = new int[16];
+
+        IndexState(IndexRouting routing, Index concreteIndex, int shardCount) {
+            this.routing = routing;
+            this.concreteIndex = concreteIndex;
+            this.shardCount = shardCount;
+            this.extractor = routing.supportsBatchRouting() ? null : routing.newRoutingExtractor();
         }
     }
-
-    private record PendingAttachment(IndexRequest indexRequest, int rowIndex) {}
 
     private final Map<Index, IndexState> indexStates = new HashMap<>();
     private boolean disabled;
     private boolean closed;
 
     /**
-     * Returns true if every item in {@code bulkRequest} is structurally eligible to be batch-encoded:
-     * an {@link IndexRequest} with inline source bytes, a known content type, and no pre-attached
-     * batch row. If false, the bulk goes through the inline-source path end-to-end and no encoder
-     * helper is created.
-     */
-    static boolean isBulkBatchEligible(BulkRequest bulkRequest) {
-        if (bulkRequest.isSimulated()) {
-            return false;
-        }
-        for (DocWriteRequest<?> request : bulkRequest.requests) {
-            if (request instanceof IndexRequest indexRequest) {
-                if (isItemBatchEligible(indexRequest) == false) {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-        return bulkRequest.requests.isEmpty() == false;
-    }
-
-    /**
-     * Per-item batch eligibility. Used by {@link #isBulkBatchEligible}; exposed for tests so the
-     * pre-scan logic can be exercised in isolation.
+     * Per-item batch eligibility. An item is eligible if it has inline source bytes, a known content
+     * type, and does not already carry a source-row reference (which would indicate a pre-built batch
+     * path instead).
      */
     static boolean isItemBatchEligible(IndexRequest request) {
         return request.indexSource().hasSource() && request.getContentType() != null && request.indexSource().hasSourceRow() == false;
     }
 
     /**
-     * True after {@link #tryEncodeAndRoute} has hit a runtime encoder failure. Once disabled, the
-     * helper still returns shard ids (so grouping can continue normally) but no batches are produced
-     * by {@link #finalizeBatches} — every item ends up routed via the inline-source path.
+     * True after {@link #tryEncode} has hit a runtime encoder failure. Once disabled, the
+     * helper still accepts items (returning {@link #NOT_BATCHABLE}) so the router can forward them
+     * to inline routing; any rows already committed are handled in {@link #finishRouting}.
      */
     boolean disabled() {
         return disabled;
     }
 
     /**
-     * Encode {@code request} into the per-(concrete-index) encoder, compute its shard id (via the
-     * routing strategy's extractor when applicable, falling back to
-     * {@link IndexRouting#indexShard(IndexRequest)} otherwise), commit the staged row to the
-     * destination shard's partition, and return the shard id.
+     * Encode {@code request} into the per-concrete-index encoder, committing the staged row to a
+     * single index-level partition. For routing strategies that need a per-parse
+     * {@link RoutingExtractor}, the shard id is also computed and stored here so that routing
+     * pre/post processing can be applied. For strategies that support the columnar batch-routing
+     * contract ({@link IndexRouting#supportsBatchRouting()}), shard assignment is deferred to
+     * {@link #finishRouting}.
      *
-     * @return the destination shard id within {@code concreteIndex}, or {@link #NOT_BATCHABLE} if
-     *         the encoder failed for this item — in which case the entire bulk's batch is
-     *         abandoned ({@link #disabled()} becomes true) and the caller must route the item via
-     *         {@link IndexRouting#indexShard(IndexRequest)} on the inline source.
+     * @return the row index within this index's encoder on success, or {@link #NOT_BATCHABLE} if
+     *         encoding failed — in which case {@link #disabled()} becomes {@code true} and the
+     *         caller must route the item inline.
      */
-    int tryEncodeAndRoute(IndexRequest request, Index concreteIndex, IndexRouting indexRouting) {
+    int tryEncode(BulkItemRequest item, IndexRequest request, Index concreteIndex, IndexRouting routing, ProjectMetadata project) {
         if (disabled) {
             return NOT_BATCHABLE;
         }
         IndexState state = indexStates.computeIfAbsent(
             concreteIndex,
-            idx -> new IndexState(new EscfEncoder(), indexRouting.newRoutingExtractor())
+            idx -> new IndexState(routing, concreteIndex, project.getIndexSafe(concreteIndex).getNumberOfShards())
         );
+        LeafSink sink;
         if (state.extractor != null) {
             state.extractor.reset();
+            sink = state.extractor;
+        } else {
+            sink = LeafSink.NO_OP;
         }
-        LeafSink sink = state.extractor != null ? state.extractor : LeafSink.NO_OP;
-        XContentType contentType = request.getContentType();
         try {
-            state.encoder.parseToScratch(request.indexSource().bytes(), contentType, sink);
+            state.encoder.parseToScratch(request.indexSource().bytes(), request.getContentType(), sink);
         } catch (Exception e) {
             // Either the source bytes failed the encoder's parse (rare — they already passed
             // BulkRequestParser validation), or the extractor threw because it can't handle the
             // input (e.g. an array at a matched routing column). Either way, abandon the entire
-            // bulk's batch: items already committed are discarded by finalizeBatches returning
-            // empty, and subsequent items skip encoding (see the disabled check above). The
-            // encoder's scratch will be reset at the start of the next parseToScratch call, so we
-            // don't need to clean up here.
+            // bulk's batch encoding.
             logger.debug("batch encoding / routing extraction failed; abandoning batch for the rest of this bulk", e);
             disabled = true;
             return NOT_BATCHABLE;
         }
-        int shardIdInt = state.extractor != null ? state.extractor.computeShardId(request) : indexRouting.indexShard(request);
-        ShardId destShardId = new ShardId(concreteIndex, shardIdInt);
+        int rowIndex;
         try {
-            int rowIndex = state.encoder.commitScratchTo(shardIdInt);
-            state.pendingByShard.computeIfAbsent(destShardId, k -> new ArrayList<>()).add(new PendingAttachment(request, rowIndex));
+            rowIndex = state.encoder.commitScratchTo(INDEX_PARTITION);
         } catch (Exception e) {
-            // commitScratchTo failure indicates internal-state corruption (IO error on the
-            // underlying stream). Surface it; the per-item catch in groupRequestsByShards turns it
-            // into a per-item failure response.
-            throw new IllegalStateException("Failed to commit batch row for item to shard " + destShardId, e);
+            throw new IllegalStateException("Failed to commit batch row for item to partition " + INDEX_PARTITION, e);
         }
-        return shardIdInt;
+        assert rowIndex == state.items.size() : "row index mismatch: expected " + state.items.size() + " but got " + rowIndex;
+        if (state.extractor != null) {
+            // Extractor path (routing_path / LogsDB): compute shard from the hash accumulated during
+            // parse, applying pre/post processing now so the routing hash or time-based id is set
+            // before the item leaves tryEncode.
+            request.preRoutingProcess(routing);
+            int shardId = state.extractor.computeShardId(request);
+            request.postRoutingProcess(routing);
+            if (rowIndex >= state.shardIds.length) {
+                state.shardIds = ArrayUtil.grow(state.shardIds, rowIndex + 1);
+            }
+            state.shardIds[rowIndex] = shardId;
+        }
+        state.items.add(item);
+        return rowIndex;
     }
 
     /**
-     * Build the batch for every shard that received committed rows, set the batch row reference
-     * on each item routed there (replacing inline source bytes with a row reference), and return
-     * the resulting batches keyed by ShardId. Returns an empty map when {@link #disabled()} is true.
+     * Build the per-index batches, run shard routing for indices that support the columnar contract,
+     * scatter into per-shard batches, attach source-row references on items, and populate
+     * {@code requestsByShard} and {@code shardBatchesOut}. Items whose index falls back to per-item
+     * routing (on a columnar-routing failure) are routed via their inline source and forwarded to
+     * {@code onItemFailure} if routing itself fails.
+     *
+     * <p>When {@link #disabled()} is true, rows committed before the failure are handled: extractor-
+     * path rows use their pre-computed shard ids (re-routing via inline source would violate
+     * preconditions set by {@code postProcess}); columnar-path rows are routed per-item from inline
+     * source since no routing work was done on them.
      */
-    Map<ShardId, SourceBatch> finalizeBatches() {
+    void finishRouting(
+        Map<ShardId, List<BulkItemRequest>> requestsByShard,
+        Map<ShardId, SourceBatch> shardBatchesOut,
+        BiConsumer<BulkItemRequest, Exception> onItemFailure
+    ) {
         if (disabled) {
-            return Collections.emptyMap();
+            for (IndexState state : indexStates.values()) {
+                finishDisabledState(state, requestsByShard, onItemFailure);
+            }
+            return;
         }
-        Map<ShardId, SourceBatch> batchesByShard = new HashMap<>();
         for (IndexState state : indexStates.values()) {
-            for (Map.Entry<ShardId, List<PendingAttachment>> entry : state.pendingByShard.entrySet()) {
-                List<PendingAttachment> pending = entry.getValue();
-                if (pending.isEmpty()) {
-                    continue;
+            finishActiveState(state, requestsByShard, shardBatchesOut, onItemFailure);
+        }
+    }
+
+    private void finishDisabledState(
+        IndexState state,
+        Map<ShardId, List<BulkItemRequest>> requestsByShard,
+        BiConsumer<BulkItemRequest, Exception> onItemFailure
+    ) {
+        if (state.items.isEmpty()) {
+            return;
+        }
+        if (state.extractor != null) {
+            // Routing was done per-item in tryEncode (preRoutingProcess + computeShardId + postRoutingProcess).
+            // Cannot call route() again: checkNoRouting would reject the routing hash already embedded.
+            // Use the pre-computed shard ids directly; items retain inline source (setSourceRow not called).
+            for (int row = 0; row < state.items.size(); row++) {
+                int shardId = state.shardIds[row];
+                requestsByShard.computeIfAbsent(new ShardId(state.concreteIndex, shardId), k -> new ArrayList<>())
+                    .add(state.items.get(row));
+            }
+        } else {
+            // Columnar path: no routing work was done yet. Route per-item from inline source.
+            routePerItem(state, requestsByShard, onItemFailure, false);
+        }
+    }
+
+    private void finishActiveState(
+        IndexState state,
+        Map<ShardId, List<BulkItemRequest>> requestsByShard,
+        Map<ShardId, SourceBatch> shardBatchesOut,
+        BiConsumer<BulkItemRequest, Exception> onItemFailure
+    ) {
+        if (state.items.isEmpty()) {
+            return;
+        }
+        // preProcessed tracks whether routing pre-processing has been applied to the items
+        // so that routePerItem can skip re-applying preRoutingProcess on fallback.
+        // For the extractor path it was done per-item in tryEncode, so starts true.
+        boolean preProcessed = state.extractor != null;
+        EscfBatch batch = null;
+        try {
+            batch = (EscfBatch) state.encoder.buildPartition(INDEX_PARTITION);
+            if (state.extractor == null) {
+                // Columnar path (TSDB / index.dimensions): run the batch-routing trio.
+                IndexRequest[] requests = indexRequests(state.items);
+                state.routing.preProcess(requests);
+                preProcessed = true;
+                int[] shards = state.routing.indexShard(requests, batch);
+                state.routing.postProcess(requests);
+                if (state.shardIds.length < shards.length) {
+                    state.shardIds = ArrayUtil.grow(state.shardIds, shards.length);
                 }
-                ShardId shardId = entry.getKey();
-                SourceBatch batch = state.encoder.buildPartition(shardId.getId());
-                batchesByShard.put(shardId, batch);
-                for (PendingAttachment attachment : pending) {
-                    attachment.indexRequest.indexSource().setSourceRow(batch, attachment.rowIndex);
+                System.arraycopy(shards, 0, state.shardIds, 0, shards.length);
+            }
+            validateShardIds(state);
+            if (state.shardCount == 1) {
+                // Single-shard fast path: no scatter needed; transfer batch ownership to shardBatchesOut.
+                ShardId shardId = new ShardId(state.concreteIndex, 0);
+                List<BulkItemRequest> list = requestsByShard.computeIfAbsent(shardId, k -> new ArrayList<>());
+                int n = state.items.size();
+                for (int row = 0; row < n; row++) {
+                    list.add(state.items.get(row));
+                    ((IndexRequest) state.items.get(row).request()).indexSource().setSourceRow(batch, row);
                 }
+                shardBatchesOut.put(shardId, batch);
+                batch = null; // ownership transferred — do not close
+            } else {
+                scatterAndAttach(state, batch, requestsByShard, shardBatchesOut);
+                batch = null; // closed inside scatterAndAttach after scatter
+            }
+        } catch (Exception e) {
+            Releasables.close(batch); // null-safe; no-op if already transferred or closed
+            if (state.extractor != null) {
+                // Extractor path: routing was done in tryEncode; cannot re-route via inline source.
+                // Fall back by grouping on pre-computed shard ids (no batch for this index).
+                logger.debug(
+                    () -> "batch scatter failed for index ["
+                        + state.concreteIndex.getName()
+                        + "]; falling back to pre-computed shard grouping (no batch)",
+                    e
+                );
+                for (int row = 0; row < state.items.size(); row++) {
+                    requestsByShard.computeIfAbsent(new ShardId(state.concreteIndex, state.shardIds[row]), k -> new ArrayList<>())
+                        .add(state.items.get(row));
+                }
+            } else {
+                logger.debug(
+                    () -> "columnar batch routing failed for index ["
+                        + state.concreteIndex.getName()
+                        + "]; per-item fallback from inline source",
+                    e
+                );
+                routePerItem(state, requestsByShard, onItemFailure, preProcessed);
             }
         }
-        return batchesByShard;
+    }
+
+    private static void scatterAndAttach(
+        IndexState state,
+        EscfBatch batch,
+        Map<ShardId, List<BulkItemRequest>> requestsByShard,
+        Map<ShardId, SourceBatch> shardBatchesOut
+    ) {
+        int n = state.items.size();
+        EscfBatch[] parts;
+        try (EscfBatchScatterer scatterer = new EscfBatchScatterer(BytesRefRecycler.NON_RECYCLING_INSTANCE)) {
+            parts = scatterer.scatter(batch, state.shardIds, state.shardCount);
+        } finally {
+            // Scatterer copied bytes out; close the index-level batch. Parts are owned by shardBatchesOut.
+            batch.close();
+        }
+        int[] nextRow = new int[state.shardCount];
+        for (int row = 0; row < n; row++) {
+            int shard = state.shardIds[row];
+            ShardId shardId = new ShardId(state.concreteIndex, shard);
+            shardBatchesOut.putIfAbsent(shardId, parts[shard]);
+            requestsByShard.computeIfAbsent(shardId, k -> new ArrayList<>()).add(state.items.get(row));
+            ((IndexRequest) state.items.get(row).request()).indexSource().setSourceRow(parts[shard], nextRow[shard]++);
+        }
+    }
+
+    private static void validateShardIds(IndexState state) {
+        for (int row = 0; row < state.items.size(); row++) {
+            int shardId = state.shardIds[row];
+            if (shardId < 0 || shardId >= state.shardCount) {
+                throw new IllegalArgumentException(
+                    "shard id "
+                        + shardId
+                        + " at row "
+                        + row
+                        + " is outside valid range [0, "
+                        + state.shardCount
+                        + ") for index ["
+                        + state.concreteIndex.getName()
+                        + "]"
+                );
+            }
+        }
+    }
+
+    /**
+     * Per-item fallback for the columnar path: route each item from its inline source. Items whose
+     * routing fails are forwarded to {@code onItemFailure} rather than throwing, preserving the
+     * per-item isolation of the non-batch routing path.
+     *
+     * @param preProcessed if true, {@code preRoutingProcess} was already called on these items
+     *                     (e.g. the columnar trio ran {@code preProcess} before failing); skip
+     *                     calling it again to avoid violating the "id == null" precondition.
+     */
+    private static void routePerItem(
+        IndexState state,
+        Map<ShardId, List<BulkItemRequest>> requestsByShard,
+        BiConsumer<BulkItemRequest, Exception> onItemFailure,
+        boolean preProcessed
+    ) {
+        for (BulkItemRequest bulkItem : state.items) {
+            IndexRequest request = (IndexRequest) bulkItem.request();
+            try {
+                if (preProcessed == false) {
+                    request.preRoutingProcess(state.routing);
+                }
+                int shardId = request.route(state.routing);
+                request.postRoutingProcess(state.routing);
+                requestsByShard.computeIfAbsent(new ShardId(state.concreteIndex, shardId), k -> new ArrayList<>()).add(bulkItem);
+            } catch (Exception ex) {
+                onItemFailure.accept(bulkItem, ex);
+            }
+        }
+    }
+
+    private static IndexRequest[] indexRequests(List<BulkItemRequest> items) {
+        IndexRequest[] requests = new IndexRequest[items.size()];
+        for (int i = 0; i < items.size(); i++) {
+            requests[i] = (IndexRequest) items.get(i).request();
+        }
+        return requests;
     }
 
     @Override

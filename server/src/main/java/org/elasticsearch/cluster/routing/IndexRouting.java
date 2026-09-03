@@ -174,6 +174,19 @@ public abstract class IndexRouting {
     }
 
     /**
+     * Whether {@link #indexShard(IndexRequest[], SourceBatch)} together with
+     * {@link #preProcess(IndexRequest[])} / {@link #postProcess(IndexRequest[])} forms a consistent
+     * batch-routing contract for this strategy. When false, callers must route each request
+     * individually via an inline-parse extractor. The base-class defaults loop per request and are
+     * consistent, so this returns {@code true} here; {@link ExtractFromSource} opts out because its
+     * {@link ExtractFromSource#postProcess(IndexRequest[])} requires hashes only a batch-aware
+     * {@code indexShard} records.
+     */
+    public boolean supportsBatchRouting() {
+        return true;
+    }
+
+    /**
      * Called when indexing a document must be rerouted from the source shard to the target
      * during resharding. Should be similar to {@link #indexShard(IndexRequest)} while avoiding
      * the initial expense of having to calculate the routing parameters.
@@ -460,6 +473,18 @@ public abstract class IndexRouting {
             this.parserConfig = XContentParserConfiguration.EMPTY.withFiltering(null, Set.copyOf(includePaths), null, true);
         }
 
+        /**
+         * Opts out of the batch-routing contract: {@link #postProcess(IndexRequest[])} requires
+         * hashes that only {@link ForIndexDimensions#indexShard(IndexRequest[], SourceBatch)} records,
+         * so callers must use a per-parse {@link RoutingExtractor} instead — unless the subclass
+         * overrides {@code supportsBatchRouting()} back to {@code true} (as {@link ForIndexDimensions}
+         * does).
+         */
+        @Override
+        public boolean supportsBatchRouting() {
+            return false;
+        }
+
         @Override
         public void postProcess(IndexRequest indexRequest) {
             doPostProcess(indexRequest, hash);
@@ -718,9 +743,28 @@ public abstract class IndexRouting {
                 return hash(tsid);
             }
 
+            /**
+             * {@inheritDoc}
+             *
+             * <p>The bulk path routes this index type columnar via
+             * {@link #indexShard(IndexRequest[], SourceBatch)} and
+             * {@link ColumnarTsidCalculator}, so the per-parse {@link DimensionsExtractor} returned
+             * by {@link #newRoutingExtractor()} is only used by the row-path reference tests in
+             * {@code ColumnarTsidCalculatorTests}.
+             */
             @Override
             public RoutingExtractor newRoutingExtractor() {
                 return new DimensionsExtractor(this);
+            }
+
+            /**
+             * Re-enables the batch-routing contract for this strategy: the consistent columnar
+             * trio ({@link #preProcess(IndexRequest[])}, {@link #indexShard(IndexRequest[], SourceBatch)},
+             * {@link #postProcess(IndexRequest[])}) is available via {@link ColumnarTsidCalculator}.
+             */
+            @Override
+            public boolean supportsBatchRouting() {
+                return true;
             }
 
             /**
