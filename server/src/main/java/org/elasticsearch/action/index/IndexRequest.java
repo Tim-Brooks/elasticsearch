@@ -980,8 +980,15 @@ public class IndexRequest extends ReplicatedWriteRequest<IndexRequest> implement
         return rawTimestamp;
     }
 
+    /**
+     * Caches the document's raw {@code @timestamp} so that TSDB write-index resolution does not have to parse the
+     * source. Set either from the ingest document (see {@code IngestService#cacheRawTimestamp}) or, for bulks
+     * carrying a pre-built source batch, from the batch's {@code @timestamp} column (see
+     * {@code BatchModeRouter#cacheRawTimestamps}). Only {@link Long} and {@link String} values are understood by
+     * {@code DataStream#getTimeSeriesTimestamp}.
+     */
     public void setRawTimestamp(Object rawTimestamp) {
-        assert this.rawTimestamp == null : "rawTimestamp only set in ingest phase, it can't be set twice";
+        assert this.rawTimestamp == null : "rawTimestamp can't be set twice";
         this.rawTimestamp = rawTimestamp;
     }
 

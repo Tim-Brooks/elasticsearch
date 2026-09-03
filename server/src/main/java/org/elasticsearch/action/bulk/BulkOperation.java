@@ -285,6 +285,11 @@ final class BulkOperation extends ActionRunnable<BulkResponse> {
     }
 
     private Map<ShardId, List<BulkItemRequest>> groupBulkRequestsByShards(ClusterState clusterState) {
+        if (router != null) {
+            // Must run before the loop below: resolving a TSDB write index needs the timestamp, and for items
+            // backed by a pre-built batch the only place it can come from is the batch's own column.
+            router.cacheRawTimestamps(bulkRequest.requests);
+        }
         return groupRequestsByShards(
             clusterState,
             Iterators.enumerate(bulkRequest.requests.iterator(), BulkItemRequest::new),

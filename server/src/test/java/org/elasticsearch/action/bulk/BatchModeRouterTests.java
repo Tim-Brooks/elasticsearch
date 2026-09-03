@@ -23,6 +23,8 @@ import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.escf.EscfBatch;
+import org.elasticsearch.escf.EscfColumn;
+import org.elasticsearch.escf.EscfColumnKind;
 import org.elasticsearch.escf.EscfEncoder;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexMode;
@@ -41,9 +43,9 @@ import org.elasticsearch.xcontent.json.JsonXContent;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -175,11 +177,76 @@ public class BatchModeRouterTests extends ESTestCase {
         return request;
     }
 
+    /** Marker for {@link #buildTimestampBatch}: omit {@code @timestamp} from this row entirely. */
+    private static final Object ABSENT = new Object();
+
     /**
-     * Mirror of {@link BulkOperation}'s shard grouping loop: resolves the concrete write index and
-     * routing for each item, then delegates to {@link BatchModeRouter#route} (which records the item
-     * for deferred assignment), and finally resolves all shard assignments via
-     * {@link BatchModeRouter#buildGrouping}.
+     * Builds a batch whose rows are {@code {"@timestamp": <value>, "dim": "d<i>"}}. A {@code null} entry writes an
+     * explicit JSON null; {@link #ABSENT} omits the field. The value types drive which ESCF column kind the
+     * encoder produces — uniform longs give a LONG column, uniform strings a STRING column, and a mix a UNION.
+     */
+    private static EscfBatch buildTimestampBatch(Object... timestamps) throws IOException {
+        try (EscfEncoder encoder = new EscfEncoder()) {
+            for (int i = 0; i < timestamps.length; i++) {
+                XContentBuilder doc = JsonXContent.contentBuilder();
+                doc.startObject();
+                Object timestamp = timestamps[i];
+                if (timestamp == null) {
+                    doc.nullField(DataStream.TIMESTAMP_FIELD_NAME);
+                } else if (timestamp != ABSENT) {
+                    doc.field(DataStream.TIMESTAMP_FIELD_NAME, timestamp);
+                }
+                doc.field("dim", "d" + i);
+                doc.endObject();
+                encoder.parseToScratch(BytesReference.bytes(doc), XContentType.JSON, LeafSink.NO_OP);
+                encoder.commitScratchTo(0);
+            }
+            return encoder.buildPartition(0);
+        }
+    }
+
+    /**
+     * A row-bearing TSDB request with a pre-computed tsid but <b>no</b> timestamp — the case the timestamp tests
+     * below cover, where the timestamp must come from the batch's own column.
+     */
+    private static IndexRequest tsdbRowRequestNoTimestamp(EscfBatch batch, int row) {
+        IndexRequest request = new IndexRequest(DATA_STREAM).opType(DocWriteRequest.OpType.CREATE);
+        request.indexSource().setSourceRow(batch, row, XContentType.JSON);
+        request.tsid(new BytesRef("tsid-" + row));
+        return request;
+    }
+
+    private static BulkRequest tsdbBulkNoTimestamps(EscfBatch batch) {
+        BulkRequest bulkRequest = new BulkRequest();
+        for (int row = 0; row < batch.docCount(); row++) {
+            bulkRequest.add(tsdbRowRequestNoTimestamp(batch, row));
+        }
+        bulkRequest.setPreBuiltBatches(Map.of(DATA_STREAM, batch));
+        return bulkRequest;
+    }
+
+    private static EscfColumn timestampColumn(EscfBatch batch) {
+        return batch.column(batch.schema().findLeaf(DataStream.TIMESTAMP_FIELD_NAME, 0));
+    }
+
+    /** Runs only the timestamp pre-pass and returns the cached raw timestamp of each row. */
+    private static List<Object> cachedRawTimestamps(EscfBatch batch) {
+        BulkRequest bulkRequest = tsdbBulkNoTimestamps(batch);
+        BatchModeRouter router = BatchModeRouter.create(bulkRequest, true);
+        router.cacheRawTimestamps(bulkRequest.requests);
+        List<Object> raw = new ArrayList<>();
+        for (DocWriteRequest<?> request : bulkRequest.requests) {
+            raw.add(((IndexRequest) request).getRawTimestamp());
+        }
+        router.close();
+        return raw;
+    }
+
+    /**
+     * Mirror of {@link BulkOperation}'s shard grouping loop: caches raw timestamps from the batch,
+     * resolves the concrete write index and routing for each item, then delegates to
+     * {@link BatchModeRouter#route} (which records the item for deferred assignment), and finally
+     * resolves all shard assignments via {@link BatchModeRouter#buildGrouping}.
      *
      * @param skipRows rows to drop before routing, standing in for items that fail validation in the
      *                 real loop
@@ -190,6 +257,7 @@ public class BatchModeRouterTests extends ESTestCase {
         ProjectMetadata project,
         Set<Integer> skipRows
     ) {
+        router.cacheRawTimestamps(bulkRequest.requests);
         int slot = 0;
         for (DocWriteRequest<?> docWriteRequest : bulkRequest.requests) {
             IndexRequest request = (IndexRequest) docWriteRequest;
@@ -542,6 +610,196 @@ public class BatchModeRouterTests extends ESTestCase {
         BytesRef expected = dims.buildTsid(XContentType.JSON, docs.sources().get(0));
         assertThat(request.tsid(), equalTo(expected));
         assertFalse("grouping must be non-empty", requestsByShard.isEmpty());
+        router.close();
+    }
+
+    /**
+     * A uniform numeric {@code @timestamp} column: every row's epoch-millis value is cached as a {@link Long},
+     * which is the only numeric type {@code DataStream#getTimeSeriesTimestamp} accepts.
+     */
+    public void testCachesRawTimestampFromLongColumn() throws IOException {
+        long first = IN_GEN_1.toEpochMilli();
+        long second = IN_GEN_1.plusMillis(1234).toEpochMilli();
+        assertThat(cachedRawTimestamps(buildTimestampBatch(first, second)), equalTo(List.of(first, second)));
+    }
+
+    /**
+     * A uniform string {@code @timestamp} column is cached verbatim as a {@link String}, leaving the parse to
+     * {@code DataStream}'s own formatter. Covers all three formats that formatter accepts, including the
+     * nanosecond form, which the default date field formatter would reject.
+     */
+    public void testCachesRawTimestampFromStringColumn() throws IOException {
+        List<Object> raw = cachedRawTimestamps(
+            buildTimestampBatch("2024-03-01T00:00:00Z", "2024-03-01T00:00:00.123456789Z", "1709251200000")
+        );
+        assertThat(raw, equalTo(List.of("2024-03-01T00:00:00Z", "2024-03-01T00:00:00.123456789Z", "1709251200000")));
+    }
+
+    /**
+     * Column shapes the cursor walk does not accept are skipped wholesale, leaving every row uncached so the
+     * existing resolution reports the failure per item inside the grouping loop. Mixed value types and explicit
+     * nulls both produce a UNION column, which has no single typed cursor; a multi-valued field produces ARRAY;
+     * and a floating point value produces DOUBLE, which the source parser would truncate rather than accept.
+     */
+    public void testSkipsColumnKindsThatHaveNoTimestampCursor() throws IOException {
+        assertUncachedWithKind(EscfColumnKind.UNION, buildTimestampBatch(IN_GEN_1.toEpochMilli(), "2024-03-01T00:00:00Z"));
+        assertUncachedWithKind(EscfColumnKind.UNION, buildTimestampBatch(IN_GEN_1.toEpochMilli(), null));
+        assertUncachedWithKind(EscfColumnKind.ARRAY, buildTimestampBatch(List.of(1L, 2L), List.of(3L, 4L)));
+        assertUncachedWithKind(EscfColumnKind.DOUBLE, buildTimestampBatch(1.5d, 2.5d));
+    }
+
+    private static void assertUncachedWithKind(byte expectedKind, EscfBatch batch) {
+        assertThat(timestampColumn(batch).kind(), equalTo(expectedKind));
+        for (Object value : cachedRawTimestamps(batch)) {
+            assertThat(value, nullValue());
+        }
+    }
+
+    /**
+     * A cursor visits only the rows that are present, so it cannot be kept in step with the request list when
+     * some rows are missing {@code @timestamp}. Such a column is skipped entirely rather than walked row by row —
+     * caching a subset would be correct but is not worth a second code path, and the rows that do resolve would
+     * anyway be joined by failures from the rows that do not.
+     */
+    public void testSkipsSparseTimestampColumn() throws IOException {
+        EscfBatch batch = buildTimestampBatch(IN_GEN_1.toEpochMilli(), ABSENT, IN_GEN_1.toEpochMilli());
+        assertFalse("a row without @timestamp must leave the column sparse", timestampColumn(batch).isDense());
+        assertThat(cachedRawTimestamps(batch), equalTo(Arrays.asList(null, null, null)));
+    }
+
+    /**
+     * The walk pairs request {@code i} with row {@code i}, so it must not run when the two are not the same
+     * length — otherwise a request could be handed another document's timestamp.
+     */
+    public void testSkipsWhenRequestCountDiffersFromRowCount() throws IOException {
+        EscfBatch batch = buildTimestampBatch(IN_GEN_1.toEpochMilli(), IN_GEN_1.toEpochMilli(), IN_GEN_1.toEpochMilli());
+        BulkRequest bulkRequest = new BulkRequest();
+        bulkRequest.add(tsdbRowRequestNoTimestamp(batch, 0));
+        bulkRequest.add(tsdbRowRequestNoTimestamp(batch, 1));
+        bulkRequest.setPreBuiltBatches(Map.of(DATA_STREAM, batch));
+
+        BatchModeRouter router = BatchModeRouter.create(bulkRequest, true);
+        router.cacheRawTimestamps(bulkRequest.requests);
+        for (DocWriteRequest<?> request : bulkRequest.requests) {
+            assertThat(((IndexRequest) request).getRawTimestamp(), nullValue());
+        }
+        router.close();
+    }
+
+    /**
+     * Same reason as above, one level finer: a request whose row index is not its own position must not pick up
+     * the timestamp of whichever document happens to sit at that position.
+     */
+    public void testSkipsRequestPointingAtAnotherRow() throws IOException {
+        long first = IN_GEN_1.toEpochMilli();
+        long second = IN_GEN_1.plusSeconds(60).toEpochMilli();
+        EscfBatch batch = buildTimestampBatch(first, second);
+        BulkRequest bulkRequest = new BulkRequest();
+        bulkRequest.add(tsdbRowRequestNoTimestamp(batch, 1)); // points at row 1 from position 0
+        bulkRequest.add(tsdbRowRequestNoTimestamp(batch, 1));
+        bulkRequest.setPreBuiltBatches(Map.of(DATA_STREAM, batch));
+
+        BatchModeRouter router = BatchModeRouter.create(bulkRequest, true);
+        router.cacheRawTimestamps(bulkRequest.requests);
+
+        assertThat("must not take row 0's timestamp", ((IndexRequest) bulkRequest.requests.get(0)).getRawTimestamp(), nullValue());
+        assertThat(((IndexRequest) bulkRequest.requests.get(1)).getRawTimestamp(), equalTo(second));
+        router.close();
+    }
+
+    /** A batch with no {@code @timestamp} column at all is a no-op, not a failure. */
+    public void testNoTimestampColumnIsANoOp() throws IOException {
+        assertThat(cachedRawTimestamps(buildBatch(3)), equalTo(Arrays.asList(null, null, null)));
+    }
+
+    /**
+     * The pre-pass must not touch a request the producer already resolved: {@code setRawTimestamp} asserts it is
+     * only ever set once, so overwriting would trip that assertion.
+     */
+    public void testDoesNotOverwriteProducerSuppliedTimestamp() throws IOException {
+        EscfBatch batch = buildTimestampBatch(IN_GEN_1.toEpochMilli(), IN_GEN_1.toEpochMilli());
+        BulkRequest bulkRequest = new BulkRequest();
+        bulkRequest.add(tsdbRowRequest(DATA_STREAM, batch, 0, IN_GEN_1)); // producer set timeSeriesTimestamp
+        IndexRequest preSetRaw = tsdbRowRequestNoTimestamp(batch, 1);
+        preSetRaw.setRawTimestamp("2024-04-01T00:00:00Z");
+        bulkRequest.add(preSetRaw);
+        bulkRequest.setPreBuiltBatches(Map.of(DATA_STREAM, batch));
+
+        BatchModeRouter router = BatchModeRouter.create(bulkRequest, true);
+        router.cacheRawTimestamps(bulkRequest.requests);
+
+        assertThat(((IndexRequest) bulkRequest.requests.get(0)).getRawTimestamp(), nullValue());
+        assertThat(((IndexRequest) bulkRequest.requests.get(0)).getTimeSeriesTimestamp(), equalTo(IN_GEN_1));
+        assertThat(preSetRaw.getRawTimestamp(), equalTo("2024-04-01T00:00:00Z"));
+        router.close();
+    }
+
+    /**
+     * End to end: a TSDB bulk whose items carry no producer-supplied timestamp still resolves to the correct
+     * backing index, because the write index is selected from the value read out of the batch's column. Before
+     * this worked, every item failed — the items hold no inline source for the source parser to read.
+     */
+    public void testResolvesTsdbWriteIndexFromTimestampColumn() throws IOException {
+        IndexMetadata md = tsdbBackingIndex(1, 1, GEN_1_START, GEN_1_END);
+        ProjectMetadata project = projectWithDataStream(md);
+
+        // Both column kinds the scan understands must produce the same write index for the same instant.
+        EscfBatch batch = randomBoolean()
+            ? buildTimestampBatch(IN_GEN_1.toEpochMilli(), IN_GEN_1.toEpochMilli())
+            : buildTimestampBatch(IN_GEN_1.toString(), IN_GEN_1.toString());
+        BulkRequest bulkRequest = tsdbBulkNoTimestamps(batch);
+
+        BatchModeRouter router = BatchModeRouter.create(bulkRequest, true);
+        var requestsByShard = routeAll(router, bulkRequest, project);
+
+        assertThat(requestsByShard.keySet(), equalTo(Set.of(new ShardId(md.getIndex(), 0))));
+        for (DocWriteRequest<?> request : bulkRequest.requests) {
+            // getConcreteWriteIndex resolves and memoizes the canonical (second-truncated) instant.
+            assertThat(((IndexRequest) request).getTimeSeriesTimestamp(), equalTo(IN_GEN_1));
+        }
+        assertShardsAligned(requestsByShard, router.shardBatches());
+        router.close();
+    }
+
+    /**
+     * The column value really is consulted per row: with two generations covering different windows, a batch of
+     * rows that all fall in generation 2 routes to generation 2, not to the newest-write-index default.
+     */
+    public void testTimestampColumnSelectsOlderGeneration() throws IOException {
+        IndexMetadata gen1 = tsdbBackingIndex(1, 1, "2024-01-01T00:00:00Z", "2024-02-01T00:00:00Z");
+        IndexMetadata gen2 = tsdbBackingIndex(2, 1, "2024-02-01T00:00:00Z", "2024-03-01T00:00:00Z");
+        ProjectMetadata project = projectWithDataStream(gen1, gen2);
+
+        Instant inGen1 = Instant.parse("2024-01-15T00:00:00Z");
+        EscfBatch batch = buildTimestampBatch(inGen1.toEpochMilli(), inGen1.toEpochMilli());
+        BulkRequest bulkRequest = tsdbBulkNoTimestamps(batch);
+
+        BatchModeRouter router = BatchModeRouter.create(bulkRequest, true);
+        var requestsByShard = routeAll(router, bulkRequest, project);
+
+        assertThat(requestsByShard.keySet(), equalTo(Set.of(new ShardId(gen1.getIndex(), 0))));
+        router.close();
+    }
+
+    /**
+     * Per-row resolution means a batch straddling a rollover boundary now legitimately resolves to two backing
+     * indices, which the router does not yet support. Pinned here so the follow-up that adds multi-index batches
+     * has a failing case to turn green.
+     */
+    public void testTimestampColumnSpanningTwoGenerationsIsRejected() throws IOException {
+        IndexMetadata gen1 = tsdbBackingIndex(1, 1, "2024-01-01T00:00:00Z", "2024-02-01T00:00:00Z");
+        IndexMetadata gen2 = tsdbBackingIndex(2, 1, "2024-02-01T00:00:00Z", "2024-03-01T00:00:00Z");
+        ProjectMetadata project = projectWithDataStream(gen1, gen2);
+
+        EscfBatch batch = buildTimestampBatch(
+            Instant.parse("2024-01-15T00:00:00Z").toEpochMilli(),
+            Instant.parse("2024-02-15T00:00:00Z").toEpochMilli()
+        );
+        BulkRequest bulkRequest = tsdbBulkNoTimestamps(batch);
+
+        BatchModeRouter router = BatchModeRouter.create(bulkRequest, true);
+        var e = expectThrows(IllegalArgumentException.class, () -> routeAll(router, bulkRequest, project));
+        assertThat(e.getMessage(), containsString("batches spanning multiple concrete indices"));
         router.close();
     }
 

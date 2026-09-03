@@ -9,8 +9,12 @@
 
 package org.elasticsearch.action.bulk;
 
+import org.apache.lucene.document.column.LongTupleCursor;
+import org.apache.lucene.document.column.ObjectTupleCursor;
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.cluster.metadata.DataStream;
 import org.elasticsearch.cluster.metadata.IndexAbstraction;
 import org.elasticsearch.cluster.metadata.ProjectMetadata;
 import org.elasticsearch.cluster.routing.IndexRouting;
@@ -18,6 +22,8 @@ import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.escf.EscfBatch;
 import org.elasticsearch.escf.EscfBatchScatterer;
+import org.elasticsearch.escf.EscfColumn;
+import org.elasticsearch.escf.EscfColumnKind;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.sourcebatch.SourceBatch;
@@ -163,6 +169,99 @@ final class BatchModeRouter implements Releasable {
         }
 
         return new BatchModeRouter(new BulkBatchEncoders());
+    }
+
+    /**
+     * Caches each request's {@code @timestamp} on the {@link IndexRequest} by reading it out of the pre-built
+     * batch's timestamp column, so that TSDB write-index resolution does not have to parse the source.
+     * <p>
+     * Items backed by a pre-built batch carry no inline source — {@code IndexSource#setSourceRow} replaces the
+     * bytes with {@code BytesArray.EMPTY} — so {@link DataStream#getTimeSeriesTimestamp} has nothing to parse and
+     * would fail for every document unless the batch producer pre-set the timestamp. Reading the column removes
+     * that requirement. This mirrors what the ingest path does with the ingest document
+     * ({@code IngestService#cacheRawTimestamp}).
+     * <p>
+     * The column is walked with a cursor, in one sequential pass in step with {@code requests}. That requires the
+     * column to be dense and uniformly typed, and every row to have exactly one request — which is what a batch
+     * producer emits and what {@link #create} has already checked the item side of. Anything else (a sparse
+     * column, a union of mixed types, a multi-valued or non-{@code date} field) is skipped wholesale rather than
+     * degraded into a per-row scan; the existing resolution then runs and throws {@code DataStream.TimestampError}
+     * from inside the grouping loop, where it is isolated per item and remains eligible for the failure store.
+     * Throwing from here would fail the whole bulk.
+     * <p>
+     * Only {@link Long} and {@link String} raw values are understood downstream, matching the
+     * {@code VALUE_NUMBER}/{@code VALUE_STRING} tokens the source parser accepts.
+     * <p>
+     * A no-op in x-content mode, where the columns do not exist yet at this point in the bulk.
+     *
+     * @param requests the bulk's requests, one per batch row in row order; entries may be {@code null} for items
+     *                 already failed and discarded
+     */
+    void cacheRawTimestamps(List<DocWriteRequest<?>> requests) {
+        if (source == null) {
+            return;
+        }
+        // Leaf index is the column index, and non-leaf 0 is always the schema root, so this finds a top-level
+        // "@timestamp" only. A nested or dot-spelled field is not the data stream timestamp field.
+        final int columnIndex = source.schema().findLeaf(DataStream.TIMESTAMP_FIELD_NAME, 0);
+        if (columnIndex < 0) {
+            return;
+        }
+        final EscfColumn column = source.column(columnIndex);
+        // A cursor visits only the rows that are present, so it can only stay in step with the request list when
+        // the column is dense and the two are the same length.
+        if (column.isDense() == false || requests.size() != source.docCount()) {
+            return;
+        }
+        switch (column.kind()) {
+            case EscfColumnKind.LONG -> cacheLongTimestamps(requests, column.longCursor());
+            case EscfColumnKind.STRING -> cacheStringTimestamps(requests, column.bytesRefCursor(false));
+            default -> {
+                // Not a shape whose values are timestamps; leave them all unset.
+            }
+        }
+    }
+
+    private static void cacheLongTimestamps(List<DocWriteRequest<?>> requests, LongTupleCursor cursor) {
+        for (int row = 0; row < requests.size(); row++) {
+            final int doc = cursor.nextDoc();
+            assert doc == row : "dense cursor returned doc [" + doc + "] for row [" + row + "]";
+            final IndexRequest request = cacheableRequest(requests.get(row), row);
+            if (request != null) {
+                request.setRawTimestamp(cursor.longValue());
+            }
+        }
+    }
+
+    private static void cacheStringTimestamps(List<DocWriteRequest<?>> requests, ObjectTupleCursor<BytesRef> cursor) {
+        for (int row = 0; row < requests.size(); row++) {
+            final int doc = cursor.nextDoc();
+            assert doc == row : "dense cursor returned doc [" + doc + "] for row [" + row + "]";
+            final IndexRequest request = cacheableRequest(requests.get(row), row);
+            if (request != null) {
+                // The cursor was built with retainValues=false, so its BytesRef is only valid until the next
+                // nextDoc(); utf8ToString copies out of it here.
+                request.setRawTimestamp(cursor.value().utf8ToString());
+            }
+        }
+    }
+
+    /**
+     * Returns the request at {@code row} if its timestamp still needs caching, or {@code null} to leave the row
+     * alone. The row-index check defends the lockstep walk above: a request pointing somewhere other than its own
+     * position would otherwise be given another document's timestamp, and so possibly the wrong backing index.
+     * {@link #recordDeferredItem} rejects such a batch outright, but only later, during routing.
+     */
+    @Nullable
+    private static IndexRequest cacheableRequest(@Nullable DocWriteRequest<?> request, int row) {
+        if (request instanceof IndexRequest indexRequest
+            // Already resolved by the producer, or already cached; setRawTimestamp asserts it is only set once.
+            && indexRequest.getRawTimestamp() == null
+            && indexRequest.getTimeSeriesTimestamp() == null
+            && indexRequest.indexSource().rowIndex() == row) {
+            return indexRequest;
+        }
+        return null;
     }
 
     /**
