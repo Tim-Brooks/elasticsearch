@@ -17,10 +17,12 @@ import org.apache.lucene.util.CloseableThreadLocal;
 import org.apache.lucene.util.IntroSorter;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.core.Assertions;
+import org.elasticsearch.core.Nullable;
 import org.elasticsearch.index.mapper.TsidExtractingIdFieldMapper;
 import org.elasticsearch.index.mapper.Uid;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.ConcurrentMap;
@@ -112,13 +114,6 @@ public final class VersionsAndSeqNoResolver {
         }
     }
 
-    /**
-     * Sentinel used by {@link PerThreadIDVersionAndSeqNoLookup#timeSeriesBatchLookupVersion} to mark
-     * a position as permanently not found (timestamp newer than all remaining segments) without
-     * producing an actual result. Callers replace it with {@code null} before returning to the user.
-     */
-    static final DocIdAndVersion PERMANENTLY_NOT_FOUND = new DocIdAndVersion(-1, -1L, -1L, -1L, null, -1);
-
     /** Wraps an {@link LeafReaderContext}, a doc ID <b>relative to the context doc base</b> and a seqNo. */
     public static final class DocIdAndSeqNo {
         public final int docId;
@@ -155,16 +150,15 @@ public final class VersionsAndSeqNoResolver {
     }
 
     /**
-     * Resolves doc ID and version for a batch of UIDs in a single forward pass through each segment's
-     * terms dictionary, amortizing seek overhead across the batch.
+     * Resolves doc ID and version for a batch of UIDs, amortizing reader and seek overhead across the batch.
      * <p>
      * Results are written into {@code results[i]} for each {@code uids[i]}; a null entry means the UID
-     * was not found. UIDs need not be pre-sorted; sorting is done internally.
+     * was not found. {@code results} is fully overwritten, and {@code uids} is not modified. UIDs need not
+     * be pre-sorted; sorting is done internally.
      * <p>
-     * {@code results} is an out parameter rather than a return value so that it can be shared across
-     * per-segment calls to {@link PerThreadIDVersionAndSeqNoLookup#batchLookupVersion}: each call skips
-     * positions that are already non-null (resolved by a newer segment), giving "newest segment wins"
-     * without a separate merge pass.
+     * The batch is sorted by UID and then handed to each segment newest-first. Each segment resolves what it
+     * can and compacts those entries out of the batch, so later (older) segments only see UIDs that are still
+     * unresolved and the newest segment's version naturally wins.
      * <p>
      * This method uses {@code loadTimestampRange = false} and is intended for standard (non-time-series)
      * indices. For time series indices use {@link #timeSeriesBatchLoadDocIdAndVersion} instead.
@@ -173,46 +167,45 @@ public final class VersionsAndSeqNoResolver {
         throws IOException {
         final int n = uids.length;
         assert results.length == n && loadSeqNo.length == n;
-
-        // Sort by UID so each segment can be scanned with a single forward pass
-        final int[] order = sortByUid(uids);
-
-        final BytesRef[] sortedUids = new BytesRef[n];
-        final boolean[] sortedLoadSeqNo = new boolean[n];
-        for (int i = 0; i < n; i++) {
-            sortedUids[i] = uids[order[i]];
-            sortedLoadSeqNo[i] = loadSeqNo[order[i]];
+        Arrays.fill(results, null);
+        if (n == 0) {
+            return;
         }
 
-        final DocIdAndVersion[] sortedResults = new DocIdAndVersion[n];
+        // Working copy of the batch: sorted by UID, then compacted in place as segments resolve entries.
+        // originalIndex maps each working position back to the caller's array index.
+        final BytesRef[] candidates = uids.clone();
+        final int[] originalIndex = new int[n];
+        for (int i = 0; i < n; i++) {
+            originalIndex[i] = i;
+        }
+        sortByUid(candidates, originalIndex, null, n);
+
         final PerThreadIDVersionAndSeqNoLookup[] lookups = getLookupState(reader, false);
         final List<LeafReaderContext> leaves = reader.leaves();
-        int remaining = n;
+        int count = n;
 
         // Iterate backwards: the most recently written segment is most likely to contain the current version.
-        for (int s = leaves.size() - 1; s >= 0 && remaining > 0; s--) {
+        for (int s = leaves.size() - 1; s >= 0 && count > 0; s--) {
             final LeafReaderContext leaf = leaves.get(s);
-            remaining -= lookups[leaf.ord].batchLookupVersion(leaf, sortedUids, sortedLoadSeqNo, sortedResults);
-        }
-
-        // Map sorted results back to the caller's original index order.
-        for (int i = 0; i < n; i++) {
-            results[order[i]] = sortedResults[i];
+            count = lookups[leaf.ord].batchLookupVersion(leaf, candidates, originalIndex, count, loadSeqNo, results);
         }
     }
 
     /**
-     * Resolves doc ID and version for a batch of time-series UIDs in a single forward pass through
-     * each segment's terms dictionary, amortizing seek overhead while exploiting per-segment
-     * timestamp ranges to skip segments that cannot contain a given UID.
+     * Resolves doc ID and version for a batch of time series UIDs, amortizing reader and seek overhead across
+     * the batch while exploiting per-segment timestamp ranges to skip segments that cannot contain a given UID.
      * <p>
      * Results are written into {@code results[i]} for each {@code uids[i]}; a null entry means the
-     * UID was not found. UIDs need not be pre-sorted; sorting is done internally.
+     * UID was not found. {@code results} is fully overwritten, and {@code uids} is not modified. UIDs need not
+     * be pre-sorted; sorting is done internally.
      * <p>
      * Segments are iterated in {@link org.elasticsearch.cluster.metadata.DataStream#TIMESERIES_LEAF_READERS_SORTER}
-     * forward order (descending maxTimestamp). UIDs whose timestamps exceed a segment's maxTimestamp
-     * are marked permanently not found without a terms lookup, because subsequent segments have even
-     * lower maxTimestamps and also cannot contain them.
+     * forward order (descending maxTimestamp), so the first segment's maxTimestamp bounds the entire reader. UIDs
+     * with a newer timestamp than that cannot exist in any segment, and are filtered out up front — before the
+     * batch is sorted and before any working array is allocated. That is the steady state for time series
+     * ingestion, where documents arrive with timestamps ahead of everything already searchable, so the common
+     * case costs one pass over {@code uids} and nothing else.
      *
      * @param uids          the UID terms to look up
      * @param ids           the document IDs corresponding to each UID; used to extract timestamps
@@ -231,51 +224,78 @@ public final class VersionsAndSeqNoResolver {
     ) throws IOException {
         final int n = uids.length;
         assert results.length == n && loadSeqNo.length == n && ids.length == n;
-
-        final long[] timestamps = new long[n];
-        for (int i = 0; i < n; i++) {
-            if (useSyntheticId) {
-                assert uids[i].equals(Uid.encodeId(ids[i]));
-                timestamps[i] = TsidExtractingIdFieldMapper.extractTimestampFromSyntheticId(uids[i]);
-            } else {
-                byte[] idAsBytes = Base64.getUrlDecoder().decode(ids[i]);
-                timestamps[i] = TsidExtractingIdFieldMapper.extractTimestampFromId(idAsBytes);
-            }
+        Arrays.fill(results, null);
+        if (n == 0) {
+            return;
         }
 
-        // Sort by UID so each segment can be scanned with a single forward pass.
-        final int[] order = sortByUid(uids);
-
-        final BytesRef[] sortedUids = new BytesRef[n];
-        final long[] sortedTimestamps = new long[n];
-        final boolean[] sortedLoadSeqNo = new boolean[n];
-        for (int i = 0; i < n; i++) {
-            sortedUids[i] = uids[order[i]];
-            sortedTimestamps[i] = timestamps[order[i]];
-            sortedLoadSeqNo[i] = loadSeqNo[order[i]];
-        }
-
-        final DocIdAndVersion[] sortedResults = new DocIdAndVersion[n];
         final PerThreadIDVersionAndSeqNoLookup[] lookups = getLookupState(reader, true);
         final List<LeafReaderContext> leaves = reader.leaves();
-        int remaining = n;
-
-        // Iterate in forward order: segments sorted by DataStream#TIMESERIES_LEAF_READERS_SORTER
-        // (descending maxTimestamp). For each segment, only process UIDs with timestamps in range.
-        long prevMaxTimestamp = Long.MAX_VALUE;
-        for (int s = 0; s < leaves.size() && remaining > 0; s++) {
-            final LeafReaderContext leaf = leaves.get(s);
-            assert prevMaxTimestamp >= lookups[leaf.ord].maxTimestamp;
-            prevMaxTimestamp = lookups[leaf.ord].maxTimestamp;
-            remaining -= lookups[leaf.ord].timeSeriesBatchLookupVersion(leaf, sortedUids, sortedTimestamps, sortedLoadSeqNo, sortedResults);
+        if (leaves.isEmpty()) {
+            return;
         }
 
-        // Map sorted results back to the caller's original index order, replacing the
-        // PERMANENTLY_NOT_FOUND sentinel (timestamp too new for all segments) with null.
+        // Segments without a @timestamp field (no-op or tombstone only) report Long.MAX_VALUE here, which
+        // disables the filter rather than wrongly excluding anything.
+        final long readerMaxTimestamp = lookups[leaves.get(0).ord].maxTimestamp;
+
+        BytesRef[] candidates = null;
+        long[] timestamps = null;
+        int[] originalIndex = null;
+        int count = 0;
         for (int i = 0; i < n; i++) {
-            final DocIdAndVersion r = sortedResults[i];
-            results[order[i]] = r == PERMANENTLY_NOT_FOUND ? null : r;
+            final long timestamp = extractTimestamp(uids[i], ids[i], useSyntheticId);
+            if (timestamp > readerMaxTimestamp) {
+                // Newer than every segment: definitively not indexed yet, results[i] stays null.
+                continue;
+            }
+            if (candidates == null) {
+                // Sized for the worst case from here on, so this allocates at most once per batch.
+                final int capacity = n - i;
+                candidates = new BytesRef[capacity];
+                timestamps = new long[capacity];
+                originalIndex = new int[capacity];
+            }
+            candidates[count] = uids[i];
+            timestamps[count] = timestamp;
+            originalIndex[count] = i;
+            count++;
         }
+        if (count == 0) {
+            return;
+        }
+
+        sortByUid(candidates, originalIndex, timestamps, count);
+
+        long prevMaxTimestamp = Long.MAX_VALUE;
+        for (int s = 0; s < leaves.size() && count > 0; s++) {
+            final LeafReaderContext leaf = leaves.get(s);
+            final PerThreadIDVersionAndSeqNoLookup lookup = lookups[leaf.ord];
+            // Segments without a @timestamp field sort last but report an unbounded range, so they are
+            // exempt from the monotonicity the skipping logic relies on.
+            final boolean bounded = lookup.maxTimestamp != Long.MAX_VALUE;
+            assert bounded == false || prevMaxTimestamp >= lookup.maxTimestamp
+                : "segments are not in descending maxTimestamp order: " + prevMaxTimestamp + " < " + lookup.maxTimestamp;
+            if (bounded) {
+                prevMaxTimestamp = lookup.maxTimestamp;
+            }
+            count = lookup.timeSeriesBatchLookupVersion(leaf, candidates, timestamps, originalIndex, count, loadSeqNo, results);
+        }
+    }
+
+    private static long extractTimestamp(BytesRef uid, String id, boolean useSyntheticId) {
+        if (useSyntheticId) {
+            assert uid.equals(Uid.encodeId(id));
+            return TsidExtractingIdFieldMapper.extractTimestampFromSyntheticId(uid);
+        }
+        if (TsidExtractingIdFieldMapper.isEncodedStandardId(uid)) {
+            // Read the timestamp straight out of the encoded uid: no base64 decode, no allocation.
+            final long timestamp = TsidExtractingIdFieldMapper.extractTimestampFromEncodedId(uid);
+            assert timestamp == TsidExtractingIdFieldMapper.extractTimestampFromId(Base64.getUrlDecoder().decode(id))
+                : "in-place timestamp extraction disagrees with the decoded id [" + id + "]";
+            return timestamp;
+        }
+        return TsidExtractingIdFieldMapper.extractTimestampFromId(Base64.getUrlDecoder().decode(id));
     }
 
     /**
@@ -375,33 +395,49 @@ public final class VersionsAndSeqNoResolver {
         return null;
     }
 
-    /** Returns an {@code order[]} permutation such that {@code uids[order[i]]} is in ascending order. */
-    private static int[] sortByUid(BytesRef[] uids) {
-        final int n = uids.length;
-        final int[] order = new int[n];
-        for (int i = 0; i < n; i++) {
-            order[i] = i;
+    /**
+     * Sorts the first {@code count} entries of {@code uids} into ascending order, carrying {@code originalIndex}
+     * and, when non-null, {@code timestamps} along with it so all three stay aligned.
+     * <p>
+     * Note that {@link IntroSorter#setPivot} must capture the pivot <i>value</i>, not its slot: the very next
+     * thing {@code IntroSorter} does is swap the pivot out of that slot.
+     */
+    private static void sortByUid(BytesRef[] uids, int[] originalIndex, @Nullable long[] timestamps, int count) {
+        if (count < 2) {
+            return;
         }
         new IntroSorter() {
-            private int pivot;
+            private BytesRef pivot;
 
             @Override
             protected void setPivot(int i) {
-                pivot = i;
+                pivot = uids[i];
             }
 
             @Override
             protected int comparePivot(int j) {
-                return uids[order[pivot]].compareTo(uids[order[j]]);
+                return pivot.compareTo(uids[j]);
+            }
+
+            @Override
+            protected int compare(int i, int j) {
+                return uids[i].compareTo(uids[j]);
             }
 
             @Override
             protected void swap(int i, int j) {
-                int tmp = order[i];
-                order[i] = order[j];
-                order[j] = tmp;
+                final BytesRef tmpUid = uids[i];
+                uids[i] = uids[j];
+                uids[j] = tmpUid;
+                final int tmpIndex = originalIndex[i];
+                originalIndex[i] = originalIndex[j];
+                originalIndex[j] = tmpIndex;
+                if (timestamps != null) {
+                    final long tmpTimestamp = timestamps[i];
+                    timestamps[i] = timestamps[j];
+                    timestamps[j] = tmpTimestamp;
+                }
             }
-        }.sort(0, n);
-        return order;
+        }.sort(0, count);
     }
 }

@@ -65,6 +65,9 @@ public class TsidExtractingIdFieldMapper extends IdFieldMapper {
 
     private static final long SEED = 0;
 
+    /** Length in bytes of a standard (non-synthetic) time series id, before base64 encoding. */
+    static final int STANDARD_ID_LENGTH = 20;
+
     public static BytesRef createField(DocumentParserContext context, RoutingHashBuilder routingBuilder, BytesRef tsid) {
         final long timestamp = DataStreamTimestampFieldMapper.extractTimestampValue(context.doc());
         String id;
@@ -139,7 +142,7 @@ public class TsidExtractingIdFieldMapper extends IdFieldMapper {
         Hash128 hash = new Hash128();
         MurmurHash3.hash128(tsid.bytes, tsid.offset, tsid.length, SEED, hash);
 
-        byte[] bytes = new byte[20];
+        byte[] bytes = new byte[STANDARD_ID_LENGTH];
         ByteUtils.writeIntLE(routingHash, bytes, 0);
         ByteUtils.writeLongLE(hash.h1, bytes, 4);
         ByteUtils.writeLongBE(timestamp, bytes, 12);   // Big Ending shrinks the inverted index by ~37%
@@ -148,10 +151,37 @@ public class TsidExtractingIdFieldMapper extends IdFieldMapper {
     }
 
     public static long extractTimestampFromId(byte[] id) {
-        assert id.length == 20;
+        assert id.length == STANDARD_ID_LENGTH;
         // id format: [4 bytes (basic hash routing fields), 8 bytes prefix of 128 murmurhash dimension fields, 8 bytes
         // @timestamp)
         return ByteUtils.readLongBE(id, 12);
+    }
+
+    /**
+     * Whether {@code uid} looks like a standard (non-synthetic) time series id that has been encoded with
+     * {@link Uid#encodeId}, and is therefore safe to pass to {@link #extractTimestampFromEncodedId}.
+     * <p>
+     * {@link Uid#encodeId} picks one of three encodings based on the shape of the id string. A standard time
+     * series id is always 27 base64-url characters, so it always takes the base64 branch, which stores the 20
+     * raw bytes verbatim plus at most one leading escape byte. No other encoding of a 27 character id can
+     * produce 20 or 21 bytes, so the length is enough to tell them apart.
+     */
+    public static boolean isEncodedStandardId(BytesRef uid) {
+        return uid.length == STANDARD_ID_LENGTH || uid.length == STANDARD_ID_LENGTH + 1;
+    }
+
+    /**
+     * Extracts the timestamp from a standard (non-synthetic) time series id that has already been encoded with
+     * {@link Uid#encodeId}, without decoding it back to its base64 form.
+     * <p>
+     * {@link #createId} writes the big-endian timestamp into the last 8 bytes of the id, and
+     * {@link Uid#encodeId} only ever prepends bytes, so the timestamp stays in the last 8 bytes of the encoded
+     * form. Reading it in place saves a base64 decode and a {@code byte[]} allocation per document, which
+     * matters when resolving a whole bulk batch.
+     */
+    public static long extractTimestampFromEncodedId(BytesRef uid) {
+        assert isEncodedStandardId(uid) : "not an encoded standard time series id [" + uid + "]";
+        return ByteUtils.readLongBE(uid.bytes, uid.offset + uid.length - Long.BYTES);
     }
 
     public static String createId(

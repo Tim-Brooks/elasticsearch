@@ -28,12 +28,15 @@ import org.elasticsearch.common.lucene.uid.VersionsAndSeqNoResolver.DocIdAndVers
 import org.elasticsearch.index.mapper.IdFieldMapper;
 import org.elasticsearch.index.mapper.ParsedDocument;
 import org.elasticsearch.index.mapper.SeqNoFieldMapper;
+import org.elasticsearch.index.mapper.Uid;
 import org.elasticsearch.index.mapper.VersionFieldMapper;
 import org.elasticsearch.test.ESTestCase;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 
 import static org.elasticsearch.index.seqno.SequenceNumbers.UNASSIGNED_PRIMARY_TERM;
 import static org.elasticsearch.index.seqno.SequenceNumbers.UNASSIGNED_SEQ_NO;
@@ -317,11 +320,9 @@ public class VersionLookupTests extends ESTestCase {
         dir.close();
     }
 
-    public void testBatchLookupSkipPathReusesSeek() throws Exception {
-        // Segment has "b" and "c" but not "a". The sorted lookup order is ["a", "b", "c"].
-        // seekCeil("a") lands on "b" (NOT_FOUND) and sets currentTerm="b".
-        // The next uid "b" matches currentTerm (cmp==0) and falls through directly to
-        // scanLiveDoc without issuing a second seek, exercising the skip path.
+    public void testBatchLookupInterleavedMissAndHit() throws Exception {
+        // Segment has "b" and "c" but not "a", so the batch alternates between misses and hits and the
+        // unresolved "a" has to survive compaction while "b" and "c" are removed from the batch.
         Directory dir = newDirectory();
         IndexWriter writer = newNoMergeWriter(dir);
         writer.addDocument(makeDoc("b", 2L, 20L, 1L));
@@ -608,6 +609,197 @@ public class VersionLookupTests extends ESTestCase {
         dir.close();
     }
 
+    /**
+     * The time series batch lookup reads the timestamp straight out of the {@link Uid#encodeId} form of the id
+     * rather than base64 decoding it. Exercise that with real encoded uids, including an id whose first byte
+     * forces {@link Uid#encodeId} to prepend an escape byte, which shifts every following byte along.
+     */
+    public void testBatchTimeSeriesLookupReadsTimestampFromEncodedUid() throws Exception {
+        Directory dir = newDirectory();
+        IndexWriter writer = newNoMergeWriter(dir);
+
+        // 0xFF as the first byte is >= Uid.BASE64_ESCAPE, so this one is stored with a leading escape byte.
+        String escapedId = makeTsdbId(0xFF, 2_000L);
+        String plainId = makeTsdbId(1, 1_000L);
+        assertEquals(21, Uid.encodeId(escapedId).length);
+        assertEquals(20, Uid.encodeId(plainId).length);
+
+        writer.addDocument(makeDocWithEncodedId(escapedId, 2_000L, 10L, 1L, 1L));
+        writer.addDocument(makeDocWithEncodedId(plainId, 1_000L, 20L, 2L, 1L));
+        DirectoryReader reader = DirectoryReader.open(writer);
+
+        String missingId = makeTsdbId(2, 1_500L); // in range for the segment, but not indexed
+        String[] ids = { escapedId, plainId, missingId };
+        BytesRef[] uids = new BytesRef[ids.length];
+        for (int i = 0; i < ids.length; i++) {
+            uids[i] = Uid.encodeId(ids[i]);
+        }
+        DocIdAndVersion[] results = new DocIdAndVersion[ids.length];
+        VersionsAndSeqNoResolver.timeSeriesBatchLoadDocIdAndVersion(reader, uids, ids, false, new boolean[ids.length], results);
+
+        assertNotNull(results[0]);
+        assertEquals(10L, results[0].version);
+        assertNotNull(results[1]);
+        assertEquals(20L, results[1].version);
+        assertNull(results[2]);
+
+        reader.close();
+        writer.close();
+        dir.close();
+    }
+
+    /**
+     * Documents newer than every segment are filtered out before the batch is sorted, which is the fast path for
+     * steady time series ingestion. Check that it agrees with the per-document lookup and that a mixed batch
+     * still resolves the documents that do fall inside the reader's range.
+     */
+    public void testBatchTimeSeriesLookupAllNewerThanReader() throws Exception {
+        Directory dir = newDirectory();
+        IndexWriter writer = newNoMergeWriter(dir);
+        String indexedId = makeTsdbId(1, 1_000L);
+        writer.addDocument(makeDocWithTimestamp(indexedId, 1_000L, 5L, 1L, 1L));
+        DirectoryReader reader = DirectoryReader.open(writer);
+
+        // Every id is newer than the segment's maxTimestamp of 1000.
+        DocIdAndVersion[] allNew = batchTimeSeriesLookup(reader, makeTsdbId(2, 1_001L), makeTsdbId(3, 5_000L), makeTsdbId(4, 9_000L));
+        for (DocIdAndVersion result : allNew) {
+            assertNull(result);
+        }
+
+        DocIdAndVersion[] mixed = batchTimeSeriesLookup(reader, makeTsdbId(5, 9_000L), indexedId, makeTsdbId(6, 8_000L));
+        assertNull(mixed[0]);
+        assertNotNull(mixed[1]);
+        assertEquals(5L, mixed[1].version);
+        assertNull(mixed[2]);
+
+        reader.close();
+        writer.close();
+        dir.close();
+    }
+
+    /**
+     * Batches are compacted in place as segments resolve entries, and the surviving entries have to stay sorted and
+     * aligned with the caller's array. Cross-check a randomized batch against the per-document lookups, which take a
+     * completely different path through the same segments.
+     */
+    public void testBatchLookupMatchesSingleDocumentLookup() throws Exception {
+        Directory dir = newDirectory();
+        IndexWriter writer = newNoMergeWriter(dir);
+
+        // Give every document a distinct version, seqNo and primaryTerm so that reading the wrong doc's doc values
+        // cannot go unnoticed.
+        final int segments = randomIntBetween(1, 6);
+        final List<String> indexed = new ArrayList<>();
+        for (int s = 0; s < segments; s++) {
+            for (int d = 0; d < randomIntBetween(1, 10); d++) {
+                String id = "id-" + randomAlphaOfLength(8);
+                indexed.add(id);
+                long n = indexed.size();
+                writer.addDocument(makeDoc(id, n, 1000 + n, 2000 + n));
+            }
+            writer.flush();
+        }
+        DirectoryReader reader = DirectoryReader.open(writer);
+
+        // A mix of indexed and never-indexed ids, in arbitrary order, with duplicates allowed. loadSeqNo varies per
+        // entry so that the cached doc values iterators are created lazily part-way through the batch.
+        final int lookupCount = randomIntBetween(1, 40);
+        final String[] ids = new String[lookupCount];
+        final BytesRef[] uids = new BytesRef[lookupCount];
+        final boolean[] loadSeqNo = new boolean[lookupCount];
+        for (int i = 0; i < lookupCount; i++) {
+            ids[i] = randomBoolean() ? randomFrom(indexed) : "missing-" + randomAlphaOfLength(8);
+            uids[i] = new BytesRef(ids[i]);
+            loadSeqNo[i] = randomBoolean();
+        }
+
+        DocIdAndVersion[] batch = new DocIdAndVersion[lookupCount];
+        VersionsAndSeqNoResolver.batchLoadDocIdAndVersion(reader, uids, loadSeqNo, batch);
+        assertBatchMatchesSingleLookups(ids, batch, i -> VersionsAndSeqNoResolver.loadDocIdAndVersion(reader, uids[i], loadSeqNo[i]));
+
+        reader.close();
+        writer.close();
+        dir.close();
+    }
+
+    /**
+     * The time series counterpart of {@link #testBatchLookupMatchesSingleDocumentLookup}, cross-checked against
+     * {@link VersionsAndSeqNoResolver#timeSeriesLoadDocIdAndVersion}. Segments are written newest-first so they are
+     * already in the descending maxTimestamp order that {@link DataStream#TIMESERIES_LEAF_READERS_SORTER} produces.
+     */
+    public void testBatchTimeSeriesLookupMatchesSingleDocumentLookup() throws Exception {
+        Directory dir = newDirectory();
+        IndexWriter writer = newNoMergeWriter(dir);
+
+        final int segments = randomIntBetween(1, 6);
+        final List<String> indexed = new ArrayList<>();
+        long timestamp = segments * 1000L;
+        for (int s = 0; s < segments; s++) {
+            for (int d = 0; d < randomIntBetween(1, 10); d++) {
+                long docTimestamp = timestamp + randomIntBetween(0, 999);
+                String id = makeTsdbId(randomIntBetween(0, 0xFF), docTimestamp);
+                indexed.add(id);
+                // Distinct version, seqNo and primaryTerm per document, so a doc values misread cannot go unnoticed.
+                long n = indexed.size();
+                writer.addDocument(makeDocWithEncodedId(id, docTimestamp, n, 1000 + n, 2000 + n));
+            }
+            writer.flush();
+            timestamp -= 1000L;
+        }
+        DirectoryReader reader = DirectoryReader.open(writer);
+
+        // Mix ids that are indexed, that predate every segment, and that postdate every segment.
+        final int lookupCount = randomIntBetween(1, 40);
+        final String[] ids = new String[lookupCount];
+        for (int i = 0; i < lookupCount; i++) {
+            ids[i] = switch (randomIntBetween(0, 2)) {
+                case 0 -> randomFrom(indexed);
+                case 1 -> makeTsdbId(randomIntBetween(0, 0xFF), randomLongBetween(segments * 1000L + 1000L, Long.MAX_VALUE / 2));
+                case 2 -> makeTsdbId(randomIntBetween(0, 0xFF), randomLongBetween(0, 999));
+                default -> throw new AssertionError("unreachable");
+            };
+        }
+
+        final BytesRef[] uids = new BytesRef[lookupCount];
+        final boolean[] loadSeqNo = new boolean[lookupCount];
+        for (int i = 0; i < lookupCount; i++) {
+            uids[i] = Uid.encodeId(ids[i]);
+            loadSeqNo[i] = randomBoolean();
+        }
+
+        DocIdAndVersion[] batch = new DocIdAndVersion[lookupCount];
+        VersionsAndSeqNoResolver.timeSeriesBatchLoadDocIdAndVersion(reader, uids, ids, false, loadSeqNo, batch);
+        assertBatchMatchesSingleLookups(
+            ids,
+            batch,
+            i -> VersionsAndSeqNoResolver.timeSeriesLoadDocIdAndVersion(reader, uids[i], ids[i], loadSeqNo[i], false)
+        );
+
+        reader.close();
+        writer.close();
+        dir.close();
+    }
+
+    private interface SingleLookup {
+        DocIdAndVersion lookup(int i) throws IOException;
+    }
+
+    private static void assertBatchMatchesSingleLookups(String[] ids, DocIdAndVersion[] batch, SingleLookup single) throws IOException {
+        for (int i = 0; i < ids.length; i++) {
+            DocIdAndVersion expected = single.lookup(i);
+            if (expected == null) {
+                assertNull("expected no result for [" + ids[i] + "]", batch[i]);
+                continue;
+            }
+            assertNotNull("expected a result for [" + ids[i] + "]", batch[i]);
+            assertEquals(ids[i], expected.docId, batch[i].docId);
+            assertEquals(ids[i], expected.docBase, batch[i].docBase);
+            assertEquals(ids[i], expected.version, batch[i].version);
+            assertEquals(ids[i], expected.seqNo, batch[i].seqNo);
+            assertEquals(ids[i], expected.primaryTerm, batch[i].primaryTerm);
+        }
+    }
+
     private static IndexWriter newNoMergeWriter(Directory dir) throws IOException {
         return new IndexWriter(dir, new IndexWriterConfig(Lucene.STANDARD_ANALYZER).setMergePolicy(NoMergePolicy.INSTANCE));
     }
@@ -656,6 +848,20 @@ public class VersionLookupTests extends ESTestCase {
     private static Document makeDocWithTimestamp(String id, long timestamp, long version, long seqNo, long primaryTerm) {
         Document doc = new Document();
         doc.add(new StringField(IdFieldMapper.NAME, id, Field.Store.YES));
+        doc.add(new LongPoint(DataStream.TIMESTAMP_FIELD_NAME, timestamp));
+        doc.add(new NumericDocValuesField(VersionFieldMapper.NAME, version));
+        doc.add(new NumericDocValuesField(SeqNoFieldMapper.NAME, seqNo));
+        doc.add(new NumericDocValuesField(SeqNoFieldMapper.PRIMARY_TERM_NAME, primaryTerm));
+        return doc;
+    }
+
+    /**
+     * As {@link #makeDocWithTimestamp}, but indexing the {@link Uid#encodeId} form of the id the way the real
+     * indexing path does, so that lookups can be driven with encoded uids.
+     */
+    private static Document makeDocWithEncodedId(String id, long timestamp, long version, long seqNo, long primaryTerm) {
+        Document doc = new Document();
+        doc.add(new StringField(IdFieldMapper.NAME, Uid.encodeId(id), Field.Store.YES));
         doc.add(new LongPoint(DataStream.TIMESTAMP_FIELD_NAME, timestamp));
         doc.add(new NumericDocValuesField(VersionFieldMapper.NAME, version));
         doc.add(new NumericDocValuesField(SeqNoFieldMapper.NAME, seqNo));

@@ -55,6 +55,17 @@ final class PerThreadIDVersionAndSeqNoLookup {
     /** Reused for iteration (when the term exists) */
     private PostingsEnum docsEnum;
 
+    /**
+     * Doc values iterators reused across the hits of a batch lookup, see {@link #readVersionInfo}. Doc values are
+     * forward-only, so these are only valid while the doc ids we resolve are non-decreasing; {@link #dvDocId} tracks
+     * the furthest doc we advanced to so we know when to start over.
+     */
+    private LeafReader dvReader;
+    private NumericDocValues versionDV;
+    private NumericDocValues seqNoDV;
+    private NumericDocValues primaryTermDV;
+    private int dvDocId = -1;
+
     /** used for assertions to make sure class usage meets assumptions */
     private final Object readerKey;
 
@@ -183,201 +194,171 @@ final class PerThreadIDVersionAndSeqNoLookup {
     }
 
     /**
-     * Resolves version info for multiple UIDs in a single forward pass through this segment's terms dictionary.
+     * Resolves version info for a batch of UIDs against this segment's terms dictionary using
+     * {@link TermsEnum#seekExact} per UID.
      * <p>
-     * {@code sortedUids} must be provided in ascending order. For each uid at sorted position {@code i},
-     * the result is written into {@code results[i]} if found; a null entry means not found in this segment.
+     * The batch is held in the parallel arrays {@code uids} / {@code originalIndex}, whose first
+     * {@code count} entries are the UIDs still looking for a home, in ascending lexicographic order.
+     * {@code originalIndex[i]} is the position of {@code uids[i]} in the caller's {@code loadSeqNo} and
+     * {@code results} arrays. Sorted order improves terms dictionary cache locality across consecutive
+     * lookups, even though the forward-scan amortisation of {@code seekCeil} is not used.
      * <p>
-     * {@code results} is an in/out parameter: entries that are already non-null are treated as resolved by
-     * a newer segment and are skipped without touching the TermsEnum. This lets the caller accumulate
-     * results across segments in a single shared array without a separate merge pass, and ensures that
-     * the newest segment's version wins naturally.
+     * UIDs resolved by this segment are written to {@code results} and then <b>compacted out</b> of
+     * {@code uids} / {@code originalIndex} in place, preserving sort order. The caller feeds the returned
+     * count into the next segment, so each segment only walks the UIDs that are still unresolved rather
+     * than rescanning the whole batch. Since the caller visits segments newest-first, the first segment to
+     * produce a hit wins, which is the behaviour we want.
+     * <p>
+     * Using {@code seekExact} rather than {@code seekCeil} matters a great deal here: for time series
+     * indices the {@code _id} terms are wrapped in a Bloom filter that only intercepts {@code seekExact}
+     * (see {@code DelegatingBloomFilterFieldsProducer}), and even without one it lets the block-tree FST
+     * reject absent terms before loading any block from disk. Absent terms are the dominant case for
+     * insert-heavy workloads.
      *
-     * @return the number of newly resolved UIDs
+     * @return the number of UIDs left unresolved, i.e. the new {@code count} for the next segment
      */
-    int batchLookupVersion(LeafReaderContext context, BytesRef[] sortedUids, boolean[] loadSeqNo, DocIdAndVersion[] results)
-        throws IOException {
+    int batchLookupVersion(
+        LeafReaderContext context,
+        BytesRef[] uids,
+        int[] originalIndex,
+        int count,
+        boolean[] loadSeqNo,
+        DocIdAndVersion[] results
+    ) throws IOException {
         if (termsEnum == null) {
-            return 0;
+            return count;
         }
         assert readerKey == null || context.reader().getCoreCacheHelper().getKey().equals(readerKey)
             : "context's reader is not the same as the reader class was initialized on.";
 
         final Bits liveDocs = context.reader().getLiveDocs();
-        int resolved = 0;
-        // currentTerm tracks where the TermsEnum is positioned after a NOT_FOUND seek, allowing
-        // subsequent UIDs that fall before it to be skipped without issuing another seek.
-        BytesRef currentTerm = null;
+        int remaining = 0;
 
-        for (int i = 0; i < sortedUids.length; i++) {
-            if (results[i] != null) {
-                // Already resolved by a newer segment — skip without touching the TermsEnum.
-                continue;
-            }
-
-            final BytesRef uid = sortedUids[i];
-
-            if (currentTerm != null) {
-                final int cmp = uid.compareTo(currentTerm);
-                if (cmp < 0) {
-                    // uid falls before the term we already seeked past — not in this segment.
-                    continue;
-                } else if (cmp == 0) {
-                    // The previous NOT_FOUND seek landed exactly on this uid, so the TermsEnum
-                    // is already positioned at it. Fall through to scan postings.
-                } else {
-                    currentTerm = null; // uid is ahead of currentTerm — need a fresh seek.
-                }
-            }
-
-            if (currentTerm == null) {
-                final TermsEnum.SeekStatus status = termsEnum.seekCeil(uid);
-                if (status == TermsEnum.SeekStatus.END) {
-                    break; // exhausted this segment's terms
-                }
-                if (status == TermsEnum.SeekStatus.NOT_FOUND) {
-                    // TermsEnum is now positioned at the first term > uid.
-                    // Save it so subsequent UIDs between uid and this term can be skipped cheaply.
-                    currentTerm = BytesRef.deepCopyOf(termsEnum.term());
+        for (int i = 0; i < count; i++) {
+            final BytesRef uid = uids[i];
+            if (termsEnum.seekExact(uid)) {
+                final int docID = scanLiveDoc(liveDocs);
+                if (docID != DocIdSetIterator.NO_MORE_DOCS) {
+                    final int original = originalIndex[i];
+                    results[original] = readVersionInfo(context, docID, loadSeqNo[original]);
                     continue;
                 }
-                // FOUND: TermsEnum is positioned at uid; clear currentTerm and scan postings below.
-                currentTerm = null;
             }
-
-            final int docID = scanLiveDoc(liveDocs);
-            if (docID != DocIdSetIterator.NO_MORE_DOCS) {
-                final boolean ls = loadSeqNo[i];
-                final long seqNo = ls ? readNumericDocValues(context.reader(), SeqNoFieldMapper.NAME, docID) : UNASSIGNED_SEQ_NO;
-                final long term = ls
-                    ? readNumericDocValues(context.reader(), SeqNoFieldMapper.PRIMARY_TERM_NAME, docID)
-                    : UNASSIGNED_PRIMARY_TERM;
-                final long version = readNumericDocValues(context.reader(), VersionFieldMapper.NAME, docID);
-                results[i] = new DocIdAndVersion(docID, version, seqNo, term, context.reader(), context.docBase);
-                resolved++;
+            if (remaining != i) {
+                uids[remaining] = uid;
+                originalIndex[remaining] = originalIndex[i];
             }
+            remaining++;
         }
 
-        return resolved;
+        return remaining;
     }
 
     /**
-     * Resolves version info for multiple time-series UIDs in a single forward pass through this
-     * segment's terms dictionary, using the segment's timestamp range to skip UIDs that cannot be
-     * in this segment.
+     * Resolves version info for a batch of time series UIDs against this segment's terms dictionary,
+     * using the segment's timestamp range to avoid lookups for UIDs that cannot be in this segment.
      * <p>
-     * {@code sortedUids} must be provided in ascending lexicographic order; {@code sortedTimestamps}
-     * must be aligned with {@code sortedUids}. For each uid at sorted position {@code i}, if
-     * {@code results[i]} is null and the uid's timestamp falls within this segment's
-     * {@link #minTimestamp}/{@link #maxTimestamp} range, the uid is looked up and the result is written
-     * into {@code results[i]} if found.
-     * <p>
-     * UIDs whose timestamps exceed {@code maxTimestamp} are permanently resolved by storing
-     * {@link VersionsAndSeqNoResolver#PERMANENTLY_NOT_FOUND} in {@code results[i]}, without a terms
-     * lookup, because later segments in
-     * {@link org.elasticsearch.cluster.metadata.DataStream#TIMESERIES_LEAF_READERS_SORTER} forward
-     * order have even lower maxTimestamps, and therefore also cannot contain them. UIDs with
-     * timestamps below {@code minTimestamp} are skipped for this segment but remain null so that
-     * later segments may resolve them.
+     * The batch layout is the same as {@link #batchLookupVersion}, with {@code timestamps} carrying the
+     * timestamp of each UID, and is likewise compacted in place as entries are resolved. An entry is
+     * dropped from the batch when it is found in this segment, and also when its timestamp exceeds
+     * {@link #maxTimestamp}: the caller iterates segments in
+     * {@link org.elasticsearch.cluster.metadata.DataStream#TIMESERIES_LEAF_READERS_SORTER} order, so every
+     * later segment has an even lower maxTimestamp and cannot contain it either. Entries whose timestamp
+     * falls below {@link #minTimestamp} are kept, since a later (older) segment may still hold them.
      *
-     * @return the number of newly resolved UIDs (found in this segment + permanently not found)
+     * @return the number of UIDs left unresolved, i.e. the new {@code count} for the next segment
      */
     int timeSeriesBatchLookupVersion(
         LeafReaderContext context,
-        BytesRef[] sortedUids,
-        long[] sortedTimestamps,
+        BytesRef[] uids,
+        long[] timestamps,
+        int[] originalIndex,
+        int count,
         boolean[] loadSeqNo,
         DocIdAndVersion[] results
     ) throws IOException {
         assert loadedTimestampRange : "timeSeriesBatchLookupVersion requires loadedTimestampRange=true";
         if (termsEnum == null) {
-            return 0;
+            return count;
         }
         assert readerKey == null || context.reader().getCoreCacheHelper().getKey().equals(readerKey)
             : "context's reader is not the same as the reader class was initialized on.";
 
         final Bits liveDocs = context.reader().getLiveDocs();
-        int resolved = 0;
-        boolean termsExhausted = false;
-        // currentTerm tracks where the TermsEnum is positioned after a NOT_FOUND seek, allowing
-        // subsequent in-range UIDs that fall before it to be skipped without issuing another seek.
-        BytesRef currentTerm = null;
+        int remaining = 0;
 
-        for (int i = 0; i < sortedUids.length; i++) {
-            if (results[i] != null) {
-                continue;
-            }
-
-            final long ts = sortedTimestamps[i];
+        for (int i = 0; i < count; i++) {
+            final long ts = timestamps[i];
             if (ts > maxTimestamp) {
-                // Timestamp is newer than any doc in this or subsequent segments (maxTimestamp
-                // decreases monotonically in TIME_SERIES forward iteration order).
-                results[i] = VersionsAndSeqNoResolver.PERMANENTLY_NOT_FOUND;
-                resolved++;
+                // Newer than any doc in this or any subsequent segment: permanently not found, drop it.
                 continue;
             }
-            if (ts < minTimestamp) {
-                // Timestamp predates this segment's range; may be in a later (older) segment.
-                continue;
-            }
-
-            // Timestamp is in range for this segment — look up the UID in the terms dictionary.
-            if (termsExhausted) {
-                // No more terms in this segment; continue to handle ts > maxTimestamp cases.
-                continue;
-            }
-
-            final BytesRef uid = sortedUids[i];
-
-            if (currentTerm != null) {
-                final int cmp = uid.compareTo(currentTerm);
-                if (cmp < 0) {
-                    // uid falls before the term we already seeked past — not in this segment.
-                    continue;
-                } else if (cmp == 0) {
-                    // The previous NOT_FOUND seek landed exactly on this uid, so the TermsEnum
-                    // is already positioned at it. Fall through to scan postings.
-                } else {
-                    currentTerm = null; // uid is ahead of currentTerm — need a fresh seek.
-                }
-            }
-
-            if (currentTerm == null) {
-                final TermsEnum.SeekStatus status = termsEnum.seekCeil(uid);
-                if (status == TermsEnum.SeekStatus.END) {
-                    // Cannot break here (unlike batchLookupVersion): remaining UIDs may still
-                    // have ts > maxTimestamp and need to be marked permanently not found.
-                    termsExhausted = true;
+            // A timestamp below minTimestamp predates this segment but may land in a later (older) one,
+            // so skip the terms lookup but keep the entry in the batch.
+            if (ts >= minTimestamp && termsEnum.seekExact(uids[i])) {
+                final int docID = scanLiveDoc(liveDocs);
+                if (docID != DocIdSetIterator.NO_MORE_DOCS) {
+                    final int original = originalIndex[i];
+                    results[original] = readVersionInfo(context, docID, loadSeqNo[original]);
                     continue;
                 }
-                if (status == TermsEnum.SeekStatus.NOT_FOUND) {
-                    // TermsEnum is now positioned at the first term > uid.
-                    // Save it so subsequent in-range UIDs before it can be skipped cheaply.
-                    currentTerm = BytesRef.deepCopyOf(termsEnum.term());
-                    continue;
-                }
-                // FOUND: TermsEnum is positioned at uid; clear currentTerm and scan postings below.
-                currentTerm = null;
             }
-
-            final int docID = scanLiveDoc(liveDocs);
-            if (docID != DocIdSetIterator.NO_MORE_DOCS) {
-                final boolean ls = loadSeqNo[i];
-                final long seqNo = ls ? readNumericDocValues(context.reader(), SeqNoFieldMapper.NAME, docID) : UNASSIGNED_SEQ_NO;
-                final long term = ls
-                    ? readNumericDocValues(context.reader(), SeqNoFieldMapper.PRIMARY_TERM_NAME, docID)
-                    : UNASSIGNED_PRIMARY_TERM;
-                final long version = readNumericDocValues(context.reader(), VersionFieldMapper.NAME, docID);
-                results[i] = new DocIdAndVersion(docID, version, seqNo, term, context.reader(), context.docBase);
-                resolved++;
+            if (remaining != i) {
+                uids[remaining] = uids[i];
+                timestamps[remaining] = ts;
+                originalIndex[remaining] = originalIndex[i];
             }
+            remaining++;
         }
 
-        return resolved;
+        return remaining;
+    }
+
+    /**
+     * Reads the version (and optionally seqNo/primaryTerm) doc values for a matched doc, reusing the doc values
+     * iterators across the hits of a batch where possible.
+     * <p>
+     * {@link LeafReader#getNumericDocValues} is not free — it hashes the field name and builds a fresh iterator —
+     * and the naive version pays it three times per hit. Doc values iterators are forward-only, so the cached ones
+     * can only be reused while doc ids do not go backwards; that holds often enough to be worth it because the
+     * batch is scanned in {@code _id} order, which for time series indices tracks the index sort closely.
+     */
+    private DocIdAndVersion readVersionInfo(LeafReaderContext context, int docID, boolean loadSeqNo) throws IOException {
+        final LeafReader reader = context.reader();
+        if (reader != dvReader || docID < dvDocId) {
+            dvReader = reader;
+            versionDV = null;
+            seqNoDV = null;
+            primaryTermDV = null;
+        }
+        dvDocId = docID;
+
+        if (versionDV == null) {
+            versionDV = reader.getNumericDocValues(VersionFieldMapper.NAME);
+        }
+        final long version = advanceAndGet(versionDV, VersionFieldMapper.NAME, docID);
+
+        final long seqNo;
+        final long primaryTerm;
+        if (loadSeqNo) {
+            if (seqNoDV == null) {
+                seqNoDV = reader.getNumericDocValues(SeqNoFieldMapper.NAME);
+                primaryTermDV = reader.getNumericDocValues(SeqNoFieldMapper.PRIMARY_TERM_NAME);
+            }
+            seqNo = advanceAndGet(seqNoDV, SeqNoFieldMapper.NAME, docID);
+            primaryTerm = advanceAndGet(primaryTermDV, SeqNoFieldMapper.PRIMARY_TERM_NAME, docID);
+        } else {
+            seqNo = UNASSIGNED_SEQ_NO;
+            primaryTerm = UNASSIGNED_PRIMARY_TERM;
+        }
+        return new DocIdAndVersion(docID, version, seqNo, primaryTerm, reader, context.docBase);
     }
 
     private static long readNumericDocValues(LeafReader reader, String field, int docId) throws IOException {
-        final NumericDocValues dv = reader.getNumericDocValues(field);
+        return advanceAndGet(reader.getNumericDocValues(field), field, docId);
+    }
+
+    private static long advanceAndGet(NumericDocValues dv, String field, int docId) throws IOException {
         if (dv == null || dv.advanceExact(docId) == false) {
             assert false : "document [" + docId + "] does not have docValues for [" + field + "]";
             throw new IllegalStateException("document [" + docId + "] does not have docValues for [" + field + "]");
